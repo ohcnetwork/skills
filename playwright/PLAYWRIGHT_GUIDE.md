@@ -194,6 +194,54 @@ await page.getByRole("option", { name: "Active" }).first().click();
 (e.g. `"Status"` also matches `"Operational Status"`). Use `.first()` on options when
 multiple matches are possible.
 
+#### Gotcha: bare `<Label>` + `<SelectTrigger>` has no accessible name
+
+`getByRole("combobox", { name })` only works when the label is programmatically
+associated with the trigger. Two shadcn patterns coexist in this codebase:
+
+- **`<FormField>` + `<FormLabel>` + `<SelectTrigger>`** — auto-wires `htmlFor`/`id`.
+  `getByRole("combobox", { name: "Status" })` works.
+- **Bare `<Label>` + `<SelectTrigger>`** (no `FormField` wrapper) — no association.
+  The trigger's accessible name is its current value (e.g. `"Planned"`), **not** the
+  visible label. Role+name lookups silently fail with `toBeVisible` timeout or "0
+  elements found", even though the element is clearly in the DOM.
+
+Confirm by inspecting `<button role="combobox">`: if it has no `aria-labelledby`
+and no `id` matched by a `<label for=...>`, you're in this case.
+
+Fix — anchor on the label and walk to its parent wrapper:
+
+```typescript
+function comboboxByLabel(page: Page, labelText: string) {
+  return page
+    .locator('label[data-slot="label"]')
+    .filter({ hasText: new RegExp(`^${labelText}$`) })
+    .locator("xpath=..")
+    .getByRole("combobox");
+}
+
+await comboboxByLabel(page, "Encounter Status").click();
+await page.getByRole("option", { name: "Cancelled", exact: true }).click();
+```
+
+Use an anchored regex (`^...$`) so the filter doesn't substring-match a sibling
+label (e.g. "Encounter Status" vs "Encounter Class").
+
+#### Gotcha: `filter({ hasText })` matches descendant text, not direct content
+
+```typescript
+// BAD: matches every ancestor div whose subtree contains "Encounter Status"
+// → strict mode violation, multiple comboboxes resolved
+page.locator("div.space-y-2")
+  .filter({ hasText: "Encounter Status" })
+  .getByRole("combobox");
+```
+
+`hasText` checks the full text content of the locator's subtree, so any ancestor
+of the labeled wrapper also matches. Anchor on the label element itself (see
+gotcha above) or use `filter({ has: page.locator(...) })` with a precise child
+locator.
+
 ### Radio Button
 
 ```typescript

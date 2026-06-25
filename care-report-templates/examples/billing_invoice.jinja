@@ -1,0 +1,241 @@
+{# ============================================================
+   DISCHARGE BILL — Account Context (account_base)
+
+   Demonstrates:
+   - Account context with patient/facility via account.patient, account.facility
+   - primary_encounter for admission/discharge dates, bed, care team
+   - category_charge_items_summary iteration (charge items + returned items)
+   - Monetary component filtering (unit_price_components with Base type)
+   - Payment reconciliations grouped by reconciliation_type
+   - Namespace for running totals across loop scopes
+   - Account summary totals (total_gross, total_paid, total_balance)
+   - Currency/float formatting for decimal string fields
+   ============================================================ #}
+
+{% set report_title = "Discharge Bill" %}
+{% set logo_img = "https://example.com/logo.webp" %}
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <style>
+        @page { size: A4; margin: 140px 40px 80px 40px; }
+        body { font-family: "Times New Roman", Times, serif; margin: 0; padding: 0; font-size: 12px; line-height: 1.6; }
+        h1, h2, h3 { color: #2E8B57; }
+        h2 { border-bottom: 1px solid #333; }
+        table { width: 100%; margin: 10px 0 20px 0; border: none; line-height: 1.2; }
+        th, td { border: 1px solid #ddd; padding: 4px 8px; text-align: left; font-size: 10px; }
+        .no-border, .no-border th, .no-border td { border: none !important; padding: 3px; }
+        .no-border th { background-color: transparent !important; }
+        .note-text { font-style: italic; font-size: 8px; margin-top: 12px; }
+        .footer { margin-top: 8px; border-top: 1px solid #333; font-size: 8px; color: #666; text-align: center; }
+        .separator { border-top: 1px solid #333; margin: 10px 0; }
+
+        .header { position: fixed; top: -150px; left: 0; right: 0; height: 120px; padding: 10px; display: flex; justify-content: space-between; align-items: center; background: white; z-index: 2; }
+        .header-title { flex-grow: 1; }
+        .header-title h1 { margin: 0; border: none; padding: 0; font-size: 24px; color: #2E8B57; }
+        .content { position: relative; z-index: 5; margin-top: -40px; }
+
+        .invoice-row { display: flex; padding: 1px 0; font-size: 10px; }
+        .invoice-header { font-weight: bold; border-bottom: 1px solid #ddd; border-top: 1px solid #ddd; }
+        .category-row { font-weight: 600; border-bottom: 1px solid #f5f5f5; border-top: 1px solid #f5f5f5; }
+        .col-date { width: 15%; }
+        .col-title { width: 35%; }
+        .col-status { width: 15%; }
+        .col-rate { width: 15%; }
+        .col-qty { width: 10%; display: flex; justify-content: center; }
+        .col-amount { width: 15%; display: flex; justify-content: right; }
+        .col-invoice { width: 20%; }
+        .col-method { width: 25%; }
+        .col-full { width: 100%; display: flex; justify-content: space-between; }
+        .net-total { display: flex; justify-content: right; font-weight: bold; font-size: 10px; }
+        .billed-row { color: #a10000; }
+        .account-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; column-gap: 10px; align-items: center; }
+        .col-account-amount { text-align: center; }
+        .summary-box { page-break-inside: avoid; }
+        .payment-group { display: flex; width: 70%; justify-content: space-between; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-title">
+            <h1 style="text-align: left;">{{ account.facility.name }}</h1>
+            <div style="text-align: left; font-size: 10px;">
+                {{ account.facility.address }}
+                <p>{{ account.facility.phone_number }}</p>
+            </div>
+        </div>
+        <img alt="Logo" src="{{ logo_img }}" style="height: 100px; width: auto;">
+    </div>
+
+    <div class="content">
+        <h2 style="text-align: center;">{{ report_title }}</h2>
+
+        {# ---- Patient Info (from account context) ---- #}
+        <table class="no-border">
+            <tr>
+                <th>Name</th>
+                <td>{{ account.patient.name }}</td>
+                <th>Date</th>
+                <td>{{ current_date() }}</td>
+            </tr>
+            {% set official_identifiers = account.patient.instance_identifiers | selectattr('config.use', 'equalto', 'Official') | list %}
+            <tr>
+                <th>Age</th>
+                <td>{{ account.patient.age }}</td>
+                {% if official_identifiers | length > 0 %}
+                <th>{{ official_identifiers[0].config.display }}</th>
+                <td>{{ official_identifiers[0].value }}</td>
+                {% endif %}
+            </tr>
+            <tr>
+                <th>Gender</th>
+                <td>{{ account.patient.gender }}</td>
+                <th>Admission Date/Time</th>
+                <td>{% if account.primary_encounter %}{{ account.primary_encounter.start_time | datetime }}{% endif %}</td>
+            </tr>
+            <tr>
+                <th>Address</th>
+                <td>{{ account.patient.address }}</td>
+                <th>Discharge Date/Time</th>
+                <td>{% if account.primary_encounter %}{{ account.primary_encounter.end_time | datetime }}{% endif %}</td>
+            </tr>
+            <tr>
+                <th>Bed</th>
+                <td>{% if account.primary_encounter %}{{ account.primary_encounter.current_location.name }}{% endif %}</td>
+            </tr>
+        </table>
+
+        {# ---- Charge Items by Category ---- #}
+        <div class="invoice-row invoice-header">
+            <div class="col-date">Date</div>
+            <div class="col-invoice">Invoice</div>
+            <div class="col-title">Title</div>
+            <div class="col-status">Status</div>
+            <div class="col-rate">Rate</div>
+            <div class="col-qty">Qty</div>
+            <div class="col-amount">Amount</div>
+        </div>
+
+        {% set ns = namespace(net_total=0) %}
+        {% for cat in account.category_charge_items_summary.category_charge_items %}
+        <div class="invoice-row category-row">
+            <div class="col-full">
+                <div>{{ cat.category.title }}</div>
+                <div>{{ cat.total_charge_items_price | currency }}</div>
+            </div>
+        </div>
+        {% for ci in cat.charge_items %}
+        <div class="invoice-row {% if ci.status in ['Billed', 'Billable'] %}billed-row{% endif %}">
+            <div class="col-date">{{ ci.created_date | date }}</div>
+            <div class="col-invoice">{{ ci.paid_invoice.number }}</div>
+            <div class="col-title">{{ ci.title }}</div>
+            <div class="col-status">{{ ci.status }}</div>
+            <div class="col-rate">
+                {% for upc in ci.unit_price_components %}
+                {% if upc.monetary_component_type == "Base" %}{{ upc.amount | currency }}{% endif %}
+                {% endfor %}
+            </div>
+            <div class="col-qty">{{ ci.quantity | int }}</div>
+            <div class="col-amount">{{ ci.total_price | currency }}</div>
+        </div>
+        {% endfor %}
+        {% set ns.net_total = ns.net_total + (cat.total_charge_items_price | float) %}
+        {% endfor %}
+
+        <div class="net-total">Net Total {{ ns.net_total | currency }}</div>
+
+        {# ---- Returned Charge Items ---- #}
+        <div style="font-weight: bold; font-size: 14px; margin: 10px 0;">Returned</div>
+        <div class="invoice-row invoice-header">
+            <div class="col-date">Date</div>
+            <div class="col-invoice">Invoice</div>
+            <div class="col-title">Title</div>
+            <div class="col-status">Status</div>
+            <div class="col-rate">Rate</div>
+            <div class="col-qty">Qty</div>
+            <div class="col-amount">Amount</div>
+        </div>
+
+        {% set ns = namespace(net_returned_total=0) %}
+        {% for cat in account.category_charge_items_summary.category_returned_charge_items %}
+        <div class="invoice-row category-row">
+            <div class="col-full">
+                <div>{{ cat.category.title }}</div>
+                <div>{{ cat.total_charge_items_price | currency }}</div>
+            </div>
+        </div>
+        {% for ci in cat.charge_items %}
+        <div class="invoice-row">
+            <div class="col-date">{{ ci.created_date | date }}</div>
+            <div class="col-invoice">{{ ci.paid_invoice.number }}</div>
+            <div class="col-title">{{ ci.title }}</div>
+            <div class="col-status">{{ ci.status }}</div>
+            <div class="col-rate">
+                {% for upc in ci.unit_price_components %}
+                {% if upc.monetary_component_type == "Base" %}{{ upc.amount | currency }}{% endif %}
+                {% endfor %}
+            </div>
+            <div class="col-qty">{{ ci.quantity | int }}</div>
+            <div class="col-amount">{{ ci.total_price | currency }}</div>
+        </div>
+        {% endfor %}
+        {% set ns.net_returned_total = ns.net_returned_total + (cat.total_charge_items_price | float) %}
+        {% endfor %}
+
+        <div class="net-total">Net Total {{ ns.net_returned_total | currency }}</div>
+
+        <div class="separator"></div>
+
+        {# ---- Payment Reconciliations (grouped by type) ---- #}
+        <div style="font-weight: bold; font-size: 14px; margin-bottom: 10px;">Payment Details</div>
+        <div class="invoice-row invoice-header" style="justify-content: space-between;">
+            <div class="payment-group">
+                <div class="col-date">Date</div>
+                <div class="col-invoice">Invoice</div>
+                <div class="col-method">Method</div>
+            </div>
+            <div class="col-amount">Amount</div>
+        </div>
+
+        {% set ns = namespace(net_payment_total=0) %}
+        {% for group in account.payment_reconciliations | groupby("reconciliation_type") %}
+        <div style="font-weight: bold; margin-top: 10px; font-size: 10px;">{{ group.grouper }}</div>
+        {% for pr in group.list %}
+        <div class="invoice-row" style="justify-content: space-between;">
+            <div class="payment-group">
+                <div class="col-date">{{ pr.created_date | date }}</div>
+                <div class="col-invoice">{{ pr.target_invoice.number }}</div>
+                <div class="col-method">{{ pr.method }}</div>
+            </div>
+            <div class="col-amount">{{ pr.amount | currency }}</div>
+        </div>
+        {% set ns.net_payment_total = ns.net_payment_total + (pr.amount | float) %}
+        {% endfor %}
+        {% endfor %}
+
+        <div class="net-total">Net Total {{ ns.net_payment_total | currency }}</div>
+
+        {# ---- Account Summary ---- #}
+        <div class="summary-box">
+            <div style="font-weight: bold; font-size: 14px; margin: 10px 0;">Summary</div>
+            <div class="invoice-row invoice-header account-row">
+                <div>Billed (Gross)</div>
+                <div class="col-account-amount">Total Paid</div>
+                <div class="col-account-amount">Amount Due</div>
+                <div style="text-align: right;">Total Billable</div>
+            </div>
+            <div class="account-row invoice-row">
+                <div>{{ account.total_gross | currency }}</div>
+                <div class="col-account-amount">{{ account.total_paid | currency }}</div>
+                <div class="col-account-amount">{{ account.total_balance | currency }}</div>
+                <div style="text-align: right;">{{ account.total_billable_charge_items | currency }}</div>
+            </div>
+        </div>
+
+        <div class="note-text">Note: Content of the {{ report_title | capitalize }} will not be changed for any reason once the patient is discharged from the hospital.</div>
+        <div class="footer">This is a computer-generated {{ report_title | capitalize }}.</div>
+    </div>
+</body>
+</html>

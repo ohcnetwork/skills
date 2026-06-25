@@ -1,0 +1,246 @@
+{# ============================================================
+   IP ADMISSION TICKET — Account Context (account_base)
+
+   Demonstrates:
+   - Account context accessing primary_encounter fields
+   - Extensions deep access with safety checks (encounter_attender)
+   - charge_items.filter(title=...) for specific charge item lookup
+   - current_user global
+   - IST datetime: current_datetime("%Y-%m-%dT%H:%M:%S%z") | datetime
+   - Identifier iteration with range() for two-column layout
+   - encounter_tags + instance_tags rendering
+   - Conditional paid badge based on paid_on field
+   - "%.2f" | format() for manual decimal formatting
+   ============================================================ #}
+
+{% set report_title = "IP Admission Ticket" %}
+{% set logo_img = "https://example.com/logo.webp" %}
+{% set charge_item_title = "Ipd Admission Charge" %}
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <style>
+        @page { size: A4; margin: 150px 40px 80px 40px; }
+        body { font-family: "Times New Roman", Times, serif; margin: 0; padding: 0; font-size: 14px; }
+        h2 { color: #2E8B57; border-bottom: 1px solid #333; }
+        .note-text { font-style: italic; font-size: 8px; margin-top: 12px; }
+        .footer { margin-top: 8px; border-top: 1px solid #333; font-size: 8px; color: #666; text-align: center; }
+
+        .header { position: fixed; top: -150px; left: 0; right: 0; height: 120px; padding: 10px; display: flex; justify-content: space-between; align-items: center; background: white; z-index: 2; }
+        .content { position: relative; z-index: 5; margin-top: -20px; }
+
+        .form-container { border: 1px solid #ccc; margin-top: 10px; }
+        .form-row { display: flex; width: 100%; border-bottom: 1px solid #e5e5e5; }
+        .form-row:last-child { border-bottom: none; }
+        .form-cell { display: flex; padding: 6px 10px; font-size: 11px; width: 50%; box-sizing: border-box; }
+        .form-cell-full { display: flex; padding: 6px 10px; font-size: 11px; width: 100%; box-sizing: border-box; }
+        .form-label { color: #555; white-space: nowrap; margin-right: 6px; }
+        .form-value { font-weight: bold; color: #000; }
+        .badge-paid { margin-left: 6px; background-color: #2E8B57; color: white; font-size: 9px; font-weight: bold; padding: 1px 6px; border-radius: 3px; }
+        .prepared-by { text-align: center; font-size: 11px; margin-top: 15px; color: #555; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img alt="Logo" src="{{ logo_img }}" style="height: 100px; width: auto;">
+    </div>
+
+    <div class="content">
+        <h2 style="text-align: center; border-bottom: none; padding-bottom: 4px;">{{ report_title }}</h2>
+
+        {% set users = (account.primary_encounter.care_team | list) if account.primary_encounter else [] %}
+        {% set orgs = (account.primary_encounter.organizations | list) if account.primary_encounter else [] %}
+
+        {# ---- Charge item lookup by title ---- #}
+        {% set target_charge_items = account.charge_items.filter(title=charge_item_title) | list %}
+        {% set target_charge_item = target_charge_items | first if target_charge_items else None %}
+
+        <div class="form-container">
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">Department :</span>
+                    <span class="form-value">
+                        {% if orgs %}{{ orgs[0].organization }}{% else %}-{% endif %}
+                    </span>
+                </div>
+                <div class="form-cell">
+                    <span class="form-label">IP Number :</span>
+                    <span class="form-value">{{ account.primary_encounter.external_identifier or "-" }}</span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">Encounter Class :</span>
+                    <span class="form-value">{{ account.primary_encounter.encounter_class }}</span>
+                </div>
+                <div class="form-cell">
+                    <span class="form-label">Admitting Doctor :</span>
+                    <span class="form-value">
+                        {% if users %}{{ users[0].user.full_name }}{% else %}-{% endif %}
+                    </span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">Admission Date :</span>
+                    <span class="form-value">{{ account.primary_encounter.start_time | datetime }}</span>
+                </div>
+                <div class="form-cell">
+                    <span class="form-label">Status :</span>
+                    <span class="form-value">{{ account.primary_encounter.status }}</span>
+                </div>
+            </div>
+
+            {# ---- Patient identifiers in two-column layout using range() ---- #}
+            {% set ns = namespace(ids=[]) %}
+            {% for identifier in account.patient.instance_identifiers %}
+                {% if identifier.config.display != "Patient Name" %}
+                    {% set _ = ns.ids.append(identifier) %}
+                {% endif %}
+            {% endfor %}
+            {% set all_identifiers = ns.ids | list %}
+            {% set id_count = all_identifiers | length %}
+
+            {% for i in range(0, id_count, 2) %}
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">{{ all_identifiers[i].config.display }} :</span>
+                    <span class="form-value">{{ all_identifiers[i].value }}</span>
+                </div>
+                <div class="form-cell">
+                    {% if i + 1 < id_count %}
+                    <span class="form-label">{{ all_identifiers[i + 1].config.display }} :</span>
+                    <span class="form-value">{{ all_identifiers[i + 1].value }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+
+            {# ---- Tags (encounter + patient instance tags) ---- #}
+            <div class="form-row">
+                <div class="form-cell-full">
+                    <span class="form-label">Tags :</span>
+                    <span class="form-value">
+                        {% for tag in account.primary_encounter.encounter_tags %}
+                            {{ tag.display }}{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                        {% for tag in account.patient.instance_tags %}
+                            {{ tag.display }}{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                    </span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">Patient Name :</span>
+                    <span class="form-value">{{ account.patient.name }}</span>
+                </div>
+                <div class="form-cell"></div>
+            </div>
+
+            {# ---- Extensions: Attender details (deep access with safety checks) ---- #}
+            {% if account.primary_encounter.extensions is mapping and account.primary_encounter.extensions.get('encounter_attender') is mapping and account.primary_encounter.extensions.get('encounter_attender').get('attender') is mapping %}
+            {% set attender = account.primary_encounter.extensions['encounter_attender']['attender'] %}
+            <div class="form-row">
+                <div class="form-cell-full">
+                    <span class="form-label">Attender :</span>
+                    <span class="form-value">
+                        {{ attender.get('attender_relation', '') }} {{ attender.get('attender_name', '') }}
+                    </span>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="form-row">
+                <div class="form-cell">
+                    <span class="form-label">Age / DOB :</span>
+                    <span class="form-value">{{ account.patient.age }} / {{ account.patient.date_of_birth | date }}</span>
+                </div>
+                <div class="form-cell">
+                    <span class="form-label">Gender :</span>
+                    <span class="form-value">{{ account.patient.gender }}</span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-cell-full">
+                    <span class="form-label">Address :</span>
+                    <span class="form-value">{{ account.patient.address }}</span>
+                </div>
+            </div>
+
+            {# ---- Attender phone/address from extensions ---- #}
+            {% if account.primary_encounter.extensions is mapping and account.primary_encounter.extensions.get('encounter_attender') is mapping and account.primary_encounter.extensions.get('encounter_attender').get('attender') is mapping %}
+            {% set attender = account.primary_encounter.extensions['encounter_attender']['attender'] %}
+            {% if attender.get('attender_phone') or attender.get('attender_address') %}
+            <div class="form-row">
+                {% if attender.get('attender_phone') %}
+                <div class="form-cell">
+                    <span class="form-label">Attender Phone :</span>
+                    <span class="form-value">{{ attender.get('attender_phone', '') }}</span>
+                </div>
+                {% endif %}
+                {% if attender.get('attender_address') %}
+                <div class="form-cell">
+                    <span class="form-label">Attender Address :</span>
+                    <span class="form-value">{{ attender.get('attender_address', '') }}</span>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            {# ---- Location/Bed with extension fallback ---- #}
+            <div class="form-row">
+                <div class="form-cell-full">
+                    <span class="form-label">Location :</span>
+                    <span class="form-value">
+                        {% if account.primary_encounter.current_location.name %}
+                            {{ account.primary_encounter.current_location.name }}
+                        {% elif account.primary_encounter.extensions.get('encounter_kind_location_assignment', {}).get('location') %}
+                            {{ account.primary_encounter.extensions.get('encounter_kind_location_assignment', {}).get('location') }}
+                        {% else %}
+                            Yet to be assigned
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+
+            {# ---- Specific charge item with paid badge ---- #}
+            <div class="form-row">
+                <div class="form-cell-full">
+                    <span class="form-label">{{ charge_item_title }} :</span>
+                    <span class="form-value">
+                        {% if target_charge_item %}
+                            {% if target_charge_item.total_price != None %}
+                                {{ "%.2f" | format(target_charge_item.total_price | float) }}
+                            {% else %}
+                                -
+                            {% endif %}
+                            {% if target_charge_item.paid_on %}
+                                <span class="badge-paid">PAID</span>
+                            {% endif %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        {# ---- Generated by (IST datetime + current_user) ---- #}
+        <div class="prepared-by">
+            Created on : <strong>{{ current_datetime("%Y-%m-%dT%H:%M:%S%z") | datetime }}</strong> &nbsp;|&nbsp;
+            Generated By : <strong>{{ current_user.full_name or "-" }}</strong>
+        </div>
+
+        <div class="note-text">Note: This is a computer-generated {{ report_title }}. Please bring this slip for all hospital visits during this admission.</div>
+        <div class="footer">This is a computer-generated {{ report_title }}.</div>
+    </div>
+</body>
+</html>

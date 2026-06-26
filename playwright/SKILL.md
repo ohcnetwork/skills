@@ -6,39 +6,43 @@ argument-hint: "Describe the test scenario or feature to test"
 
 # Playwright E2E Testing for CARE
 
-This skill is the **router**: when to test, the non-negotiable rules, the QA mindset,
-and the form-testing checklist. The mechanics — full form-interaction catalog, every
-selector helper, assertions, and the pattern gallery — live in the bundled guide.
+Router for CARE E2E tests: the discovery workflow, when to test, the rules, the QA
+mindset, and the form checklist. Mechanics (form interactions, selector helpers,
+assertions, pattern gallery, fixtures, a11y/clock) live in the bundled guide.
 
-> **Always read the bundled Playwright Guide before writing tests:**
-> [`PLAYWRIGHT_GUIDE.md`](./PLAYWRIGHT_GUIDE.md)
-> (installed at `~/.claude/skills/playwright/PLAYWRIGHT_GUIDE.md`).
-> It covers: test template, auth/storage states, form interactions, advanced
-> selector helpers (`selectFromCommand`, `selectFromValueSet`,
-> `selectFromCategoryPicker`, …), assertions, data generation, custom fixtures,
-> accessibility/console-error/clock patterns, file organization, and pitfalls.
->
-> **Then study the [`examples/`](./examples) before writing a new spec** — they are
-> the canonical shape to copy:
-> - [`crudForm.spec.ts`](./examples/crudForm.spec.ts) — create → validate → verify → edit-prefill
-> - [`multiRole.spec.ts`](./examples/multiRole.spec.ts) — second user via `browser.newContext()` + a different storage state
-> - [`apiSetup.spec.ts`](./examples/apiSetup.spec.ts) — precondition data via `fetch()` and the `request` fixture
+> **Before writing, read [`PLAYWRIGHT_GUIDE.md`](./PLAYWRIGHT_GUIDE.md)** (installed at
+> `~/.claude/skills/playwright/PLAYWRIGHT_GUIDE.md`) **and copy a shape from
+> [`examples/`](./examples):**
+> [`crudForm`](./examples/crudForm.spec.ts) (create → validate → verify → edit-prefill) ·
+> [`multiRole`](./examples/multiRole.spec.ts) (second user via `browser.newContext()`) ·
+> [`apiSetup`](./examples/apiSetup.spec.ts) (preconditions via `fetch()` / `request`).
 
-## When to Use
+## When to E2E (and when not)
 
-- Writing new Playwright test files
-- Debugging failing E2E tests
-- Adding test coverage for features
-- Understanding test helpers and selectors
-- Running or configuring Playwright tests
+E2E is for **user journeys** (login → navigate → fill form → submit → verify) that need
+a browser and a running backend. Not for pure logic/formatters (→ unit test), component
+rendering (→ component test), or API request/response shape (→ integration test). Rule
+of thumb: if it doesn't need a browser + backend, it isn't E2E.
 
-## When NOT to E2E Test
+## Workflow — Clarify Before You Write
 
-- **Pure logic/utilities** — validation functions, formatters, calculators → unit test
-- **Component rendering** — conditional display, props variations → component test
-- **API contract** — request/response shape → integration test or contract test
-- **E2E is for user journeys** — login → navigate → fill form → submit → verify result
-- **Rule of thumb:** if it doesn't need a browser and a running backend, it's not E2E
+Don't jump to writing specs — most missed bugs come from untested requirements, not bad
+selectors. Run this gate first:
+
+1. **Survey the change.** Read the diff and relevant source — the route in
+   `src/Routers/routes/`, the form's zod schema, API types in `src/types/{domain}/` —
+   and draft a **rough requirements list**: flows, every field + its validation, the
+   states it can be in, and which roles can reach it.
+2. **Present the draft requirements** as a bullet list and ask the user to confirm or
+   correct it; surface anything the diff implies but doesn't state.
+3. **Clarify specs.** Ask where the code is ambiguous: validation rules and exact error
+   text, success/redirect behavior, defaults, role boundaries, which responses matter.
+4. **Grill on edge cases.** Enumerate them and ask whether each is in scope (draw from
+   the Mindset and Form Checklist): empty/boundary/invalid inputs, permission-denied,
+   duplicate/concurrent actions, 4xx/5xx, the 5-live-encounter limit, empty and
+   loading→loaded states. Don't assume out of scope — ask.
+5. **Produce a test plan** — a numbered list, each with an outcome-style name and a
+   happy / negative / edge tag. Get agreement before writing. Update the plan if scope shifts.
 
 ## Setup & Commands
 
@@ -48,29 +52,21 @@ npm run build                     # Build app (tests run against production buil
 npm run playwright:db-reset       # Create DB snapshot with fixtures (requires CARE_BACKEND_DIR)
 npm run playwright:db-restore     # Restore clean DB state before re-runs
 
-npx playwright test tests/auth/   # Run a specific directory
+npx playwright test tests/auth/    # Run a directory
 npx playwright test -g "test name" # Run by pattern
-npx playwright test --headed      # Headed mode for debugging
-npx playwright test --ui          # Interactive UI mode
-npx playwright show-report        # View last HTML report
+npx playwright test --headed       # Headed (debug) / --ui (interactive)
+npx playwright show-report         # View last HTML report
 ```
 
-## File Organization — Mirror the UI Navigation
+## File Organization
 
-Test directory structure MUST mirror the app's navigation hierarchy (sidebar/URL).
-For example `tests/facility/settings/locations/` for `/facility/:id/settings/locations`,
-`tests/admin/roles/` for `/admin/roles`. The full tree is in the guide.
+Mirror the **app's** route hierarchy (source of truth: `src/Routers/routes/` and
+`src/pages/Facility/settings/layout.tsx`) — not whatever `tests/` contains today. E.g.
+`tests/facility/settings/locations/` for `/facility/:id/settings/locations`. Full tree
+in the guide.
 
-- Directories: **camelCase** matching the feature (`activityDefinition/`, `patientDetails/`).
-- Files: `featureAction.spec.ts` (e.g., `locationCreation.spec.ts`, `deviceEdit.spec.ts`).
-- Group CRUD operations in the same directory with separate files per action.
-
-## Test Naming Convention
-
-- Name the **expected outcome**, not the action: `"shows error when name is empty"`,
-  not `"test empty name"`.
-- Format: `"<does what> when <condition>"` or `"<verifies outcome> for <scenario>"`.
-- Must be greppable — avoid generic words like "test", "works", "correct".
+- Directories: **camelCase** by feature (`activityDefinition/`, `patientDetails/`).
+- Files: `featureAction.spec.ts` (`locationCreation.spec.ts`, `deviceEdit.spec.ts`); one action per file.
 
 ## Canonical Test Structure
 
@@ -90,126 +86,82 @@ test.describe("Feature Name", () => {
   });
 
   test("creates location with valid name and type", async ({ page }) => {
-    await test.step("Fill location form", async () => {
-      // actions
-    });
-    await test.step("Verify location appears in list", async () => {
-      // assertions
-    });
+    await test.step("Fill location form", async () => {/* actions */});
+    await test.step("Verify location appears in list", async () => {/* assertions */});
   });
 });
 ```
 
-**Auth storage states:** `tests/.auth/user.json` (admin), `tests/.auth/facilityAdmin.json`
-(facility admin), `tests/.auth/nurse.json` (nurse). Generated by `tests/setup/*.setup.ts`.
-**Key helpers** (from `tests/helper/ui`): `expectToast`, `selectFromCommand`,
-`selectFromValueSet`, `selectFromFilterSelect`, plus `getFieldErrorMessage` (from
-`tests/helper/error`). See the guide for full signatures and examples.
+**Auth states:** `tests/.auth/user.json` (admin), `…/facilityAdmin.json`, `…/nurse.json`
+— generated by `tests/setup/*.setup.ts`. **Key helpers** (`tests/helper/ui`):
+`expectToast`, `selectFromCommand`, `selectFromValueSet`, `selectFromFilterSelect`;
+`getFieldErrorMessage` (`tests/helper/error`). Full signatures in the guide.
 
 ## Critical Rules
 
-1. **Use `faker` for data you create** (entity names, notes, random array selection).
-   For selecting **existing** fixture-backed options (usernames, body sites), import
-   shared constants from `tests/helper/commonConstants.ts` — never scatter literals.
-2. **Always use deterministic fixture IDs** — `getFacilityId()`, `getPatientId()`,
-   `getEncounterId()` from `tests/support/`. NEVER select a random
-   encounter/patient/facility from a UI list — random selection flakes when data changes.
-3. Always include `test.use({ storageState })` for authenticated flows (omit only for
-   explicit public/auth-page tests).
-4. Use `exact: true` on selectors when partial matches are possible.
-5. **`.first()` only after searching/filtering** — never to randomly pick from an
-   unfiltered list.
-6. Use `test.step()` to organize test actions.
-7. Place tests in the matching feature directory under `tests/`.
-8. **Verify API responses on form submission** — `page.waitForResponse()` + assert
-   status. Skip only when the form fires multiple chained calls or the response isn't
-   meaningful.
-9. **Verify page navigation** — after navigating, assert a heading or unique element
-   is visible to confirm the page loaded.
-10. **Wait for specific UI indicators over hardcoded timeouts** — prefer a visible
-    element or API response over arbitrary `{ timeout: N }`. Avoid
-    `page.waitForLoadState("networkidle")`; use it only as a documented last resort
-    (it's flaky with polling/websockets).
-11. **Never add custom test IDs to source code** — no `data-testid` or any custom
-    attribute for test targeting. Use existing roles, labels, text, and existing
-    `data-slot` attributes (part of shadcn/ui, not added for testing).
-12. **Verify in-page generated content** — for QR codes, tokens, etc., assert both
-    element visibility AND the corresponding API request/response.
-13. **Prefer constants over duplication** — extract reusable values into shared
-    constants in `tests/helper/`.
-14. **Verify locally before pushing** — run the specific file(s) with
-    `npx playwright test <path>` and confirm they pass before pushing.
-15. **3-strike rule** — if a test keeps failing after 3 fix attempts, stop and ask a
-    human to inspect the UI. You may be missing a visual/animation/dynamic detail.
-16. **Do not touch CI/CD YAML** — never modify GitHub Actions/CI unless explicitly
-    asked. If a test needs a new `.env` var that works locally, ALERT the human that
-    CI YAML may need updating.
-17. **Never use `test.skip()`/`test.fixme()`/conditional skips to hide failures** —
-    fix the test instead. `.skip()` is only for genuinely unsupported environments
-    (e.g., OS-specific) with a clear comment.
-18. **Continuously improve this skill** — capture improvements as a separate
-    human-reviewed PR; do not self-modify the skill during normal test generation.
+1. **`faker` for data you create**; for existing fixture options import from
+   `tests/helper/commonConstants.ts` — no scattered literals.
+2. **Deterministic fixture IDs** (`getFacilityId/PatientId/EncounterId` from
+   `tests/support/`); never pick a random row from a UI list (flakes when data changes).
+3. **`test.use({ storageState })`** on every authenticated flow (omit only for public/auth pages).
+4. **`exact: true`** when a label can partially match another element.
+5. **`.first()` only after searching/filtering** — never to pick randomly from a full list.
+6. **`test.step()`** to group actions.
+7. Place tests in the **matching feature directory**.
+8. **Assert the API response on submit** (`page.waitForResponse()` + status); skip only
+   for chained calls or meaningless responses.
+9. **Confirm navigation** — assert a heading/unique element after navigating.
+10. **Wait on elements/responses, not timeouts**; avoid `page.waitForLoadState("networkidle")`
+    (flaky; last resort only).
+11. **No custom test IDs in source** — use roles, labels, text, existing `data-slot` (shadcn, not added for tests).
+12. **Verify in-page generated content** (QR/tokens): element visible AND its API call.
+13. **Constants over duplication** — shared values in `tests/helper/`.
+14. **Run the file(s) locally and confirm green before pushing.**
+15. **3-strike rule** — after 3 failed fix attempts, stop and ask a human to inspect the UI.
+16. **Don't touch CI/CD YAML** unless asked; if a test needs a new `.env` var, alert the human.
+17. **Never `.skip()`/`.fixme()`/conditional-skip to hide failures** — fix them. `.skip()`
+    only for genuinely unsupported environments, with a comment.
+18. **Improve this skill via a separate reviewed PR**, not mid-task.
 
-> Two narrow **sanctioned exceptions** to rules #10/#11: a bounded `waitForTimeout`
-> and CSS/class selectors are acceptable **inside shared helpers** (e.g. debounced
-> search, `expectToast`'s toast container) — never in spec files. See the guide.
+> **Sanctioned exceptions** to #10/#11: a bounded `waitForTimeout` and CSS/class selectors
+> are OK **inside shared helpers** (debounced search, `expectToast`'s container) — never in specs.
 
 ## Mindset: Senior QA Engineer
 
-Question every decision, challenge every assumption, choose the best approach.
-
-- **Test user journeys, not implementation** — what the user sees and does.
-- **Cover edge cases** — empty states, boundaries, error states, permission denied,
-  network failures.
-- **Always include negative tests** — missing required fields, invalid formats,
-  unauthorized access, 4xx/5xx API responses; verify the error message shown.
-- **Assert what matters** — the outcome the user cares about, not incidental DOM.
-- **Test isolation** — each test independent; never rely on another's side effects.
-- **Accessibility** — if a screen reader can't reach it, neither should your test
-  (use roles/labels, not CSS). The guide has an axe-core smoke pattern.
-- **Regression-first** — when fixing a bug, write the test that would have caught it
-  before fixing the code.
-- **Data boundaries** — minimum valid, maximum valid, and just-beyond-boundary invalid.
-- **State transitions** — verify loading → loaded, enabled → disabled, empty → populated.
+- **User journeys, not implementation** — assert the outcome the user cares about, not the DOM.
+- **Both paths** — every happy path needs its negative twin (missing/invalid input,
+  permission denied, 4xx/5xx with the right error shown).
+- **Isolation** — each test self-contained; never rely on another's side effects.
+- **Regression-first** — reproduce a bug as a failing test before fixing the code.
+- **Accessibility** — reach elements by role/label (the guide has an axe-core pattern).
+- **Boundaries & transitions** — min / max / just-over inputs; loading→loaded, empty→populated.
 
 ## Form Testing Checklist
 
-Every form MUST have tests covering:
+Every form MUST cover:
 
-1. **Required field validation** — submit all-empty, verify each required field errors.
-2. **All fields filled (happy path)** — submit valid data, verify success.
-3. **Field combinations** — only some required fields filled, verify correct errors.
-4. **Error message validation** — assert exact error text per rule (min length,
-   format, required).
-5. **Individual field update (edit forms)** — editing one field doesn't corrupt others.
-6. **Field-level validation** — invalid formats (email/phone/date), boundary values,
-   special characters.
-7. **Form reset/cancel** — cancel doesn't save; form resets.
-8. **Duplicate submission prevention** — button disables after click; no double-submit.
-9. **Post-submission verification (mandatory)** — after every successful submit, verify
-   ALL of: toast with correct message, URL/path changes to the expected destination,
-   AND the new/updated data is visible on the redirected page. Never stop at the click.
-10. **Edit form prefill verification** — assert existing data is prefilled in all
-    fields before making changes.
+1. **Required-field validation** — submit empty, each required field errors.
+2. **Happy path** — all valid data, verify success.
+3. **Field combinations** — only some required fields filled, correct errors appear.
+4. **Error-message text** — assert exact text per rule (min length, format, required).
+5. **Individual field update (edit)** — editing one field doesn't corrupt others.
+6. **Field-level validation** — invalid formats (email/phone/date), boundaries, special chars.
+7. **Reset/cancel** — cancel doesn't save; form resets.
+8. **Duplicate-submit prevention** — button disables after click.
+9. **Post-submit verification (mandatory)** — toast text AND URL change AND the new data
+   visible on the destination page. Never stop at the click.
+10. **Edit prefill** — assert existing data is prefilled before changing anything.
 
-## Debugging & Flakiness Triage
+## Debugging & Flakiness
 
 ```bash
-npx playwright test <path> --trace on    # trace viewer (screenshots, network, console)
-npx playwright test <path> --debug       # step through with the Inspector
-npx playwright test <path> --headed      # watch it run
-npx playwright show-report               # last HTML report
+npx playwright test <path> --trace on   # trace viewer / --debug Inspector / --headed watch
+npx playwright show-report              # last HTML report
 npx playwright show-trace test-results/<run-id>/trace.zip
 ```
 
-When a test fails: check the HTML report → run `--headed` → use `--debug` → if data
-looks stale, `npm run playwright:db-restore`.
+Fail → check report → `--headed` → `--debug` → if data looks stale, `npm run playwright:db-restore`.
 
-**Flakiness triage (passes sometimes, fails sometimes):**
-- **Timing/race** → element appears before data loads. Fix: wait for API response or
-  specific text, not `networkidle`.
-- **Animation/transition** → click mid-animation. Fix: `await locator.waitFor({ state: "visible" })` first.
-- **Parallel data collision** → two tests create the same faker value. Fix: `Date.now()`
-  suffix or more specific seeds.
-- **Stale DB state** → `npm run playwright:db-restore` or stop depending on clean state.
-- **Polling/WebSocket** → `networkidle` never resolves. Fix: wait for a specific DOM change.
+**Flaky triage:** race (element before data) → wait for response/text, not `networkidle` ·
+animation → `waitFor({ state: "visible" })` first · parallel collision → `Date.now()` suffix ·
+stale DB → `db-restore` · polling/WebSocket → wait for a specific DOM change.

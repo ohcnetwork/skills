@@ -24,6 +24,11 @@ a browser and a running backend. Not for pure logic/formatters (→ unit test), 
 rendering (→ component test), or API request/response shape (→ integration test). Rule
 of thumb: if it doesn't need a browser + backend, it isn't E2E.
 
+This skill authors **deterministic journey tests** — the CI regression layer that
+enforces a specific path. That is distinct from an agent driving the app live to verify
+a goal (runtime exploration): if you use a browser to explore, the committed artifact is
+still a deterministic spec, not the exploration.
+
 ## Workflow — Clarify Before You Write
 
 Don't jump to writing specs — most missed bugs come from untested requirements, not bad
@@ -32,7 +37,9 @@ selectors. Run this gate first:
 1. **Survey the change.** Read the diff and relevant source — the route in
    `src/Routers/routes/`, the form's zod schema, API types in `src/types/{domain}/` —
    and draft a **rough requirements list**: flows, every field + its validation, the
-   states it can be in, and which roles can reach it.
+   states it can be in, and which roles can reach it. If a browser/Playwright MCP is
+   available, open the page and read the live accessibility tree to confirm exact
+   roles/labels/`data-slot`s instead of guessing — then still commit a deterministic spec.
 2. **Present the draft requirements** as a bullet list and ask the user to confirm or
    correct it; surface anything the diff implies but doesn't state.
 3. **Clarify specs.** Ask where the code is ambiguous: validation rules and exact error
@@ -135,6 +142,9 @@ test.describe("Feature Name", () => {
 - **Regression-first** — reproduce a bug as a failing test before fixing the code.
 - **Accessibility** — reach elements by role/label (the guide has an axe-core pattern).
 - **Boundaries & transitions** — min / max / just-over inputs; loading→loaded, empty→populated.
+- **One focused journey per spec** — split or push down long, multi-session, or
+  multi-window flows. Authored tests degrade sharply on complexity (industry reports
+  ~8% failure on simple flows vs ~48% on complex ones); keep each spec small and linear.
 
 ## Form Testing Checklist
 

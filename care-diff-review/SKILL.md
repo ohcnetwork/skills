@@ -37,7 +37,7 @@ Override only when explicitly asked:
 
 | User says | Command |
 |---|---|
-| "against the last/previous commit" | `git diff HEAD` |
+| "against the last/previous commit" | `git show HEAD` |
 | "unstaged / working changes only" | `git diff` + `git diff --staged` |
 | a specific file ("only this file") | scope the diff to that path |
 

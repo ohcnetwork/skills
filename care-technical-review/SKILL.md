@@ -16,8 +16,8 @@ at hand, nothing more.
 
 - **The diff** — default is written to a temp file and read from there (inline terminal output
   truncates on large diffs): `git diff $(git merge-base develop HEAD) > /tmp/care_review.diff`.
-  Overrides: last commit (`git diff HEAD`), working only (`git diff` + `--staged`), or a named
-  file.
+  Overrides: last commit (`git show HEAD`), working only (`git diff` + `git diff --staged`), or a
+  named file.
 - **The problem being solved** — you cannot judge overengineering without it. Reconstruct the
   intent briefly from the code first.
 

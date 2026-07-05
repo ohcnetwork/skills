@@ -22,7 +22,7 @@ reconciles their readings:
    ```
    git diff $(git merge-base develop HEAD) > /tmp/care_review.diff && wc -l /tmp/care_review.diff
    ```
-   Overrides only when asked: last commit (`git diff HEAD`), working only (`git diff` +
+   Overrides only when asked: last commit (`git show HEAD`), working only (`git diff` +
    `git diff --staged`), or a named file. **Always write to the file and read that** — never rely
    on inline terminal output, which truncates on large diffs and wastes turns re-running `git`.
    List the changed files. **Do not read the commit message, PR body, or branch name** — intent

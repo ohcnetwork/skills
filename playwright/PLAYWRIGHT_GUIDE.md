@@ -470,17 +470,23 @@ await page.waitForURL(/\/facility\/[^/]+\/overview$/);
 
 # Pattern Gallery
 
-### API Response Verification on Form Submit
+### Verifying a Submit
+
+Verification can use the UI, the API response, or both (Critical Rule #8) — API
+assertions are fine here; the UI-only restriction is about **seeding**, not verifying.
+Always assert the UI outcome the user cares about; add the status-code check when it's
+meaningful.
 
 ```typescript
-await test.step("Submit and verify API response", async () => {
+await test.step("Submit and verify", async () => {
   const responsePromise = page.waitForResponse(
     (resp) =>
       resp.url().includes("/api/v1/facility/") && resp.request().method() === "POST",
   );
   await page.getByRole("button", { name: "Create" }).click();
   const response = await responsePromise;
-  expect(response.status()).toBe(201);
+  expect(response.status()).toBe(201);    // API assertion — allowed for verification
+  await expectToast(page, /created/i);    // and assert the UI outcome
 });
 ```
 
@@ -676,19 +682,33 @@ each context in `finally`.
 ### Keep Tests Independent
 
 - Each test MUST be runnable in isolation — never depend on another test's side effects.
-- If a test needs precondition data, create it in `beforeEach`/`beforeAll` or via a
-  direct API call — never assume a previous test created it.
+- If a test needs precondition data, create it by **driving the UI** in
+  `beforeEach`/`beforeAll` (or, only when API usage is explicitly allowed, a direct API
+  call) — never assume a previous test created it.
 - **Encounter limit awareness** — a patient can have only 5 live encounters at a
-  time. If your test creates or selects encounters, mark them completed (via API or
-  UI) after use, or re-runs will flake once the limit is hit.
+  time. If your test creates or selects encounters, mark them completed after use (via
+  the UI; or the API only when explicitly allowed), or re-runs will flake once the
+  limit is hit.
 
 ---
 
-# Test Setup Beyond the UI
+# Seeding Test Data — via the UI (API only when explicitly allowed)
 
-### Direct API Calls with `fetch()`
+**Seed each test's precondition data by driving the UI**, the same way a user would — do
+not reach for direct API calls to create per-test state. Two clarifications:
 
-Quick and dependency-free. Good for one-off precondition data.
+- **Verification is different.** Asserting via the API response/status is fine (see
+  [Verifying a Submit](#verifying-a-submit)). This rule is only about *seeding*.
+- **Shared fixtures are exempt.** The once-per-run setup in `tests/setup/*` (facility,
+  patient, encounter, account) may use the API — that is not per-test seeding.
+
+The patterns below are the **explicit-exception escape hatch** for per-test API seeding:
+use them only when the user has allowed it for that test, keep the API surface minimal,
+and still verify through the UI.
+
+### Direct API Calls with `fetch()` (explicit-exception only)
+
+Quick and dependency-free for one-off precondition data — when API seeding is sanctioned.
 
 ```typescript
 import { getFacilityId } from "tests/support/facilityId";
@@ -710,11 +730,12 @@ test.beforeEach(async () => {
 });
 ```
 
-### Preferred: Playwright's `request` Fixture
+### Playwright's `request` Fixture (explicit-exception only)
 
-`request` (an `APIRequestContext`) is the idiomatic alternative to raw `fetch()`. It
-participates in tracing, reuses Playwright's networking, and gives ergonomic
-assertions via `expect(response)`. Prefer it for new setup helpers.
+If API setup has been explicitly allowed, `request` (an `APIRequestContext`) is the
+idiomatic alternative to raw `fetch()` — it participates in tracing, reuses Playwright's
+networking, and gives ergonomic `expect(response)` assertions. Use it over `fetch()`
+when API usage is sanctioned. It is **not** a default; UI setup is.
 
 ```typescript
 import { expect, test } from "@playwright/test";

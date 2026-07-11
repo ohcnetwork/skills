@@ -1,17 +1,22 @@
 /*
- * GOLDEN EXAMPLE — precondition data created via the API, then verified in the UI
+ * EXCEPTION EXAMPLE — API data seeding (only when explicitly allowed)
+ *
+ * ⚠️ Seed per-test precondition data via the UI by default (see SKILL.md). Do NOT use
+ * API calls to CREATE a test's data unless the user has explicitly allowed API seeding
+ * for that test. (Verifying via the API response is fine — this restriction is only
+ * about seeding.) This file shows the sanctioned escape hatch for seeding; it is not a
+ * default shape. Prefer creating preconditions by driving the UI.
  *
  * REFERENCE ONLY. This whole file is a comment: the skills repo does not install
  * Playwright or the `tests/...` modules, so nothing here is imported or compiled.
- * Copy the shape into a real spec in care_fe.
  *
- * Derived from tests/facility/billing/accountTransfer.spec.ts. Shows BOTH ways to
- * create setup data without driving the UI:
+ * Derived from tests/facility/billing/accountTransfer.spec.ts. When API setup IS
+ * allowed, shows both ways to create setup data:
  *   1. raw fetch() + getApiHeaders() — quick, dependency-free (the existing pattern)
- *   2. Playwright's `request` fixture — idiomatic, trace-integrated (preferred for new code)
+ *   2. Playwright's `request` fixture — idiomatic, trace-integrated (prefer over fetch)
  *
  * Setup helpers create data in a hook/test body (never at module top level), then the
- * test asserts the precondition is reflected in the UI.
+ * test still verifies the precondition through the UI.
  *
  * ---------------------------------------------------------------------------
  * import { faker } from "@faker-js/faker";

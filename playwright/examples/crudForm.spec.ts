@@ -6,7 +6,8 @@
  * Copy the shape into a real spec in care_fe.
  *
  * Derived from tests/facility/settings/devices/deviceCreation.spec.ts, polished to
- * follow the skill's rules: test.step grouping, waitForResponse on submit (Rule #8),
+ * follow the skill's rules: test.step grouping, UI-first verification with
+ * waitForResponse used only as a timing aid on submit (Rule #8),
  * no hardcoded timeouts (Rule #10), canonical faker phone-gen, and edit-prefill
  * verification (Form Checklist #10).
  *
@@ -74,7 +75,7 @@
  *       await page.getByPlaceholder("Enter phone number").first().fill(phoneNumber);
  *     });
  *
- *     await test.step("Submit and verify the API response (Rule #8)", async () => {
+ *     await test.step("Submit, wait for the write to settle, verify via UI (Rule #8)", async () => {
  *       const responsePromise = page.waitForResponse(
  *         (resp) =>
  *           resp.url().includes("/device/") &&

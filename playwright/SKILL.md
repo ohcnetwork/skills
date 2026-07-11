@@ -15,7 +15,8 @@ assertions, pattern gallery, fixtures, a11y/clock) live in the bundled guide.
 > [`examples/`](./examples):**
 > [`crudForm`](./examples/crudForm.spec.ts) (create → validate → verify → edit-prefill) ·
 > [`multiRole`](./examples/multiRole.spec.ts) (second user via `browser.newContext()`) ·
-> [`apiSetup`](./examples/apiSetup.spec.ts) (preconditions via `fetch()` / `request`).
+> [`apiSetup`](./examples/apiSetup.spec.ts) (API seeding — the **exception**; per-test
+> data is seeded via the UI by default, see the seeding rule below).
 
 ## When to E2E (and when not)
 
@@ -106,6 +107,13 @@ test.describe("Feature Name", () => {
 
 ## Critical Rules
 
+> **Seed through the UI, not the API.** Create each test's precondition data by driving
+> the actual screens — do **not** use `fetch()` or the `request` fixture to seed
+> per-test state unless the user explicitly allows it for that test. (Shared fixtures
+> built once in `tests/setup/*` are exempt — that's not per-test seeding.)
+> **API is fine for verification:** asserting a `page.waitForResponse()` / status code
+> is allowed, alongside — not instead of — UI assertions.
+
 1. **`faker` for data you create**; for existing fixture options import from
    `tests/helper/commonConstants.ts` — no scattered literals.
 2. **Deterministic fixture IDs** (`getFacilityId/PatientId/EncounterId` from
@@ -115,13 +123,15 @@ test.describe("Feature Name", () => {
 5. **`.first()` only after searching/filtering** — never to pick randomly from a full list.
 6. **`test.step()`** to group actions.
 7. Place tests in the **matching feature directory**.
-8. **Assert the API response on submit** (`page.waitForResponse()` + status); skip only
-   for chained calls or meaningless responses.
+8. **Verify the submit landed** — assert the UI outcome (toast + redirect + new data
+   visible, Checklist #9) and/or the API response (`page.waitForResponse()` + status).
+   Both are fine; skip the API assertion for chained or meaningless calls.
 9. **Confirm navigation** — assert a heading/unique element after navigating.
 10. **Wait on elements/responses, not timeouts**; avoid `page.waitForLoadState("networkidle")`
     (flaky; last resort only).
 11. **No custom test IDs in source** — use roles, labels, text, existing `data-slot` (shadcn, not added for tests).
-12. **Verify in-page generated content** (QR/tokens): element visible AND its API call.
+12. **Verify in-page generated content** (QR/tokens): assert the element is visible, and
+    optionally its API response.
 13. **Constants over duplication** — shared values in `tests/helper/`.
 14. **Run the file(s) locally and confirm green before pushing.**
 15. **3-strike rule** — after 3 failed fix attempts, stop and ask a human to inspect the UI.

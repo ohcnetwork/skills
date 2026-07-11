@@ -90,6 +90,13 @@ render output (flag loudly, however small).
 > `/tmp/care_review.diff`, then **return** your reconstructed intent + legibility/correctness
 > findings to the orchestrator. Do **not** confirm with the user — the orchestrator reconciles
 > your intent reading against the other agent's and owns the single confirm.
+>
+> **Loop-invoked** (the `/care-review` call came from `care-loop`, signalled by a run dir
+> `<care-loop skill dir>/runs/<repo>-<branch>/` — see care-loop's `guides/observability.md`):
+> additionally write your **full** intent reconstruction — the complete per-change *what + why*,
+> not the 1–2 sentence condensed version — to `<run-dir>/intent.md`, so Step 4.5
+> (`care-test-grade`) can grade the specs against it without a second reconstruction. Standalone
+> invocations are unchanged — write nothing extra.
 
 Lead with the reconstructed intent: *"Here's what I read the change as doing, and the requirement
 I think it fulfills — is that right?"* A mismatch means either the code isn't legible (fix the

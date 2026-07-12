@@ -47,17 +47,17 @@ Manifest:
 | `agents/<agent>.log` | each spawned agent                                                    | structured progress markers ([working-agreement.md](./working-agreement.md)) — subdir keeps them out of the all-DONE check's way                                                             |
 | `gate/*.log`         | `run_gate.sh`                                                         | full per-stage gate output; mtimes count as activity for the stall check                                                                                                                     |
 | `baseline.md`        | Step 1                                                                | frozen scope baseline — grounded by recon, not a blind prediction ([governance.md](./governance.md))                                                                                         |
-| `criteria.md`        | Step 1                                                                | acceptance criteria = ground truth for Step 4.5 test-grade                                                                                                                                   |
+| `criteria.md`        | Step 1                                                                | acceptance criteria = ground truth for Step 4b test-grade                                                                                                                                    |
 | `decisions.md`       | Step 1                                                                | interview Q&A + non-goals; 6a can cite a decision to decline a finding without re-verification                                                                                               |
-| `intent.md`          | `care-diff-review` (loop-invoked, round 1)                            | full code-reconstructed intent for Step 4.5; **never overwritten** — round-2+ delta intents are appended as `## Round N delta` sections so the grader always has full-branch context         |
+| `intent.md`          | `care-diff-review` (loop-invoked, round 1)                            | full code-reconstructed intent for Step 4b; **never overwritten** — round-2+ delta intents are appended as `## Round N delta` sections so the grader always has full-branch context          |
 | `feedback.md`        | `collect-feedback.sh`                                                 | pre-digested bot/CI feedback for Step 6a — grouped by file+line, `[resolved]` tagged                                                                                                         |
 | `verdicts.md`        | Step 6a                                                               | the triaged verdict list; **overwritten each round** (declines persist in `declined.md`); Step 6b is spawned with this **path**                                                              |
-| `declined.md`        | Step 6a (append-only) + Step 4                                        | cross-round decline memory — one fingerprint line per decline; checked before re-litigating                                                                                                  |
+| `declined.md`        | Step 6a (append-only) + Step 4a                                       | cross-round decline memory — one fingerprint line per decline; checked before re-litigating                                                                                                  |
 | `addressed.md`       | Step 6a (append-only)                                                 | escape log — one entry per bot-caught `address` verdict with `class:` + `missed-by:` attribution; the doctor aggregates these across runs to target which skill to improve                   |
 | `replies.md`         | Step 6b                                                               | staged thread replies; Step 5 posts them after the push and archives to `replies-r<N>.posted.md`                                                                                             |
 | `pr-body.md`         | Step 5 (round 1)                                                      | the filled PR template passed to `gh pr create --body-file`                                                                                                                                  |
-| `ui-surfaces.md`     | Step 1 (when `.tsx` files touched)                                    | changed screens + sibling surfaces + routes + long-content stress candidates; consumed by Step 4.8                                                                                           |
-| `ui/round-<N>/`      | Step 4.8 (live mode)                                                  | per-surface viewport screenshots (`<surface-slug>-<viewport>.png`); consumed by `post-ui-screens.sh` in Step 5                                                                               |
+| `ui-surfaces.md`     | Step 1 (when `.tsx` files touched)                                    | changed screens + sibling surfaces + routes + long-content stress candidates; consumed by Step 4c                                                                                            |
+| `ui/round-<N>/`      | Step 4c (live mode)                                                   | per-surface viewport screenshots (`<surface-slug>-<viewport>.png`); consumed by `post-ui-screens.sh` in Step 5                                                                               |
 
 `state.json` schema — **exact, and enforced by `write-state.sh`** (the only write path: a step
 transition is `write-state.sh -s 6a`; unset fields carry forward, `updated_at` is stamped, the
@@ -77,16 +77,16 @@ worktree toplevel. No extra ad-hoc keys.
   "round": 2,
   "step": "6a",
   "head_sha": "<sha>",
-  "last_reviewed_sha": "<sha-reviewed-in-step-4>",
+  "last_reviewed_sha": "<sha-reviewed-in-step-4a>",
   "updated_at": "<iso-utc>"
 }
 ```
 
 **`step` — settled values + in-progress markers.** The **canonical vocabulary is single-sourced in
 `write-state.sh`** — print it with `write-state.sh --vocab` (never maintain a copy here). Settled
-values are `1`, `2`, `3`, `4`, `4.5`, `4.8`, `5`, `6a`, `6b`, `7`, `merged`, `aborted`. **Bracket
+values are `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6a`, `6b`, `7`, `merged`, `aborted`. **Bracket
 every side-effecting action** with an `-ing` marker written _before_ it and the settled value
-_after_ — `3-implementing`, `4.8-validating`, `6b-applying`, `5-committing`, `5-pushing`,
+_after_ — `3-implementing`, `4c-validating`, `6b-applying`, `5-committing`, `5-pushing`,
 `5-replying`, `5-await`. A crash then leaves an unambiguous "was mid-X" marker that resume keys on,
 instead of a stale start-of-step anchor. The write is tiny (atomic temp+`mv`); do it every transition.
 

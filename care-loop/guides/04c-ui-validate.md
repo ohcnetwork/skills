@@ -1,12 +1,12 @@
-# Step 4.8 — UI/UX validation (spawned as **`care-ux-validator`** · Opus 4.8, frontmatter-bound)
+# Step 4c — UI/UX validation (spawned as **`care-ux-validator`** · Opus 4.8, frontmatter-bound)
 
-Runs **only when `git diff $(git merge-base develop HEAD) --name-only` touches `src/**/\*.tsx`** — if no `.tsx`files changed, record "Step 4.8 skipped — no UI changes" in`loop.log` and proceed to Step 5. "No UI" is always a valid skip.
+Runs **only when `git diff $(git merge-base develop HEAD) --name-only` touches `src/**/\*.tsx`** — if no `.tsx`files changed, record "Step 4c skipped — no UI changes" in`loop.log` and proceed to Step 5. "No UI" is always a valid skip.
 
 **Model self-check:** you must be Opus (judgment tier — [models.md](./models.md)). If you can tell you are a smaller model, emit `BLOCKED: care-ux-validator spawned on wrong model tier` to `agents/care-ux-validator.log` and stop.
 
 ## Inputs
 
-- **`<run-dir>/ui-surfaces.md`** — written at Step 1 (see [01-plan.md](./01-plan.md)). Lists changed screens, sibling surfaces, routes, which need login, and long-content stress candidates. If this file is missing (run predates Step 4.8), derive surfaces from the diff as described in `care-ux-review`.
+- **`<run-dir>/ui-surfaces.md`** — written at Step 1 (see [01-plan.md](./01-plan.md)). Lists changed screens, sibling surfaces, routes, which need login, and long-content stress candidates. If this file is missing (run predates Step 4c), derive surfaces from the diff as described in `care-ux-review`.
 - **`<run-dir>/decisions.md`** — dev credentials may be recorded here (`CARE_USERNAME` / `CARE_PASSWORD`). If absent and not in env, ask once and write to `decisions.md` for future rounds.
 - The diff for the current round: `git diff $(git merge-base develop HEAD)` (or delta since `last_reviewed_sha` on rounds 2+).
 
@@ -36,7 +36,7 @@ fi
 if ! { [ "$DEV_PORT" = 4000 ] && serves_this_tree 4000; }; then
   echo "HEARTBEAT $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "<run-dir>/agents/care-ux-validator.log"
   npm run dev -- --port "$DEV_PORT" >> "<run-dir>/agents/dev-server.log" 2>&1 &
-  DEV_SERVER_PID=$!
+  echo $! > "<run-dir>/.dev-server.pid"   # each Bash tool call is a fresh shell — $! is gone next call; the pidfile survives
   for i in $(seq 1 30); do
     sleep 1
     curl -sf "http://localhost:$DEV_PORT" >/dev/null 2>&1 && break
@@ -44,26 +44,36 @@ if ! { [ "$DEV_PORT" = 4000 ] && serves_this_tree 4000; }; then
 fi
 ```
 
-Navigate the browser session at `http://localhost:$DEV_PORT`. Kill the dev server (`kill $DEV_SERVER_PID`) if _you_ started it — a validator that dies mid-run leaks the server it spawned, so [00-resume.md](./00-resume.md) checks for and reaps an orphaned `dev-server.log` process on re-entry. Leave a server alone if it was already serving this worktree.
+Navigate the browser session at `http://localhost:$DEV_PORT`. Kill the dev server (`kill "$(cat <run-dir>/.dev-server.pid)" 2>/dev/null; rm -f <run-dir>/.dev-server.pid`) if _you_ started it — read the pid from the file, not from `$DEV_SERVER_PID`, which doesn't survive to your next Bash tool call. A validator that dies mid-run leaks the server it spawned, so [00-resume.md](./00-resume.md) checks for and reaps an orphaned `dev-server.log` process on re-entry. Leave a server alone if it was already serving this worktree.
 
-Run the entire live browser session under **`pw-lock.sh`** — the backend/DB is a shared singleton across concurrent worktree loops:
+Bracket the entire live browser session with **`pw-lock.sh`** — the backend/DB is a shared singleton across concurrent worktree loops. The session is a sequence of browser-MCP **tool calls**, not a single shell command, so it can't be wrapped as `pw-lock.sh -- cmd`; acquire-and-hold before the first navigate and release after the last screenshot:
 
 ```bash
-"$SKILL_DIR/pw-lock.sh" -d "<run-dir>" -- <browser-session-commands>
+"$SKILL_DIR/pw-lock.sh" -H -d "<run-dir>"   # acquire + hold (restores a clean DB), returns immediately
+# … run the full browser session: login, then per-surface navigate/resize/screenshot/probe …
+"$SKILL_DIR/pw-lock.sh" -U                    # release once the session is done
 ```
+
+Always pair `-H` with `-U`. If the validator dies mid-session the stale-pid steal reclaims the lock — that's the safety net, not the plan.
 
 Emit `HEARTBEAT` to `agents/care-ux-validator.log` before starting the browser session (a Playwright session can block for minutes; the heartbeat keeps the watchdog quiet).
 
 ## Screenshots
 
-Save all screenshots to **`<run-dir>/ui/round-<N>/`**, filename `<surface-slug>-<viewport>.png`  
-(e.g. `activity-definition-375.png`, `resource-selector-768.png`). Create the dir first:
+Save all screenshots to **`<run-dir>/ui/round-<N>/`**, filename `<surface-slug>-<width>.png`  
+where `<width>` is the **bare viewport width** — `375`, `768`, or `1280`, nothing else (e.g.
+`activity-definition-375.png`, `resource-selector-768.png`). `post-ui-screens.sh` parses this
+exact suffix to place each image in the mobile/tablet/desktop column, so a `375x812`-style suffix
+would land in the wrong column. Create the dir first:
 
 ```bash
 mkdir -p "<run-dir>/ui/round-<N>/"
 ```
 
-`post-ui-screens.sh` (Step 5) reads this directory — exact path matters.
+`post-ui-screens.sh` (Step 5) reads this directory — exact path and filename suffix matter. Each
+round it posts/updates **one** PR comment, so a new round's screenshot links **replace** the
+previous round's in that comment (older PNGs stay on the assets ref, just unlinked) — this is
+intentional; the comment always shows the latest round.
 
 ## Verdict
 
@@ -74,7 +84,7 @@ Emit the tiered report (format from `care-ux-review/SKILL.md`) to `agents/care-u
 | Tier             | Action                                                                                                                                                                                                                                                                                              |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`Broken`**     | Block the push. Set `state.json` back to `3-implementing` via `write-state.sh -s 3-implementing` and loop to Step 3 with the `Broken` findings as the fix brief. **Counts against the round cap.** Convergence guard ([governance.md](./governance.md) §2) applies after two non-converging cycles. |
-| **`Convention`** | Fix this round — treat like a "worth deciding" finding from Step 4. Spawn the implementer with the findings; re-run `run_gate.sh` before Step 5.                                                                                                                                                    |
+| **`Convention`** | Fix this round — treat like a "worth deciding" finding from Step 4a. Spawn the implementer with the findings; re-run `run_gate.sh` before Step 5.                                                                                                                                                   |
 | **`Polish`**     | No blocking action; include in the PR body round summary.                                                                                                                                                                                                                                           |
 | No findings      | Proceed to Step 5. Note `UX validation: clean` in `loop.log`.                                                                                                                                                                                                                                       |
 

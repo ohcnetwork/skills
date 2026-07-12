@@ -1,7 +1,6 @@
 ---
 description: Scratch probe for verifying care-loop model-tier enforcement. Spawn it with NO model override from a non-Opus session; it states which model it runs on and exits. Delete after testing if desired.
 model: Claude Opus 4.8 (copilot)
-infer: false
 ---
 
 <!-- generated from ../claude/care-model-probe.md — edit the body THERE and regenerate (sync-agents.sh); only frontmatter differs -->

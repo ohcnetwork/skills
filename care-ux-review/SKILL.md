@@ -45,6 +45,7 @@ Read the diff and apply this rubric:
 ### Overflow / layout
 
 For every place user-supplied or server-supplied text is rendered:
+
 - Is there a `truncate` (with `title` for full text on hover), `line-clamp`, or `break-words`?
 - Are flex children given `min-w-0`? (Without it, a flex child can grow past its container.)
 - Are containers given `overflow-hidden` or `overflow-auto`?
@@ -63,6 +64,7 @@ For every place user-supplied or server-supplied text is rendered:
 ### A11y
 
 Per **`.github/instructions/careui.instructions.md`**:
+
 - New interactive elements (`<button>`, `<input>`, `<select>`, custom clickable divs): do they have a role + accessible name (`aria-label`, `aria-labelledby`, or associated `<label>`)?
 - Validation states: `aria-invalid` present when the field is invalid?
 - Icon-only controls: `sr-only` span or `aria-label`?
@@ -79,13 +81,15 @@ Check for browser-automation tools. With Playwright MCP (`npx @playwright/mcp@la
 **In care-loop (Step 4.8):** read `<run-dir>/ui-surfaces.md` — written at Step 1. It lists changed screens, sibling surfaces, routes, which surfaces require login, and long-content stress candidates.
 
 **Standalone:** derive from the diff:
+
 1. Which pages/screens render the changed component(s)? Grep for the component name in `src/pages/` and `src/components/`.
-2. Which other files import a changed *shared* component (one used outside its own directory)? These are the sibling surfaces.
+2. Which other files import a changed _shared_ component (one used outside its own directory)? These are the sibling surfaces.
 3. Ask the user once for routes to reach each surface and whether login is required, if not obvious from the file paths.
 
 ### Auth
 
 Log in **through the UI** (`browser_navigate` to the login route, `browser_type`/`browser_fill_form` the credentials, `browser_click` submit) — no test fixtures, no `storageState`, no Playwright config. Credentials:
+
 - `CARE_USERNAME` / `CARE_PASSWORD` env vars, or
 - The loop's `<run-dir>/decisions.md` (planner recorded them at Step 1), or
 - Ask the user once if neither is available (write to `decisions.md` for future rounds in the loop).
@@ -140,4 +144,4 @@ Omit any section that is empty. A result with no `Broken` and no `Convention` fi
 
 **When invoked by `/care-review` (third lens, static only):** return findings in the format above; the care-review orchestrator maps `Broken` → "Worth deciding" and `Polish` → "Optional/FYI".
 
-**When invoked by `care-loop` Step 4.8 (`care-ux-validator` agent):** run live+static per `guides/04.8-ui-validate.md`; write screenshots to `<run-dir>/ui/round-<N>/`; return the tiered verdict; the orchestrator gates on `Broken`.
+**When invoked by `care-loop` Step 4c (`care-ux-validator` agent):** run live+static per `guides/04c-ui-validate.md`; write screenshots to `<run-dir>/ui/round-<N>/`; return the tiered verdict; the orchestrator gates on `Broken`.

@@ -1,4 +1,4 @@
-# Step 4 — Review, ours  (spawned as **`care-reviewer`** · Opus 4.8, frontmatter-bound)
+# Step 4a — Review, ours (spawned as **`care-reviewer`** · Opus 4.8, frontmatter-bound)
 
 **Model self-check:** you must be Opus (judgment tier — [models.md](./models.md)). If you can tell
 you're a smaller model, emit `BLOCKED: spawned on wrong model tier` to your agent log and stop.
@@ -6,12 +6,13 @@ you're a smaller model, emit `BLOCKED: spawned on wrong model tier` to your agen
 Review mode per the SKILL.md tier table: `trivial` — a **single lens** (`care-technical-review`)
 is enough; `standard` — full **`/care-review`** (lens-split); `complex` — `/care-review`, adding
 **`thorough`** (Opus + GPT-5.5 ensemble) when the PR is also large (roughly: >10 changed files or
->500 changed lines) or the user asked.
+
+> 500 changed lines) or the user asked.
 
 **Third lens when `.tsx` files are in the diff:** run **`care-ux-review` (static mode only)** as a
 third parallel lens agent alongside the intent and approach agents. Return its findings to the
 orchestrator alongside the other lens results: `Broken` → "Worth deciding"; `Polish` →
-"Optional/FYI". This review stays browserless — live browser validation is Step 4.8's job.
+"Optional/FYI". This review stays browserless — live browser validation is Step 4c's job.
 
 ## Rounds 2+ — review the delta, not the full diff
 

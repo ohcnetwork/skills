@@ -16,9 +16,9 @@ usable.)_
 | 1 Plan               | **Opus 4.8**                                                                                     |
 | 2 Tests-first        | **Opus 4.8** (case design) / Sonnet 4.6 (write)                                                  |
 | 3 Implement to green | Sonnet 4.6 (`trivial`/`standard`); **Opus 4.8** (`complex`, or after the escalation valve fires) |
-| 4 Review             | **Opus 4.8** (+ **GPT-5.5** only in `thorough` — `complex` + large PRs)                          |
-| 4.5 Test-grade       | **Opus 4.8** (checker ≠ Step-3 maker)                                                            |
-| 4.8 UX-validate      | **Opus 4.8** — skipped when no `.tsx` files changed                                              |
+| 4a Review            | **Opus 4.8** (+ **GPT-5.5** only in `thorough` — `complex` + large PRs)                          |
+| 4b Test-grade        | **Opus 4.8** (checker ≠ Step-3 maker)                                                            |
+| 4c UX-validate       | **Opus 4.8** — skipped when no `.tsx` files changed                                              |
 | 5 Gate + push        | Sonnet 4.6 / script                                                                              |
 | 6a Collate + triage  | **Opus 4.8**                                                                                     |
 | 6b Apply verdicts    | Sonnet 4.6 — the verdict list is the instruction                                                 |

@@ -1,4 +1,4 @@
-# Step 3 — Parallel makers: implement + (optional) e2e  (spawned role · Sonnet, Opus if complex)
+# Step 3 — Parallel makers: implement + (optional) e2e (spawned role · Sonnet, Opus if complex)
 
 The worktree **and** its branch already exist on arrival (the orchestrator created both right after
 plan approval — see SKILL.md "Worktree-first"). No branch guard here: cwd is inside the worktree,
@@ -49,6 +49,6 @@ pw-lock.sh -- npm run playwright:db-restore    # ad-hoc isolation restore, if ev
 
 A long wait here just means another worktree loop holds the lock — not a hang.
 
-**UX hygiene while building:** if you touch `.tsx` files, apply the `care-ux-review` overflow/layout and a11y rubric as you write — build it right rather than fixing it at Step 4.8. Key points: `truncate`+`title` or `line-clamp` on variable text; `min-w-0` on flex children; accessible names on new interactive elements; `h-11` (44px) touch targets.
+**UX hygiene while building:** if you touch `.tsx` files, apply the `care-ux-review` overflow/layout and a11y rubric as you write — build it right rather than fixing it at Step 4c. Key points: `truncate`+`title` or `line-clamp` on variable text; `min-w-0` on flex children; accessible names on new interactive elements; `h-11` (44px) touch targets.
 
 Inherits [working-agreement.md](./working-agreement.md) and [token-discipline.md](./token-discipline.md).

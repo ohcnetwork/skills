@@ -31,18 +31,18 @@ Test stack — Playwright E2E only; inner loop runs target spec(s) only.
 
 ## Pipeline + dispatch (one table)
 
-| Step | What                                                                                                                                    | Spawned role                                          | Model                        | Guide                                               |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------- | --------------------------------------------------- |
-| 0    | **Resume** — only when a run dir already exists: reconcile `state.json` against ground truth, pick the true re-entry step.              | orchestrator                                          | —                            | [00-resume.md](./guides/00-resume.md)               |
-| 1    | **Plan** — recon → interview → draft → follow-up. _Human gate._                                                                         | **`care-planner`** (named agent)                      | Opus 4.8 — frontmatter-bound | [01-plan.md](./guides/01-plan.md)                   |
-| 2    | **Tests (when they pay)** — vitest when available; today: orchestrator records the skip inline for `trivial`, no spawn.                 | Spec author                                           | Opus design / Sonnet write   | [02-tests.md](./guides/02-tests.md)                 |
-| 3    | **Implement** — two parallel makers: implement-to-green + optional e2e.                                                                 | Implementer + E2E author                              | Sonnet (Opus if complex)     | [03-implement.md](./guides/03-implement.md)         |
-| 4    | **Review, ours** — `/care-review`; apply "worth deciding" findings.                                                                     | **`care-reviewer`** (named agent)                     | Opus 4.8 — frontmatter-bound | [04-review.md](./guides/04-review.md)               |
-| 4.5  | **Test-grade** — grade specs against criteria; no-spec mode grades the diff.                                                            | **`care-test-grader`** (named agent; checker ≠ maker) | Opus 4.8 — frontmatter-bound | [04.5-test-grade.md](./guides/04.5-test-grade.md)   |
-| 4.8  | **UX-validate** — static diff lens + live browser across 3 viewports; gates on `Broken` findings. Skipped when no `.tsx` files changed. | **`care-ux-validator`** (named agent)                 | Opus 4.8 — frontmatter-bound | [04.8-ui-validate.md](./guides/04.8-ui-validate.md) |
-| 5    | **Gate + push** — `run_gate.sh` → open/update PR → post staged replies + UI screenshots → token-free bot/CI wait.                       | Gate + push                                           | Sonnet / script              | [05-gate-push.md](./guides/05-gate-push.md)         |
-| 6a   | **Collate + triage** — verdict list from bots + CI + our review.                                                                        | **`care-triager`** (named agent)                      | Opus 4.8 — frontmatter-bound | [06a-triage.md](./guides/06a-triage.md)             |
-| 6b   | **Apply verdicts** — implement `address` items + stage thread replies.                                                                  | Apply verdicts                                        | Sonnet 4.6                   | [06b-apply.md](./guides/06b-apply.md)               |
+| Step | What                                                                                                                                    | Spawned role                                          | Model                        | Guide                                             |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------- | ------------------------------------------------- |
+| 0    | **Resume** — only when a run dir already exists: reconcile `state.json` against ground truth, pick the true re-entry step.              | orchestrator                                          | —                            | [00-resume.md](./guides/00-resume.md)             |
+| 1    | **Plan** — recon → interview → draft → follow-up. _Human gate._                                                                         | **`care-planner`** (named agent)                      | Opus 4.8 — frontmatter-bound | [01-plan.md](./guides/01-plan.md)                 |
+| 2    | **Tests (when they pay)** — vitest when available; today: orchestrator records the skip inline for `trivial`, no spawn.                 | Spec author                                           | Opus design / Sonnet write   | [02-tests.md](./guides/02-tests.md)               |
+| 3    | **Implement** — two parallel makers: implement-to-green + optional e2e.                                                                 | Implementer + E2E author                              | Sonnet (Opus if complex)     | [03-implement.md](./guides/03-implement.md)       |
+| 4a   | **Review, ours** — `/care-review`; apply "worth deciding" findings.                                                                     | **`care-reviewer`** (named agent)                     | Opus 4.8 — frontmatter-bound | [04a-review.md](./guides/04a-review.md)           |
+| 4b   | **Test-grade** — grade specs against criteria; no-spec mode grades the diff.                                                            | **`care-test-grader`** (named agent; checker ≠ maker) | Opus 4.8 — frontmatter-bound | [04b-test-grade.md](./guides/04b-test-grade.md)   |
+| 4c   | **UX-validate** — static diff lens + live browser across 3 viewports; gates on `Broken` findings. Skipped when no `.tsx` files changed. | **`care-ux-validator`** (named agent)                 | Opus 4.8 — frontmatter-bound | [04c-ui-validate.md](./guides/04c-ui-validate.md) |
+| 5    | **Gate + push** — `run_gate.sh` → open/update PR → post staged replies + UI screenshots → token-free bot/CI wait.                       | Gate + push                                           | Sonnet / script              | [05-gate-push.md](./guides/05-gate-push.md)       |
+| 6a   | **Collate + triage** — verdict list from bots + CI + our review.                                                                        | **`care-triager`** (named agent)                      | Opus 4.8 — frontmatter-bound | [06a-triage.md](./guides/06a-triage.md)           |
+| 6b   | **Apply verdicts** — implement `address` items + stage thread replies.                                                                  | Apply verdicts                                        | Sonnet 4.6                   | [06b-apply.md](./guides/06b-apply.md)             |
 
 Model picks are single-sourced in [models.md](./guides/models.md); host enforcement in
 [hosts.md](./guides/hosts.md). Shared context:
@@ -56,16 +56,16 @@ downstream dial, instead of per-step vibes. The user can pass a tier at invocati
 usually knows how complex the change is); the planner confirms or corrects it in the consolidated
 ask. The orchestrator records it in `state.json` (`"tier"`).
 
-| Knob                   | `trivial`                              | `standard`                 | `complex`                                |
-| ---------------------- | -------------------------------------- | -------------------------- | ---------------------------------------- |
-| Recon (Step 1)         | skim the target file(s)                | quick Explore              | thorough Explore                         |
-| Interview (Step 1)     | fold into the consolidated ask         | checklist-driven, uncapped | exhaustive + mandatory follow-up round   |
-| Tests (Steps 2–3)      | skip (recorded)                        | e2e optional               | e2e track on                             |
-| Implementer (Step 3)   | Sonnet 4.6                             | Sonnet 4.6                 | Opus 4.8                                 |
-| Review (Step 4)        | single lens                            | full `/care-review`        | `/care-review`; `thorough` if also large |
-| UX-validate (Step 4.8) | static + probes only (no live browser) | full live judge            | full live judge                          |
-| Poll timeout (Step 5)  | 900s                                   | 900/1800s by size          | 1800s                                    |
-| Round cap (Step 7)     | 3                                      | 5                          | 5                                        |
+| Knob                  | `trivial`                              | `standard`                 | `complex`                                |
+| --------------------- | -------------------------------------- | -------------------------- | ---------------------------------------- |
+| Recon (Step 1)        | skim the target file(s)                | quick Explore              | thorough Explore                         |
+| Interview (Step 1)    | fold into the consolidated ask         | checklist-driven, uncapped | exhaustive + mandatory follow-up round   |
+| Tests (Steps 2–3)     | skip (recorded)                        | e2e optional               | e2e track on                             |
+| Implementer (Step 3)  | Sonnet 4.6                             | Sonnet 4.6                 | Opus 4.8                                 |
+| Review (Step 4a)      | single lens                            | full `/care-review`        | `/care-review`; `thorough` if also large |
+| UX-validate (Step 4c) | static + probes only (no live browser) | full live judge            | full live judge                          |
+| Poll timeout (Step 5) | 900s                                   | 900/1800s by size          | 1800s                                    |
+| Round cap (Step 7)    | 3                                      | 5                          | 5                                        |
 
 **Escalation valve (one-way):** if the `standard` implementer fails to reach a green gate after
 **two** attempts, or triage shows the same area churning, escalate implementation to **Opus 4.8**
@@ -82,7 +82,7 @@ whatever model the session happens to be on:
 - **The orchestrator never does judgment work inline. Period.** Whatever the session model, the
   orchestrator only routes: spawns roles, relays the interview, runs scripts, writes state. Then
   the session picker being on Sonnet doesn't matter — judgment never executes on it.
-- **Every judgment step — 1 Plan, 4 Review, 4.5 Test-grade, 4.8 UX-validate, 6a Triage — runs as
+- **Every judgment step — 1 Plan, 4a Review, 4b Test-grade, 4c UX-validate, 6a Triage — runs as
   its NAMED agent:** `care-planner`, `care-reviewer`, `care-test-grader`, `care-ux-validator`,
   `care-triager`
   (installed in the hosts' agent dirs; canonical files in `agents/` here). **The agent file's
@@ -194,24 +194,24 @@ isn't auto-detected (it's an external host death); re-invoking is what triggers 
 
 ## Step 7 — Loop or stop
 
-Return to Step 4 (re-review the new diff) → 4.5 (grade) → 5 (gate **re-runs the affected specs =
+Return to Step 4a (re-review the new diff) → 4b (grade) → 5 (gate **re-runs the affected specs =
 regression guard**, then push) → 6, until one of:
 
 **Round counter.** Round 1 is the initial pass (Steps 1→6). The orchestrator increments `round`
-**exactly once per loop-back**, at the moment it re-enters Step 4 from Step 7 — including a
-4.5/4.8 → Step 3 → back-to-4 loop-back (those are the same iteration continuing, so the bump still
-happens only on the return to Step 4, not per sub-loop): `write-state.sh -s 4 -r <n+1>`. No bump on
-the first entry to Step 4. This is the number the round cap below is counted against.
+**exactly once per loop-back**, at the moment it re-enters Step 4a from Step 7 — including a
+4b/4c → Step 3 → back-to-4a loop-back (those are the same iteration continuing, so the bump still
+happens only on the return to Step 4a, not per sub-loop): `write-state.sh -s 4a -r <n+1>`. No bump on
+the first entry to Step 4a. This is the number the round cap below is counted against.
 
 **Exit (success):** affected specs green **and** no graded spec is `Wrong` **and** no criterion
 unmet (no-spec mode) **and** zero unresolved actionable bot comments **and** every
 addressed/declined thread has a posted reply **and** CI green **and** our review has no "worth
-deciding" findings **and** no **`Broken`** UI finding from Step 4.8 **and**, if Greptile
+deciding" findings **and** no **`Broken`** UI finding from Step 4c **and**, if Greptile
 publishes a confidence score, it's **≥ 4/5** (max is not
 required — correctly declining a false positive can hold the score below max forever). _(Uncovered
 criteria and Weak/Missing specs are listed, not blocked.)_
 
-**Exit (cap):** **max 5 iterations** (**3** for `trivial`) — `Wrong`-spec loop-backs from Step 4.5
+**Exit (cap):** **max 5 iterations** (**3** for `trivial`) — `Wrong`-spec loop-backs from Step 4b
 **count** against this cap (they are iterations, not free retries). Also apply the **convergence
 guard**
 ([governance.md](./guides/governance.md) §2): after **two** non-converging fix cycles, pause and

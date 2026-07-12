@@ -46,7 +46,7 @@ Frontend checklist to draw from (not exhaustive — skip what's obviously irrele
 - Reuse an existing component vs. build new
 - Explicit **non-goals** (what this change deliberately does _not_ do)
 
-If UI surfaces are touched, also settle **dev credentials** (`CARE_USERNAME` / `CARE_PASSWORD`) — ask once here if not already in env or `decisions.md`; write them there so Step 4.8 can reuse them without prompting mid-run.
+If UI surfaces are touched, also settle **dev credentials** (`CARE_USERNAME` / `CARE_PASSWORD`) — ask once here if not already in env or `decisions.md`; write them there so Step 4c can reuse them without prompting mid-run.
 
 ## Phase 3 — Draft plan
 
@@ -83,7 +83,7 @@ path. Before handing back:
    statements. If the change touches UI, at least one criterion must describe breakpoint behavior
    (e.g. "renders without overflow at 375px").
 2. **`ui-surfaces.md`** — **only when the diff touches `src/**/*.tsx`\*\*: list of surfaces for
-   Step 4.8 to validate. For each entry: the route (or "N/A — component-only"), how to navigate
+   Step 4c to validate. For each entry: the route (or "N/A — component-only"), how to navigate
    to it, whether login is required, and any long-content stress candidate (a field that renders
    variable-length text). Also list every other file that imports a changed *shared\* component
    (grep consumers under `src/`). Format:

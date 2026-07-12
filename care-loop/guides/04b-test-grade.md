@@ -1,4 +1,4 @@
-# Step 4.5 — Grade the tests  (spawned as **`care-test-grader`** · Opus 4.8, frontmatter-bound · checker ≠ maker)
+# Step 4b — Grade the tests (spawned as **`care-test-grader`** · Opus 4.8, frontmatter-bound · checker ≠ maker)
 
 Invoke the reusable lens skill **`care-test-grade`** — it holds the premise, the three inputs, the
 rubric, and the gate. This guide is only the loop wiring.
@@ -10,7 +10,7 @@ you're a smaller model, emit `BLOCKED: spawned on wrong model tier` to your agen
   transcript or reasoning** — it sees only the artifacts (the spec files, `criteria.md`,
   `intent.md`). Never hand it the maker's conversation or its justification for the specs.
 - **Loop-invoked mode:** the run dir exists, so `care-test-grade` resolves its inputs from it —
-  `criteria.md` (Step 1) and `intent.md` (`care-diff-review`, Step 4) — plus the Step-3 spec(s). No
+  `criteria.md` (Step 1) and `intent.md` (`care-diff-review`, Step 4a) — plus the Step-3 spec(s). No
   second intent reconstruction.
 
 ## Two modes: specs exist vs. no-spec
@@ -32,7 +32,7 @@ gate is always enforced, even without specs.
   ([governance.md](./governance.md) §2). These loop-backs **count against the 5-round cap**.
 - **`Missing` / `Weak` / faithfulness** are advisory → round summary / PR body, not auto-fixed.
 
-Success exit adds: *no graded spec is `Wrong`; no criterion is unmet; uncovered criteria are listed
-in the PR body / round summary.*
+Success exit adds: _no graded spec is `Wrong`; no criterion is unmet; uncovered criteria are listed
+in the PR body / round summary._
 
 Inherits [working-agreement.md](./working-agreement.md) and [token-discipline.md](./token-discipline.md).

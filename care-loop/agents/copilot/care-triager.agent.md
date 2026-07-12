@@ -1,7 +1,6 @@
 ---
 description: care-loop Step 6a triager (judgment tier, Opus-bound). Spawned by the care-loop orchestrator to collate bot/CI/review feedback and emit the verdict list (address / decline / defer-to-human). Judges only — writes no code. Not for general tasks.
 model: Claude Opus 4.8 (copilot)
-infer: false
 ---
 
 <!-- generated from ../claude/care-triager.md — edit the body THERE and regenerate (sync-agents.sh); only frontmatter differs -->

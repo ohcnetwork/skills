@@ -23,7 +23,7 @@
 #
 # Step vocabulary (settled + -ing in-progress markers + terminal) — the canonical list is the
 # STEP_VOCAB var below; print it with `write-state.sh --vocab`:
-#   1 2 3 3-implementing 4 4.5 4.8 4.8-validating 5 5-committing 5-pushing 5-await 5-replying
+#   1 2 3 3-implementing 4a 4b 4c 4c-validating 5 5-committing 5-pushing 5-await 5-replying
 #   6a 6b 6b-applying 7 merged aborted
 #
 # updated_at is always set to now. Write is atomic (.state.json.tmp + mv).
@@ -40,7 +40,7 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Step vocabulary — the SINGLE source (F2). observability.md and 00-resume.md reference this via
 # `write-state.sh --vocab` instead of maintaining their own copies (which had drifted).
-STEP_VOCAB="1 2 3 3-implementing 4 4.5 4.8 4.8-validating 5 5-committing 5-pushing 5-await 5-replying 6a 6b 6b-applying 7 merged aborted"
+STEP_VOCAB="1 2 3 3-implementing 4a 4b 4c 4c-validating 5 5-committing 5-pushing 5-await 5-replying 6a 6b 6b-applying 7 merged aborted"
 if [ "${1:-}" = "--vocab" ]; then echo "$STEP_VOCAB"; exit 0; fi
 
 default_run_dir() {

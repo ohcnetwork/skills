@@ -23,9 +23,9 @@ import sys
 
 PAIRS = {
     "01-plan": "care-planner",
-    "04-review": "care-reviewer",
-    "04.5-test-grade": "care-test-grader",
-    "04.8-ui-validate": "care-ux-validator",
+    "04a-review": "care-reviewer",
+    "04b-test-grade": "care-test-grader",
+    "04c-ui-validate": "care-ux-validator",
     "06a-triage": "care-triager",
 }
 

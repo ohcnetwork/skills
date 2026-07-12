@@ -16,7 +16,7 @@
 #   -S  SKIP the restore-on-acquire (for the snapshot-bootstrap path in preflight.sh, where no
 #       snapshot exists yet so a restore would fail). Everything else wants the clean-DB restore.
 #   -H  HOLD mode — acquire the lock, leave a background holder process, and exit 0. For
-#       sessions that aren't a single shell command (e.g. Step 4.8's browser-MCP tool calls,
+#       sessions that aren't a single shell command (e.g. Step 4c's browser-MCP tool calls,
 #       which can't be wrapped in `pw-lock.sh -- cmd`). ALWAYS pair with -U when done; if the
 #       holder dies unreleased, the stale-pid steal reclaims the lock — that's the safety net,
 #       not the plan.
@@ -117,6 +117,19 @@ if [ "$SKIP_RESTORE" = 0 ]; then
     echo "pw-lock: db-restore failed after acquiring lock" >&2
     exit 1
   fi
+fi
+
+# -H: leave a background holder process and exit WITHOUT releasing. The holder's pid replaces
+# ours in the lock, so if the session dies without calling -U, the normal stale-pid steal
+# reclaims the lock (the safety net, not the plan — always pair -H with -U).
+if [ "$HOLD" = 1 ]; then
+  nohup bash -c 'while :; do sleep 300; done' >/dev/null 2>&1 &
+  holder_pid=$!
+  echo "$holder_pid" >"$LOCK/pid"
+  acquired=0  # disable the EXIT-trap release — the lock must outlive this process
+  hb "STATUS: pw-lock HELD (holder pid $holder_pid)"
+  echo "pw-lock: HELD (holder pid $holder_pid) — release with pw-lock.sh -U"
+  exit 0
 fi
 
 hb "STATUS: pw-lock acquired — running: $*"

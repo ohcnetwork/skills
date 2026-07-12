@@ -54,12 +54,12 @@ switch the picker.
 `Planned by:` attestation. (Claude Code additionally has the opt-in `PreToolUse` hard gate:
 `hooks/assert-judgment-agent.py`.)
 
-## Playwright MCP — one-time setup for UI validation (Step 4.8)
+## Playwright MCP — one-time setup for UI validation (Step 4c)
 
-Step 4.8 (`care-ux-validator`) and the standalone `care-ux-review` skill drive a real browser via
+Step 4c (`care-ux-validator`) and the standalone `care-ux-review` skill drive a real browser via
 **Playwright MCP** (`@playwright/mcp`) — no specs, no fixtures. Both hosts support it; the tool
 names are the same (`browser_navigate`, `browser_screenshot`, `browser_snapshot`, `browser_evaluate`,
-`browser_resize`, `browser_console_messages`, `browser_fill`). Without this setup, Steps 4.8 and
+`browser_resize`, `browser_console_messages`, `browser_fill`). Without this setup, Steps 4c and
 `care-ux-review live` degrade to static-only analysis and say so in their output.
 
 **VS Code Copilot** — add to User-level MCP config (Settings → "MCP", or edit

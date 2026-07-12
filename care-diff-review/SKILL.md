@@ -7,8 +7,8 @@ argument-hint: "[develop | commit | working | <file>]"
 
 # CARE Diff Review
 
-**Premise: good code is self-readable.** A reviewer should be able to tell *what* a change does
-and *why* (the requirement it fulfills) from the code alone — no commit message needed. This
+**Premise: good code is self-readable.** A reviewer should be able to tell _what_ a change does
+and _why_ (the requirement it fulfills) from the code alone — no commit message needed. This
 skill reconstructs that intent from the diff, surfaces every place the code failed to convey it,
 and confirms the reconstruction with the user. Wherever the reading was hard, that's the finding.
 
@@ -16,7 +16,7 @@ and confirms the reconstruction with the user. Wherever the reading was hard, th
 
 1. **Suggest first, don't edit.** Propose changes; apply only after explicit approval.
 2. **Smallest possible diff.** Fix the issue and nothing adjacent. Anything out of scope goes in
-   a one-line *Out of scope* note, not into the working tree.
+   a one-line _Out of scope_ note, not into the working tree.
 3. **Don't change the contract or invent logic** to paper over something. Diagnose the cause; if
    you don't understand why existing code is the way it is, ask — don't rewrite it.
 4. **Match the codebase** — new code reads like the file around it (`CLAUDE.md`).
@@ -35,11 +35,11 @@ git diff $(git merge-base develop HEAD) > /tmp/care_review.diff && wc -l /tmp/ca
 
 Override only when explicitly asked:
 
-| User says | Command |
-|---|---|
-| "against the last/previous commit" | `git show HEAD` |
-| "unstaged / working changes only" | `git diff` + `git diff --staged` |
-| a specific file ("only this file") | scope the diff to that path |
+| User says                          | Command                          |
+| ---------------------------------- | -------------------------------- |
+| "against the last/previous commit" | `git show HEAD`                  |
+| "unstaged / working changes only"  | `git diff` + `git diff --staged` |
+| a specific file ("only this file") | scope the diff to that path      |
 
 **List the changed files first**, then review only those (read an unchanged file only if a
 finding needs its context). **Do not read the commit message, PR body, or branch name yet** —
@@ -52,9 +52,9 @@ For the diff as a whole, and for each distinct logical change, state plainly:
 
 - **What it does** — the behavior change, in one or two sentences.
 - **Why** — the requirement or problem it most plausibly fulfills, inferred from the code.
-- **Confidence** — *high* if the code makes it self-evident; *low* if you had to guess.
+- **Confidence** — _high_ if the code makes it self-evident; _low_ if you had to guess.
 
-Reason from *this* code in *this* file. Read the actual control flow and data flow — don't
+Reason from _this_ code in _this_ file. Read the actual control flow and data flow — don't
 pattern-match to a catalog of known bugs.
 
 ## Step 3 — Legibility gaps (the core output)
@@ -65,20 +65,22 @@ the **minimal** change that would make the intent legible:
 - **Misleading / vague names** → intention-revealing rename (a function should say what it does:
   `releaseLocation` → `markLocationAsReserved`).
 - **Purpose not evident from surrounding code** → smallest restructure (extract / split / move)
-  that makes it self-explanatory. Add a comment *only* where naming can't carry the meaning —
+  that makes it self-explanatory. Add a comment _only_ where naming can't carry the meaning —
   a non-obvious "why", a BE quirk, a guarded edge case.
 - **Fat handlers / mixed flows** → split so each path reads top-to-bottom and can be debugged in
   isolation.
 
-Keep every suggestion legibility-sized, not a rewrite. The bar is: *would another dev understand
-this change, and the requirement behind it, by reading it cold?*
+Keep every suggestion legibility-sized, not a rewrite. The bar is: _would another dev understand
+this change, and the requirement behind it, by reading it cold?_
 
 ### Secondary — correctness
+
 While reading, if the code plainly can't fulfill the intent it implies, flag it: a logic/edge-case
 error, or a regression in the **other usages** of a shared component/hook/util/route the diff
 touched (always check those). Only concrete, evidenced issues — no speculation.
 
 ### Refactor-safety mode
+
 If the diff is described as "just readability / renaming / nothing should change", the headline is
 a yes/no on behavior preservation. Classify every hunk as rename / move / reformat / extract
 (safe) vs. anything that alters control flow, conditions, data sent to BE, effect timing, or
@@ -93,15 +95,15 @@ render output (flag loudly, however small).
 >
 > **Loop-invoked** (the `/care-review` call came from `care-loop`, signalled by a run dir
 > `<care-loop skill dir>/runs/<repo>-<branch>/` — see care-loop's `guides/observability.md`):
-> additionally write your **full** intent reconstruction — the complete per-change *what + why*,
-> not the 1–2 sentence condensed version — to `<run-dir>/intent.md`, so Step 4.5
+> additionally write your **full** intent reconstruction — the complete per-change _what + why_,
+> not the 1–2 sentence condensed version — to `<run-dir>/intent.md`, so Step 4b
 > (`care-test-grade`) can grade the specs against it without a second reconstruction. Standalone
 > invocations are unchanged — write nothing extra.
 
-Lead with the reconstructed intent: *"Here's what I read the change as doing, and the requirement
-I think it fulfills — is that right?"* A mismatch means either the code isn't legible (fix the
+Lead with the reconstructed intent: _"Here's what I read the change as doing, and the requirement
+I think it fulfills — is that right?"_ A mismatch means either the code isn't legible (fix the
 code) or there's a latent bug (fix the logic) — resolve which. Then list legibility gaps and any
-correctness finding, each `file:line` + minimal fix, ending with a one-line *Out of scope* note.
+correctness finding, each `file:line` + minimal fix, ending with a one-line _Out of scope_ note.
 
 Producing a full requirements doc is usually overkill — default to the one-or-two-sentence intent
 per change. Only emit a longer per-change requirements summary if the user asks or the diff is

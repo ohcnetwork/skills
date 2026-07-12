@@ -1,4 +1,4 @@
-# Step 5 — Gate + push  (spawned role · Sonnet / script)
+# Step 5 — Gate + push (spawned role · Sonnet / script)
 
 ## Pre-push gate — all must pass
 
@@ -17,11 +17,11 @@ The Playwright stage runs under the shared-e2e lock (`pw-lock.sh`, built in) —
 `playwright…` stage means another worktree loop holds the backend/DB lock, not a hang.** It's
 token-free; let it wait.
 
-## Commits — scope-prefixed  (**scope > type**)
+## Commits — scope-prefixed (**scope > type**)
 
 - **`scope: imperative description`** — scope = feature/module lowercase token (`questionnaire`,
   `encounter`, `billing`, `facility`, `auth`, …); fall back to top-level `src/` area.
-- Body carries the *why* when it isn't obvious from the description.
+- Body carries the _why_ when it isn't obvious from the description.
 - **One commit per round** — no commit spam.
 - **`[ENG-###]` in PR title only** — never in the commit scope.
 - **Idempotent (safe on resume):** **commit only if the tree is dirty**; **push only if local is
@@ -35,12 +35,12 @@ gh pr create --base develop --title "[ENG-707] <summary>" \
   --body-file <run-dir>/pr-body.md --label agentic-workflows
 ```
 
-**Ready, not draft** (Greptile only reviews ready PRs). *(Inside VS Code Copilot, use the native
-PR tool — see [hosts.md](./hosts.md).)* **Body from the template** — read
+**Ready, not draft** (Greptile only reviews ready PRs). _(Inside VS Code Copilot, use the native
+PR tool — see [hosts.md](./hosts.md).)_ **Body from the template** — read
 `.github/pull_request_template.md`, fill sections in place, keep the merge-checklist verbatim,
 write to `<run-dir>/pr-body.md`. Never omit the checklist.
 
-## Post UI screenshots — right after the push (when Step 4.8 produced screens)
+## Post UI screenshots — right after the push (when Step 4c produced screens)
 
 If `<run-dir>/ui/round-<N>/` exists and is non-empty, run `post-ui-screens.sh` to push the
 screenshots to the assets branch and post a PR comment with embedded images:
@@ -61,7 +61,7 @@ via `gh pr comment`. Append pushed commit SHA to **fixed** replies; **declined**
 6a reason as-is. Sign `— care-loop 🤖`. **Declined-only round** (no push): post immediately.
 Archive after posting: `mv replies.md replies-r<N>.posted.md`. No `replies.md` (round 1) → no-op.
 
-- **Idempotent (safe on resume):** if a crash posted only *some* replies, **skip any thread that
+- **Idempotent (safe on resume):** if a crash posted only _some_ replies, **skip any thread that
   already has a `— care-loop 🤖` reply at/after the current head** — don't double-post. Set
   `state.json` to `5-replying` before this block and the settled step after, so a resume re-enters
   here and finishes the remaining posts.

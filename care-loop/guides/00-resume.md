@@ -51,10 +51,12 @@ Before any mutating action, emit a one-line reconcile report, e.g.:
 If `state.json`'s `worktree` path no longer exists on disk, **report and stop** — never silently
 recreate it. A missing worktree means the user intervened.
 
-**Reap an orphaned dev server.** If the prior session died during Step 4.8, the Vite dev server it
+**Reap an orphaned dev server.** If the prior session died during Step 4c, the Vite dev server it
 started (logged to `<run-dir>/agents/dev-server.log`) may still be running and holding a port. If
-that log exists and a listener's cwd is inside this worktree but no 4.8 validation is active,
-it's an orphan — kill it before re-running 4.8 so the fresh validator starts clean.
+`<run-dir>/.dev-server.pid` exists, `kill "$(cat <run-dir>/.dev-server.pid)" 2>/dev/null` and
+`rm -f` the pidfile. As a fallback (older run, no pidfile), if the log exists and a listener's cwd
+is inside this worktree but no 4c validation is active, it's an orphan — kill it before re-running
+4c so the fresh validator starts clean.
 
 Once the re-entry step is chosen, hand back to the normal pipeline at that step. The per-step
 idempotency guards ([05-gate-push.md](./05-gate-push.md), [06b-apply.md](./06b-apply.md)) make a

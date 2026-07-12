@@ -3,9 +3,9 @@
 #
 # The named judgment agents are authored once in agents/claude/*.md. Their Copilot twins in
 # agents/copilot/*.agent.md are IDENTICAL except for frontmatter (Copilot needs a fully-qualified
-# `model:` string + `infer: false`, and drops `name:`/`tools:`). They used to be hand-copied — the
-# marker comment said "regenerate" but no generator existed, so body drift between hosts would be
-# silent. This is that generator.
+# `model:` string, and drops `name:`/`tools:`). They used to be hand-copied — the marker comment
+# said "regenerate" but no generator existed, so body drift between hosts would be silent. This is
+# that generator.
 #
 # Usage:
 #   sync-agents.sh            regenerate all agents/copilot/*.agent.md from agents/claude/*.md
@@ -68,7 +68,7 @@ if not mapped:
 
 marker = (f"<!-- generated from ../claude/{base}.md — edit the body THERE and regenerate "
           f"(sync-agents.sh); only frontmatter differs -->")
-sys.stdout.write(f"---\ndescription: {desc}\nmodel: {mapped}\ninfer: false\n---\n\n{marker}\n{body}")
+sys.stdout.write(f"---\ndescription: {desc}\nmodel: {mapped}\n---\n\n{marker}\n{body}")
 PY
   ) || exit 2
 

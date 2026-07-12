@@ -1,7 +1,6 @@
 ---
 description: care-loop Step 1 planner (judgment tier, Opus-bound). Spawned by the care-loop orchestrator to recon the codebase, prepare batched interview questions, and draft the plan artifacts. Not for general tasks.
 model: Claude Opus 4.8 (copilot)
-infer: false
 ---
 
 <!-- generated from ../claude/care-planner.md — edit the body THERE and regenerate (sync-agents.sh); only frontmatter differs -->

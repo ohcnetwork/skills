@@ -3,6 +3,7 @@ name: care-review
 description: Full review of a CARE frontend (care_fe) diff via two parallel lens agents (intent/legibility + approach/simplicity), condensed into one report. Use for "review/critique my changes", "review the diff", "full review", "review against develop / the last commit". Add "thorough" for a heavier cross-model ensemble. Defaults to diffing against develop; suggests rather than edits.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>] [thorough]"
+model: opus  # declared judgment tier for the orchestrator/reconcile pass — honored by the invoker, not auto-enforced
 ---
 
 # CARE Review (orchestrator)
@@ -75,21 +76,39 @@ solution until you know the problem — and the orchestrator reconciles their re
 
 ## Models
 
-Concrete picks — overridable at invocation; update this block when availability changes.
+Each judgment skill **declares its tier in its own frontmatter `model:`** (currently `opus` for the
+orchestrator and every lens) — that declaration is the single source of truth; this table just
+reflects it. Spawn each lens on its declared model. `thorough` overrides the *shape* (adds an
+ensemble), not the tier.
 
 | Mode | Agents |
 |---|---|
-| Default (lens-split) | both lenses on **Claude Opus** |
-| Thorough (ensemble) | full lens-split on **Claude Opus** *and* on **GPT-5.5**, reconciled |
+| Default (lens-split) | each lens on its frontmatter `model:` (**Opus**) |
+| Thorough (ensemble) | the lens-split on its frontmatter model **and** on **GPT-5.5**, reconciled |
+
+### How model selection actually works (read this before reusing these skills elsewhere)
+
+`model:` in a **skill's** frontmatter is a **declaration of the intended judgment tier that the
+invoker honors — it is NOT auto-enforced by the skill loader** (unlike an *agent* definition's
+`model:`, which the Agent SDK does enforce). Three invokers honor the declaration three ways:
+
+- **`/care-review` (this skill):** reads each lens's frontmatter and spawns that lens sub-agent on
+  the model it declares.
+- **care-loop:** spawns its Opus-bound agent wrappers in `care-loop/agents/claude/*.md` — those are
+  *agent* files whose `model:` **is** hard-enforced (plus a wrong-tier self-check) — and each wrapper
+  then runs the matching skill.
+- **care-evals:** deliberately **overrides** the tier with `--model` — the whole point is to ladder a
+  skill across models (including free ones) and find the cheapest that still passes. Frontmatter is
+  the *default*; the ladder is the *experiment*.
 
 **Dispatch caveats (verify in your host):**
 - Claude Code's Agent tool spawns **Claude models only** — the GPT side of the ensemble needs a
   host that exposes GPT (e.g. VS Code Copilot).
 - If the host **can't set a subagent's model**, run `/care-review thorough` as two passes — once
   with the session on Opus, once on GPT-5.5 — then do the reconcile pass yourself.
-- If the host **won't spawn subagents at all**, fall back to a single combined pass: read both lens
-  rubrics and do one review on the current model. Still valid — you just lose parallelism and
-  cross-model diversity.
+- If the host **won't spawn subagents at all** (or a single-model run, e.g. a care-evals ladder
+  rung), fall back to a single combined pass: read both lens rubrics and do one review on the
+  current model. Still valid — you just lose parallelism and cross-model diversity.
 
 ## Working agreement (inherited by every agent)
 

@@ -15,6 +15,13 @@ Hundreds of spans / patch lines reduce to ~50 lines per session so the diagnosin
 from judgment, not parsing (same token move as care-loop's run_gate.sh / collect-feedback.sh).
 Facts only — rubric.md decides what they mean.
 
+Tier-A digests also emit two sections previously hand-rolled per doctor run (2026-07-12):
+  markers:       raw-text counts of care-loop helper scripts, drift signals (gh pr checks /
+                 pr_number), agent spawns, and host-crash strings — the mechanical-contract
+                 adherence read (e.g. write-state ×97 vs ×3 was the IMP-3-regression signal).
+  silence gaps:  request-timestamp gaps ≥10 min — crash/stall suspects (the 2026-07-12 VS Code
+                 OOM showed as a ~60 min gap).
+
 Usage: digest-session.py <file.json|file.jsonl> [more ...]
 Exit: 0 digests printed · 2 a file was unreadable (named on stderr; others still digested).
 
@@ -52,6 +59,19 @@ def fmt_ms(millis):
 
 def head(s, n=80):
     return str(s)[:n].replace("\n", " ")
+
+
+# Raw-text substring markers counted in every Tier-A digest. Grouped: care-loop helper scripts
+# (mechanical-contract adherence), drift signals, judgment-agent spawns, host-crash strings.
+# Plain str.count on the raw file — fast and format-proof (regex over huge JSONL lines is not).
+MARKERS = (
+    "write-state.sh", "run_gate.sh", "poll-pr.sh", "pw-lock.sh", "preflight.sh",
+    "collect-feedback.sh", "resume-probe.sh", "post-ui-screens.sh",
+    "gh pr checks", "pr_number",
+    "runSubagent", "care-planner", "care-reviewer", "care-test-grader",
+    "care-ux-validator", "care-triager",
+    "has been cleaned up", "Reload the window",
+)
 
 
 # ---------- Tier B: agent-debug-log span export ----------
@@ -156,8 +176,9 @@ def digest_spans(path, data):
 
 # ---------- Tier A: VS Code chatSessions storage ----------
 
-def harvest_chat(records, path, session_hint):
-    """records: iterable of parsed JSON values (snapshot + patches, or one snapshot)."""
+def harvest_chat(records, path, session_hint, raw_text=""):
+    """records: iterable of parsed JSON values (snapshot + patches, or one snapshot).
+    raw_text: the undecoded file content, for MARKERS substring counts."""
     session_id = session_hint
     creation = None
     title = None
@@ -225,6 +246,16 @@ def harvest_chat(records, path, session_hint):
     if tool_heads:
         top = sorted(tool_heads.items(), key=lambda kv: -kv[1])[:5]
         print("  top tool invocations: " + "; ".join(f"{h} ×{n}" for h, n in top))
+    if raw_text:
+        hits = [f"{m} ×{n}" for m in MARKERS if (n := raw_text.count(m))]
+        print("  markers:  " + ("; ".join(hits) if hits else "(none)"))
+    gaps = [(times[i] - times[i - 1], times[i - 1], times[i])
+            for i in range(1, len(times)) if times[i] - times[i - 1] >= 600_000]
+    if gaps:
+        gaps.sort(key=lambda g: -g[0])
+        print("  silence gaps ≥10 min (crash/stall suspects):")
+        for d, a, b in gaps[:3]:
+            print(f"    {fmt_ms(a)} → {fmt_ms(b)}  ({d / 60000:.0f} min)")
     print()
 
 
@@ -239,7 +270,7 @@ def digest_file(path):
         if isinstance(data, dict) and "resourceSpans" in data:
             digest_spans(path, data)
         else:
-            harvest_chat([data], path, path.rsplit("/", 1)[-1].split(".")[0])
+            harvest_chat([data], path, path.rsplit("/", 1)[-1].split(".")[0], text)
         return
     except json.JSONDecodeError:
         pass
@@ -255,7 +286,7 @@ def digest_file(path):
             pass
     if not records:
         raise ValueError("neither whole-file JSON nor parseable JSONL")
-    harvest_chat(records, path, path.rsplit("/", 1)[-1].split(".")[0])
+    harvest_chat(records, path, path.rsplit("/", 1)[-1].split(".")[0], text)
 
 
 def main():

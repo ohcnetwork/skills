@@ -3,6 +3,7 @@ name: care-test-grade
 description: Grade the tests for a CARE frontend (care_fe) change — do the specs actually assert the acceptance criteria, or are they green but wrong (trivially-passing, asserting the wrong thing, or rubber-stamping the implementation)? A maker/checker split for tests; can run standalone or as care-loop Step 4.5. Use for "grade the tests", "are these specs any good", "do the tests cover the acceptance criteria", "are these tests green but wrong". Suggests fixes; blocks only on Wrong.
 user-invocable: true
 argument-hint: "[spec path(s)] — reads criteria from state dir when loop-invoked"
+model: opus  # declared judgment tier — honored by the invoker (care-loop agent / care-evals --model), not auto-enforced
 ---
 
 # CARE Test Grade (checker lens)

@@ -17,33 +17,52 @@ report header (same honesty rule as the loop's `planned-by:`).
 
 ## Evidence tiers (manual exports are OPTIONAL — never block on them)
 
-| Tier | Source | Gets you | Availability |
-|---|---|---|---|
-| A | VS Code chat-session storage (`workspaceStorage/<hash>/chatSessions/*.jsonl`) | per-request `modelId`, agent, timeline, tool invocations | **auto-discovered** via `find-sessions.sh` |
-| B | manual UI export `agent-debug-log-<session>.json` | per-turn token counts, spawn model args, tool errors, mid-turn-death detection | only if the user exported it |
-| C | `care-loop/runs/<slug>/` run dir | state.json, loop.log, agents/*.log, plan artifacts, gate logs, addressed.md/declined.md verdict memory | always |
+| Tier | Source                                                                        | Gets you                                                                                                | Availability                               |
+| ---- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| J    | `<run-dir>/journal.jsonl` + `agents/*.result.json` (headless `care-loopd` runs) | exact step/spawn/decision timeline, `model_used` per spawn, cost, reason codes, checkpoints             | headless runs only (once `care-loopd` ships — PLAN-orchestrator-architecture §5) |
+| A    | VS Code chat-session storage (`workspaceStorage/<hash>/chatSessions/*.jsonl`) | per-request `modelId`, agent, timeline, tool invocations, marker counts, silence gaps                   | **auto-discovered** via `find-sessions.sh` |
+| B    | manual UI export `agent-debug-log-<session>.json`                             | per-turn token counts, spawn model args, tool errors, mid-turn-death detection                          | only if the user exported it               |
+| C    | `care-loop/runs/<slug>/` run dir                                              | state.json, loop.log, agents/\*.log, plan artifacts, gate logs, addressed.md/declined.md verdict memory | always                                     |
+
+**Tier J outranks A/B when present.** A journal-emitting run is diagnosed from J + C alone — read
+`journal.jsonl` directly (one compact fact per line; grep by `event`, no digest script needed).
+Chat sessions then serve one purpose only: an occasional honesty spot-check that session `modelId`s
+match the journal's `model_used`. A/B remain the primary path for editor-hosted (legacy) runs.
 
 If Tier B is absent and the diagnosis needs its depth (token economics, spawn args), say exactly
-what's missing and how to export — *VS Code: Copilot chat panel → `…` menu → "Export Debug Log"
-(or `⇧⌘P` → "Chat: Export…"), save anywhere, pass the path* — then **proceed on A + C anyway**.
+what's missing and how to export — _VS Code: Copilot chat panel → `…` menu → "Export Debug Log"
+(or `⇧⌘P` → "Chat: Export…"), save anywhere, pass the path_ — then **proceed on A + C anyway**.
 A `copilot_all_prompts_*.json` export has no parser; grep it selectively (model lines,
 system-prompt headers) only when provided.
 
 ## Workflow
 
-1. **Gather.** Explicit paths in the invocation win. Otherwise: `find-sessions.sh` (Tier A, from
-   the repo checkout or `-r care_fe`), glob `~/Desktop`/`~/Downloads` for `agent-debug-log-*.json`
-   (Tier B), and list `care-loop/runs/*/` candidates (Tier C). Show what was found before
-   digesting.
-2. **Digest.** One `digest-session.py <all files>` call — it auto-detects both formats and emits
-   ~50 factual lines per session. Never parse the raw JSON in-context.
+1. **Gather.** Explicit paths in the invocation win. Otherwise: list `care-loop/runs/*/`
+   candidates (Tier C) and check each for `journal.jsonl` (Tier J) **first**; then
+   `find-sessions.sh -r care_fe` (Tier A) and glob `~/Desktop`/`~/Downloads` for
+   `agent-debug-log-*.json` (Tier B). Show what was found before digesting.
+   **Tier-A scoping (IMP-11 — a wrong default here produced a wrong diagnosis on 2026-07-12):**
+   loop sessions live in the TARGET repo's VS Code workspace (`Desktop/care_fe`), never in the
+   skills workspace — **always pass `-r care_fe`** (or run from a care_fe checkout). Never rely on
+   the cwd-derived default when the doctor is invoked from the skills repo: it scopes to the
+   skills workspace, which holds only skill-development sessions, and every loop run is missed.
+2. **Digest.** Tier A/B: one `digest-session.py <all files>` call — it auto-detects both formats
+   and emits ~50 factual lines per session, including **marker counts** (helper-script adherence,
+   drift signals, agent spawns, crash strings) and **silence gaps ≥10 min** — do not hand-roll
+   these analyses. Tier J needs no digestion (read/grep the journal directly). Never parse the
+   raw session JSON in-context.
 3. **Pair.** Match sessions ↔ run dirs: time window vs `state.json`/artifact mtimes, branch/PR
    strings in the digest timeline vs `state.json`. State the pairing (or that none was found).
 4. **Analyze.** Apply [rubric.md](./rubric.md) — trends dimension **first** (read
    `diagnoses/IMPROVEMENTS.md` + last 2–3 reports), then the seven evidence dimensions. For
    dimension 8 (escape attribution), read `addressed.md` from **all** run dirs found in step 1,
    not just the paired one — the aggregate is the signal. Every finding carries an evidence
-   pointer.
+   pointer. When Tier J is present, dimensions 1/3/4/5 (model tier, token/cost, pipeline order,
+   schema adherence) are **exact reads** from the journal, not inferences from session forensics.
+   **escape → fixture:** any escape attributed to a *skill* miss/false-positive (a review that
+   missed a real defect, a test-grade that rubber-stamped) is a `care-evals` fixture candidate —
+   note it in the report so the regression can be reproduced offline as a ground-truth task (see
+   `care-evals/SKILL.md`). The doctor discovers; care-evals verifies the fix with a before/after delta.
 5. **Report.** Write `diagnoses/<yyyy-mm-dd>-<sess8>.md` (append `-b`, `-c`… on same-day rerun —
    never clobber):
 

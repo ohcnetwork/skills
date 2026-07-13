@@ -3,6 +3,7 @@ name: care-diff-review
 description: Reconstruct, from the code alone, what a CARE frontend (care_fe) diff does and what requirement it fulfills, and flag where the code fails to make that legible. The intent/legibility lens of /care-review (can run standalone). Use for "what does this change do", "is this readable / self-explanatory", "reconstruct the intent", or to verify a refactor is behavior-preserving. Defaults to diffing against develop; suggests rather than edits. For a full review (intent + approach), use /care-review instead.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>]"
+model: opus  # declared judgment tier — honored by the invoker (see care-review "Models"), not auto-enforced
 ---
 
 # CARE Diff Review

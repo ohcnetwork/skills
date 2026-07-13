@@ -68,8 +68,8 @@ Did the feedback rounds converge?
 
 - **Evidence:** `loop.log` round summaries; rounds used vs cap; `poll-pr.sh` timeouts/dropped bots
   (Tier-B tool spans or `loop.log`); `declined.md` — same finding re-litigated across rounds?
-  Cross-check `state.json`'s `round` against the count of Step-4 (re-)entries in `loop.log` — they
-  must agree (round bumps once per loop-back on re-entry to Step 4; SKILL.md Step 7).
+  Cross-check `state.json`'s `round` against the count of Step-4a (re-)entries in `loop.log` — they
+  must agree (round bumps once per loop-back on re-entry to Step 4a; SKILL.md Step 7).
 - **Red flags:** rounds spent on re-declined findings; waits on bots that never engage; the
   convergence guard not firing after two non-converging cycles; `round` out of step with the
   loop.log round summaries (an uncounted round is an unbounded loop; a double-counted one exits early).

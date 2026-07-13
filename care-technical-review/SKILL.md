@@ -3,6 +3,7 @@ name: care-technical-review
 description: Review a CARE frontend (care_fe) diff for approach quality — is this the simplest solution to the problem, or overengineered? Suggests simplifications, reuse of existing components/hooks/utils, and minimal refactors. The "approach" lens of /care-review (can run standalone). Use for "is this overengineered", "simpler way to do this", "clean this up", "suggest refactors/simplifications", "is it worth a new hook/component/abstraction". Judges proportionality to the problem; favors less code, not more.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>]"
+model: opus  # declared judgment tier — honored by the invoker (see care-review "Models"), not auto-enforced
 ---
 
 # CARE Technical Review

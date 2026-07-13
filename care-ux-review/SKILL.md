@@ -3,11 +3,12 @@ name: care-ux-review
 description: UI/UX review of a CARE frontend (care_fe) diff — overflow, layout integrity across breakpoints, a11y, and Tailwind/component conventions. Two modes: static (diff-only, always runs) and live (browser via Playwright MCP, when configured). Validates the changed surfaces plus every sibling consumer of a changed shared component. Use for "review UI changes", "check layout", "a11y review", "does this break at mobile". Also dispatched as a third lens by /care-review (static only) and by care-loop Step 4.8 (live+static). Tiered output: Broken / Convention / Polish.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>] [live]"
+model: opus  # declared judgment tier — honored by the invoker (see care-review "Models"), not auto-enforced
 ---
 
 # CARE UX Review
 
-You are the UI/UX engineer lens: does this render correctly across screen sizes, and does it break any sibling surfaces? **Static mode** always runs (diff-based). **Live mode** adds browser validation via Playwright MCP when the tools are present — never silently skip it; always state which mode you're running in the output header.
+You are the UI/UX engineer lens for a **hospital EMR**: does this render correctly across screen sizes **down to small/old ward phones**, does it break any sibling surfaces, and — because **clinician time is patient-care time** — is it **efficient to use** (no needless screens or taps for routine actions)? **Static mode** always runs (diff-based). **Live mode** adds browser validation via Playwright MCP when the tools are present — never silently skip it; always state which mode you're running in the output header.
 
 ## Severity tiers (use these labels verbatim)
 
@@ -49,7 +50,11 @@ For every place user-supplied or server-supplied text is rendered:
 - Is there a `truncate` (with `title` for full text on hover), `line-clamp`, or `break-words`?
 - Are flex children given `min-w-0`? (Without it, a flex child can grow past its container.)
 - Are containers given `overflow-hidden` or `overflow-auto`?
-- Does any newly-added fixed width (e.g. `w-64`, `w-[300px]`) risk breaking at a 375px viewport?
+- Does any newly-added fixed width (e.g. `w-64`, `w-[300px]`) risk breaking at a narrow viewport?
+  **Validate down to the smallest supported device — 320px** (older/small Android, iPhone SE-class),
+  not just 375px: a fixed width — or a width **plus** horizontal padding — that exceeds ~320px
+  overflows there even when it looks fine at 375/flagship. Care runs on whatever phone is on the
+  ward. Prefer fluid widths (`w-full` + `max-w-*`) over any `w-[…px]` ≥ 320.
 - Does any `absolute`-positioned element risk escaping its clipping parent at narrow widths?
 
 ### Conventions
@@ -71,6 +76,24 @@ Per **`.github/instructions/careui.instructions.md`**:
 - Keyboard operability: custom click handlers also handle `onKeyDown` / `onKeyPress` (Enter/Space)?
 - Focus states: `focus-visible:ring-1` present on new interactive elements?
 - Touch targets: new interactive elements ≥ 44×44 CSS px? (Check height class — `h-11` = 44px.)
+
+### Workflow efficiency (hospital context)
+
+Judge the change as a clinician using it under time pressure on a shared ward device — **every extra
+screen, tap, or navigation step for a routine action is time taken from patient care.** Flag when the
+diff:
+
+- splits a **single common clinical action** (recording a vital, adding an order, searching a
+  patient) across **multiple screens / steps / routes** when it could be **one screen or one form** —
+  e.g. a multi-step wizard for a few short inputs;
+- adds deep navigation (several clicks/routes) to reach a **high-frequency** task;
+- forces avoidable context switches (modal → page → back) for what should be inline.
+
+Severity: a **`Broken`** finding when it materially burdens a **frequent** workflow — say so and name
+the single-screen alternative; a **`Polish`** note when the flow is uncommon or the extra steps are
+genuinely earned (a legitimately long form, a destructive-action confirmation, a legally-required
+consent step). A multi-step flow is **not** automatically wrong — judge it against how often
+clinicians hit it and whether each step earns its cost.
 
 ## Mode 2 — Live browser validation (when Playwright MCP tools are available)
 

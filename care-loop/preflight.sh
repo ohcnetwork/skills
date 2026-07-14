@@ -33,7 +33,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stage logs go under the run dir (<skill-dir>/runs/<repo>-<branch>/gate/) like run_gate.sh's —
-# a long db-reset writing there also counts as activity for watch-agents.sh's stall check.
+# a long db-reset writing there also counts as run-dir activity.
 # Repo name from the MAIN .git (git-common-dir, absolute) so it's stable from inside a worktree;
 # branch '/' flattened so the slug stays flat. Falls back to /tmp when not inside a git repo.
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && {

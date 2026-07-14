@@ -94,9 +94,9 @@ invoker honors — it is NOT auto-enforced by the skill loader** (unlike an *age
 
 - **`/care-review` (this skill):** reads each lens's frontmatter and spawns that lens sub-agent on
   the model it declares.
-- **care-loop:** spawns its Opus-bound agent wrappers in `care-loop/agents/claude/*.md` — those are
-  *agent* files whose `model:` **is** hard-enforced (plus a wrong-tier self-check) — and each wrapper
-  then runs the matching skill.
+- **care-loop (loopd):** the headless orchestrator pins each role's model via `care-loop/models.json`
+  (per-role/tier → engine) and cross-checks it against opencode's reported model at the plan gate — so
+  the lens runs on the configured judgment engine without relying on per-agent frontmatter.
 - **care-evals:** deliberately **overrides** the tier with `--model` — the whole point is to ladder a
   skill across models (including free ones) and find the cheapest that still passes. Frontmatter is
   the *default*; the ladder is the *experiment*.

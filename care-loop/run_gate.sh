@@ -17,8 +17,8 @@
 #   -P  skip the backend-readiness probe before Playwright (assume BE already checked)
 #
 # Default log dir: the care-loop run dir for the current repo+branch —
-# <skill-dir>/runs/<repo>-<branch>/gate/ (see guides/observability.md). Gate logs living
-# under the run dir also count as agent activity for watch-agents.sh's stall check.
+# <skill-dir>/runs/<repo>-<branch>/gate/. Gate logs living
+# under the run dir also count as run-dir activity.
 #
 # Exit: 0 all stages passed · 1 a stage failed · 2 usage/setup error.
 

@@ -1,100 +1,125 @@
-# Diagnosis rubric (care-loop-doctor)
+# Diagnosis rubric (care-loop-doctor v2 — loopd journal)
 
-Judgment dimensions for a care-loop run. Each states **what to check** and **which evidence
-answers it**. Digests are facts; this file is where meaning gets assigned. Findings must carry an
-evidence pointer (digest line / artifact path) — no vibes-only findings.
+Judgment dimensions for a **loopd** run. Each states **what to check** and **which journal/artifact
+answers it**. The journal is facts; this file is where meaning gets assigned. Every finding carries
+an evidence pointer (a journal `seq`/event, a `skills/*.result.json` sidecar path, or an artifact) —
+no vibes-only findings.
 
-## 1. Model-tier compliance
+**Evidence vocabulary** (see [SKILL.md](./SKILL.md) for the run-dir contract): `journal.jsonl`
+events (`run.start/resume/end`, `step.enter/exit`, `spawn.result/invalid/retry/escalate`,
+`skill.invoke/result`, `helper.exec`, `decision`, `push`, `ci.wait/done`, `checkpoint.written`,
+`budget.stop`, `plan.approved`); `skills/<role>-r<N>.result.json` sidecars (`verdict`, `reasonCode`,
+`terminalState`, `modelUsed`, `durationMs`, `payload`, `modelPinSatisfied`); `state.json`;
+`loop.log`; plan artifacts (`criteria.md`/`baseline.md`/`decisions.md`); `feedback.md`; `gate/*.log`.
 
-Did judgment work (plan, review, test-grade, triage) execute on Opus, and mechanical work on
-Sonnet, per `care-loop/guides/models.md`?
+All eight dimensions are now **exact reads** — IMP-14 (per-spawn cost → `cost_cum`) and IMP-15 (the
+triager's per-item verdict list → `verdicts.md`) landed 2026-07-14, so dims 3 and 8 read straight off
+the journal / `verdicts.md` instead of being blocked.
 
-- **Evidence:** digest `models:` + `spawns:` lines (Tier B has per-turn models + spawn model args;
-  Tier A has per-request `modelId`); `baseline.md` `planned-by:` line; named-agent usage
-  (`agent=care-planner` etc. in spawns, vs `(generic)` + `(no model arg)` — the historical bug).
-- **Red flags:** judgment-step turns on `claude-sonnet-*`; generic spawns with no model arg;
-  missing `planned-by:`; the consolidated ask shown without a `Planned by:` line.
+## 1. Model-tier compliance — EXACT
 
-## 2. Termination & resume
+Did each judgment spawn (plan, review, triage) run on the configured **judgment** engine, and the
+implementer on the **maker** engine, per `care-loop/models.json`?
 
-Did the session end cleanly, and if a prior session crashed, was the resume reconciled?
+- **Evidence:** `skill.result.model` per spawn + the sidecar `modelUsed`; for the planner,
+  `plan.approved.planned_by` + the sidecar `modelPinSatisfied` (the pin is **enforced at the plan
+  gate** — a wrong engine aborts `run.end{reason_code:"plan_wrong_tier"}`, [plan.ts:90]).
+- **Red flags:** a judgment spawn's `model` ≠ the configured judgment engine; a run aborted
+  `plan_wrong_tier` (the guard fired — note the configured vs reported engine). **Known blind spot:**
+  the reviewer/triager compute `modelPinSatisfied` but do **not** enforce it (only the planner gate
+  does), so a wrong-engine reviewer/triager will NOT abort — check each judgment spawn's `model`
+  explicitly rather than trusting that a run completing means the tier held.
 
-- **Evidence:** digest `ending:` (Tier B `DIED MID-TURN`); `state.json` `step` (stale start-of-step
-  vs `-ing` markers) vs the trace end; on re-runs, whether `00-resume.md` / `resume-probe.sh` shows
-  up early in the session (Tier-A tool invocations / Tier-B tool spans) instead of re-planning or
-  re-triaging already-applied work.
-- **Red flags:** dirty tree + `await`-step anchor at death; a resumed session that restarted from
-  Step 1; `state.json` never updated across a whole session.
+## 2. Termination & resume — EXACT (and better than session forensics)
 
-## 3. Token economy
+Did the run end cleanly, and if a prior process died, was resume reconciled?
 
-Was the loop cheap the way `token-discipline.md` demands?
+- **Evidence:** presence + `outcome` of the final `run.end` (`converged` / `capped` / `deferred` /
+  `aborted` / `push-failed` / `gate-blocked`); a **missing `run.end` or a dropped torn-tail line**
+  (`journal.read().truncatedTail`) = crash mid-append; `-ing` step markers in `state.json` at death;
+  `run.resume` events and whether the re-entry step matched ground truth vs restarting.
+- **Red flags:** no `run.end` with `state.json` at an `-ing` marker (died mid-mutation); a resume
+  that redid completed work; a `JournalCorruptionError` (hash-chain break mid-file — tamper/partial
+  write, not a clean crash).
 
-- **Evidence:** digest input-growth + `top input-token jumps`; spawn count vs pipeline steps;
-  Tier-A `top tool invocations` (raw `gh`/test output pulled into context instead of the bundled
-  digests); gaps > 5 min between calls (cache expiry) visible in the Tier-A timeline.
-- **Red flags:** input jumping by whole-file amounts; judgment agents loading more than their role
-  guide; polling done by the model instead of `poll-pr.sh`/`watch-agents.sh`.
+## 3. Token economy — EXACT
 
-## 4. Pipeline adherence
+Was the run efficient?
 
-Were the steps run in order with their gates?
+- **Evidence:** `skill.result.cost_usd` per spawn + the cumulative `cost_cum.usd_est` stamped on each
+  costed event (rendered as a `($X.XX)` suffix in `loop.log`); `skill.result.duration_ms` per spawn;
+  spawn count vs pipeline steps; `spawn.retry` / `spawn.escalate` counts (wasted work); loop-back
+  frequency (same area churning).
+- **Red flags:** cumulative cost well above comparable runs; high retry/escalate counts; spawn count
+  far above the step count; the same review step looping back repeatedly.
+- **Coverage note:** the CLI implementer (Sonnet `opencode run`) reports no usage, so `cost_cum`
+  covers the **judgment (Opus) spawns** — the expensive share — not the maker. A run's true total is
+  slightly higher than `cost_cum`; don't treat it as exhaustive of the maker.
 
-- **Evidence:** run-dir artifacts as a checklist — `criteria.md`/`baseline.md`/`decisions.md`
-  (Step 1), gate logs before push (`gate/*.log` mtimes vs push time), `verdicts.md` + `declined.md`
-  (6a), `replies.md` staged then archived (`replies-r*.posted.md`), worktree recorded, one commit
-  per round; Tier-A timeline for step ordering.
-- **Red flags:** push with no gate logs; replies posted before a push; 6b edits without a verdict
-  list; scope beyond ~2× `baseline.md`'s estimate without a recorded re-approval.
+## 4. Pipeline adherence — EXACT
 
-_Installation invariants (cheap check):_ if the loop misbehaved in a way that smells like a wiring
-problem (a judgment step ran generic, a script `command not found` / permission denied), run
-`care-loop/install.sh --check` — it verifies the symlinks, executable bits, and Copilot-agent sync
-in one shot. A gap here is often the real root cause behind a dimension-1 or dimension-4 finding.
+Were the steps run in order, with their gates, in one commit per round?
 
-## 5. Schema drift
+- **Evidence:** the `step.enter/exit` sequence (the FSM's actual path) + `decision{from,to}` edges;
+  `helper.exec` for `gate-inner`/`gate-full` (exit 0) **before** the `push` event; plan artifacts
+  present (`criteria.md`/`baseline.md`/`decisions.md` written at Step 1). Illegal transitions throw
+  `FsmError` — out-of-order shows as a surfaced error, never a silent skip.
+- **Red flags:** a `push` with no preceding `gate-*` exit-0 helper; a `decision` edge that skips an
+  enabled review step; missing plan artifacts; a scope far beyond `baseline.md`'s estimate.
 
-Does `state.json` match the exact schema in `care-loop/guides/observability.md`?
+## 5. Output validity — EXACT (reframed from state.json drift)
 
-- **Evidence:** the run dir's `state.json` vs the documented keys/types (`repo` = full owner/name,
-  `pr` = integer, `head_sha`/`updated_at`/`last_reviewed_sha`/`worktree` present, step values from
-  the settled + `-ing` vocabulary).
-- **Red flags:** URL in `pr`, missing keys, invented step names, extra ad-hoc keys. (This has
-  drifted in every live run so far — check it every time.)
+`state.json` **cannot drift** — [state.ts] is the sole writer and `validateState` throws on bad
+keys/types/step. So the old "schema drift" signal is structurally closed. The live signal is now
+**JobResult validity**: did a skill return schema-valid structured output?
 
-## 6. Bot-round efficiency
+- **Evidence:** `spawn.invalid` events (a role's output failed `JOBRESULT_SCHEMA` validation) + the
+  offending sidecar; retries needed to produce valid output.
+- **Red flags:** recurring `spawn.invalid` for one role (its prompt/schema are mismatched — a
+  skill-prompt fix); a role that only produced valid output after retries.
 
-Did the feedback rounds converge?
+## 6. Bot-round efficiency — EXACT
 
-- **Evidence:** `loop.log` round summaries; rounds used vs cap; `poll-pr.sh` timeouts/dropped bots
-  (Tier-B tool spans or `loop.log`); `declined.md` — same finding re-litigated across rounds?
-  Cross-check `state.json`'s `round` against the count of Step-4a (re-)entries in `loop.log` — they
-  must agree (round bumps once per loop-back on re-entry to Step 4a; SKILL.md Step 7).
-- **Red flags:** rounds spent on re-declined findings; waits on bots that never engage; the
-  convergence guard not firing after two non-converging cycles; `round` out of step with the
-  loop.log round summaries (an uncounted round is an unbounded loop; a double-counted one exits early).
+Did the CI/feedback rounds converge?
 
-## 7. Cross-run trends (do this FIRST, before fresh analysis)
+- **Evidence:** `ci.wait` / `ci.done{conclusion,converged,missing}`; `round` increments
+  (`step.enter` round + `state.json`); triager `skill.result` tallies per round
+  (`address`/`decline`/`defer`); `checkpoint.written{reason_code}` (`defer_to_human` /
+  `ci_red_no_verdicts` / `poll_timeout`); `budget.stop{max_rounds}`.
+- **Red flags:** `budget.stop max_rounds` (capped, not converged); repeated `poll_timeout` (bots
+  never engaged); `addressCount` not trending toward zero across rounds; `ci_red_no_verdicts`.
+
+## 7. Cross-run trends — do this FIRST
 
 Read `diagnoses/IMPROVEMENTS.md` and the 2–3 most recent reports before analyzing. A re-observed
-finding **bumps the existing backlog entry** (`seen-count`), it is not re-derived; an entry marked
-`applied` that recurs anyway is a _regression_ finding (the fix didn't hold) — flag it as such; a
-`declined` entry is not re-proposed unless the evidence is materially new.
+finding **bumps the existing entry** (`seen:`), never re-derived; an `applied` entry that recurs is a
+**regression**; a `declined` entry is not re-proposed without materially new evidence.
 
-## 8. Escape attribution
+**Era note:** IMP-1..IMP-13 are **pre-loopd** (the old fused-runtime loop). Many are **structurally
+obviated** by loopd — state drift (IMP-3) → `validateState` can't drift; hand-poll (IMP-5) →
+blocking `poll.ts`; model-tier inheritance (IMP-1) → gate-enforced pin. **Do not re-propose their
+edits against deleted guides** (`05-gate-push.md`, `hosts.md`, etc.). Treat them as history; new
+findings are against loopd (`orchestrator/src`), the methodology regions, the lens skills, or
+`models.json`.
+
+## 8. Escape attribution — EXACT
 
 What did the bots catch that our own pipeline should have, and which step keeps missing the same
-class? Every `address` verdict is an escape; `addressed.md` records 6a's attribution
-(`missed-by:`) at judgment time.
+class?
 
-- **Evidence:** `<run-dir>/addressed.md` (this run) **aggregated with the `addressed.md` of prior
-  run dirs** — single-run attributions are noisy judgment calls; the cross-run pattern is the
-  signal. Cross-check a sample against `verdicts.md`/`replies-r*.posted.md` (was the attribution
-  plausible?).
-- **Red flags:** the same `class` × `missed-by` pair recurring across runs (e.g. `care-review:
-approach` repeatedly missing `logic` prop-contract breaks) — that's a checklist line missing in
-  the named skill file, and becomes a weighted IMPROVEMENTS entry; everything attributed `novel`
-  (attribution dodging); `addressed.md` absent while `verdicts.md` shows `address` items (6a
-  skipped the append rule); own-review findings logged as escapes (they aren't).
-- **Output shape:** a finding here names the _target skill file_ to improve (e.g.
-  `care-technical-review/SKILL.md` gains a prop-forwarding check), not another loop-round rule.
+- **Evidence:** `<run-dir>/verdicts.md` — the triager's per-item verdict list, each row
+  `verdict · class · missed_by · source · reason`. `missed_by` names which of our steps
+  (`care-reviewer` / `care-technical-review` / `care-ux-review` / `care-test-grade`) should have
+  caught the item first (`novel` = un-catchable pre-merge; `none` = not an escape). **Aggregate
+  `verdicts.md` across run dirs** — single-run attributions are noisy; the cross-run
+  `class × missed_by` pattern is the signal. Cross-check the reviewer's own `payload.findings` (what
+  we DID catch) so an own-review finding isn't miscounted as an escape.
+- **Red flags:** the same `class × missed_by` pair recurring across runs (e.g. `care-technical-review`
+  repeatedly missing a `correctness` class) — a missing check in that lens skill, and a weighted
+  IMPROVEMENTS entry; everything attributed `novel` (attribution dodging); an `address`-heavy round
+  with no `verdicts.md` (the triager didn't emit items).
+- **Output shape:** a finding here names the **target skill file** to improve (e.g. a
+  `care-technical-review` methodology check), not another loop rule.
+- **escape → fixture:** when a bot caught a real defect our reviewer's `findings` missed, the sidecar
+  `skills/care-reviewer-r<N>.input.json` is the exact diff it saw — a ready-made `care-evals` fixture
+  (see `care-evals/SKILL.md`).

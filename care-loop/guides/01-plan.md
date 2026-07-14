@@ -1,25 +1,20 @@
-# Step 1 — Plan (spawned as **`care-planner`** · Opus 4.8, frontmatter-bound · human gate lives in SKILL.md)
+# Step 1 — Plan (care-loopd `care-planner` role · judgment tier)
 
-Agree the approach with the user and produce the plan the rest of the loop runs on. This is the one
-step behind the human gate — SKILL.md owns the consolidated ask; you produce what that ask presents.
-
-**You are a spawn, and you must be Opus (SKILL.md "Model enforcement"):** the orchestrator never
-drafts the plan inline — it spawns you as the **named `care-planner` agent**, whose frontmatter
-binds Opus (the harness applies it; an explicit model arg on a generic spawn is only the fallback
-where the named agent doesn't resolve). **Self-check before Phase 1 anyway: you know your model** (the host's system prompt names it — Copilot's literally says
-"state that you are using <model>"). If you are not Opus, emit `BLOCKED: planner spawned on wrong
-model tier` to your agent log and stop — do not draft. If you are, **write `planned-by: <model>`
-into `baseline.md`** — the consolidated ask surfaces it as the mandatory `Planned by:` line, so a
-wrong-tier plan is caught at the human gate. (A live run drafted on Sonnet silently; it's a
-defect, not a saving.)
+Agree the approach with the user and produce the plan the rest of the loop runs on. The orchestrator
+spawns this role on the configured judgment engine (`care-loop/models.json`) and enforces the tier at
+the plan gate (a wrong-engine draft is rejected); you produce the plan that the consolidated human
+gate presents. Record `planned-by: <model>` in `baseline.md` — it surfaces as the mandatory
+`Planned by:` line in that gate.
 
 Four phases, in order:
 
+<!-- care-loop:methodology name="default" -->
+
 ## Phase 1 — Recon
 
-Recon before drafting anything — thoroughness per tier (skim / quick / thorough, see the SKILL.md
-tier table). If your host lets a spawn spawn, delegate to a **read-only Explore subagent with an
-explicit model arg** (a bare spawn inherits the session model — [hosts.md](./hosts.md)); if not
+Recon before drafting anything — thoroughness per tier (skim / quick / thorough; see the tier
+definitions in Phase 3). If your host lets a spawn spawn, delegate to a **read-only Explore subagent
+with an explicit model arg** (a bare spawn inherits the session model); if not
 (the usual case — you are yourself a one-shot spawn), **do the recon yourself with read-only
 tools**: confirm the actual files that will be touched, the nearest existing
 pattern/component/hook to reuse, and existing Playwright specs covering the area. The plan must
@@ -32,7 +27,7 @@ ask; `standard` — checklist-driven, uncapped; `complex` — exhaustive. Batche
 asking until every answer that would change the diff is settled. The only filter is "does the
 answer change the diff?" **Relay mechanics:** as a one-shot spawn you may not be able to address
 the user directly — **return the batched question list to the orchestrator**, which relays it to
-the user and spawns you (Opus again) with the answers to fold in (SKILL.md "Model enforcement").
+the user and spawns you (on the judgment engine again) with the answers to fold in.
 Frontend checklist to draw from (not exhaustive — skip what's obviously irrelevant):
 
 - Empty / loading / error states
@@ -59,8 +54,8 @@ Produce:
   boundary.
 - **Test-surface contract** — routes, `data-testid`s, key ARIA labels the e2e author needs. Settled
   here so the implementer and e2e author agree on the seams up front.
-- **Change classification — the effort tier** (defaults + what each tier sets: SKILL.md tier
-  table; the user may have passed a tier at invocation — confirm or correct it):
+- **Change classification — the effort tier** (defaults + what each tier sets, defined below; the
+  user may have passed a tier at invocation — confirm or correct it):
   - `trivial` — ≤20 changed lines, UI-only default/ordering/cosmetic, **no** new component, route,
     or API interaction. Unlocks the test skip.
   - `standard` — everything between: contained feature work in a familiar area.
@@ -73,10 +68,12 @@ Any decisions or ambiguities surfaced _by drafting_ go back to the user **before
 ask (**mandatory** for `complex`; as-needed for `standard`; skip for `trivial`). This is not a
 second gate — it's "drafting raised X, which way?" Then fold the answers in.
 
+<!-- /care-loop:methodology -->
+
 ## Persist to the run dir (`<skill-dir>/runs/<repo>-<branch>/`)
 
 The run dir is the loop's single persistence location — the orchestrator derives it from the repo
-basename + current branch (see [observability.md](./observability.md)); never invent an ad-hoc
+basename + current branch; never invent an ad-hoc
 path. Before handing back:
 
 1. **`criteria.md`** — the acceptance criteria, one per line/bullet, phrased as testable
@@ -96,8 +93,7 @@ path. Before handing back:
    - ActivityDefinition name field (max: none; inject 60-char string)
    ```
    If no `.tsx` files are touched, omit this file entirely.
-3. **`baseline.md`** — the **scope baseline** for the Scope Governor
-   ([governance.md](./governance.md) §1): request, target branch, owner boundary, planned files,
+3. **`baseline.md`** — the **scope baseline** for the Scope Governor: request, target branch, owner boundary, planned files,
    planned non-test LOC — plus **`planned-by: <model>`** (your self-identification; feeds the
    mandatory `Planned by:` line in the consolidated ask). **Grounded** by recon — cite the real
    files you confirmed, not a guess.
@@ -110,5 +106,3 @@ _(`state.json` is the orchestrator's — you don't write it.)_
 
 Return the plan, the criteria, and the classification to the orchestrator for the single
 consolidated ask. Do **not** push, branch, or edit — no approval yet.
-
-Inherits [working-agreement.md](./working-agreement.md) and [token-discipline.md](./token-discipline.md).

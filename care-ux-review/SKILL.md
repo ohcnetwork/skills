@@ -1,6 +1,6 @@
 ---
 name: care-ux-review
-description: UI/UX review of a CARE frontend (care_fe) diff — overflow, layout integrity across breakpoints, a11y, and Tailwind/component conventions. Two modes: static (diff-only, always runs) and live (browser via Playwright MCP, when configured). Validates the changed surfaces plus every sibling consumer of a changed shared component. Use for "review UI changes", "check layout", "a11y review", "does this break at mobile". Also dispatched as a third lens by /care-review (static only) and by care-loop Step 4.8 (live+static). Tiered output: Broken / Convention / Polish.
+description: UI/UX review of a CARE frontend (care_fe) diff — overflow, layout integrity across breakpoints, a11y, and Tailwind/component conventions. Two modes: static (diff-only, always runs) and live (browser via Playwright MCP, when configured). Validates the changed surfaces plus every sibling consumer of a changed shared component. Use for "review UI changes", "check layout", "a11y review", "does this break at mobile". Also dispatched as a third lens by /care-review (static only) and by care-loop Step 4c (live+static). Tiered output: Broken / Convention / Polish.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>] [live]"
 model: opus  # declared judgment tier — honored by the invoker (see care-review "Models"), not auto-enforced
@@ -9,6 +9,8 @@ model: opus  # declared judgment tier — honored by the invoker (see care-revie
 # CARE UX Review
 
 You are the UI/UX engineer lens for a **hospital EMR**: does this render correctly across screen sizes **down to small/old ward phones**, does it break any sibling surfaces, and — because **clinician time is patient-care time** — is it **efficient to use** (no needless screens or taps for routine actions)? **Static mode** always runs (diff-based). **Live mode** adds browser validation via Playwright MCP when the tools are present — never silently skip it; always state which mode you're running in the output header.
+
+<!-- care-loop:methodology name="static" -->
 
 ## Severity tiers (use these labels verbatim)
 
@@ -26,6 +28,7 @@ Calibration: judge only the changed surfaces and their direct siblings. Unchange
 - **`.github/instructions/pages.instructions.md`** + **`src/hooks/useBreakpoints.ts`** — mobile-first; breakpoints xs 480 / sm 640 / md 768 / lg 1024 / xl 1280 / 2xl 1536.
 - **`tailwind.config.js`** — color tokens (primary `#0d9f6e`); never hardcode colors inline.
 - Overflow idioms in this repo: `truncate` (+ `title` attribute for hover), `line-clamp`, `break-words`, `min-w-0` on flex children, `overflow-hidden` on containers.
+<!-- /care-loop:methodology -->
 
 ## Step 0 — Resolve the diff
 
@@ -38,6 +41,8 @@ git diff $(git merge-base develop HEAD) > /tmp/care_ux.diff
 Overrides: last commit (`git show HEAD`), working only (`git diff` + `git diff --staged`), or a named file. List the changed `.tsx` files. Identify which are **shared components** (imported by files outside their own directory) — these drive the sibling-surface list.
 
 > **Dispatched as an agent by `/care-review` or `care-loop`?** The diff file path is already resolved and passed in the prompt — read it directly, do not re-run git. Return findings to the orchestrator; do **not** confirm with the user.
+
+<!-- care-loop:methodology name="static" -->
 
 ## Mode 1 — Static lens (always runs)
 
@@ -95,13 +100,43 @@ genuinely earned (a legitimately long form, a destructive-action confirmation, a
 consent step). A multi-step flow is **not** automatically wrong — judge it against how often
 clinicians hit it and whether each step earns its cost.
 
+#### Distinguish design trade-off from bug
+
+Not all multi-step flows are mistakes. Use this decision tree:
+
+**Is this a bug?** (flag as `Broken`)
+- A routine action (recording a vital, adding an order) now requires multiple screens when it didn't before
+- Unnecessary round-trips (fetch patient, go to edit screen, come back and try again)
+- A context switch (modal → page → back) that the code doesn't justify
+
+**Is this a design trade-off?** (flag as `Polish` or defer to design review)
+- A multi-step wizard for a **complex decision** where each step narrows options (legitimately intentional)
+- A destructive-action confirmation (Broken only if the confirmation is duplicated or UX is unclear)
+- A **legally-required consent step** or compliance flow (never block these; note the necessity in findings)
+- A high-friction task that users **rarely** do (Polish only, not Broken)
+
+**Ask the planner (Step 1):** if workflow efficiency is disputed, it should have been surfaced in `decisions.md`. Check that file before escalating.
+
+**Output distinction:**
+```
+**Broken (workflow bug)**
+- Recording a vital now requires navigating to two screens instead of one
+
+**Polish (design choice, not a bug)**
+- Multi-step consent flow for a regulatory requirement (intended; see decisions.md)
+```
+
+<!-- /care-loop:methodology -->
+
+<!-- care-loop:methodology name="live" -->
+
 ## Mode 2 — Live browser validation (when Playwright MCP tools are available)
 
 Check for browser-automation tools. With Playwright MCP (`npx @playwright/mcp@latest`) the tools are `browser_navigate`, `browser_click`, `browser_type` / `browser_fill_form`, `browser_resize`, `browser_take_screenshot`, `browser_snapshot`, `browser_evaluate`, `browser_console_messages` — **possibly prefixed by the host** (e.g. `mcp__playwright__browser_navigate` in Claude Code). Claude Preview (`preview_*`) and claude-in-chrome expose equivalents; use whichever family is present. If none are found, **state "Live mode skipped — no browser MCP configured"** in the output header and proceed with static only; never silently omit it.
 
 ### Determine surfaces to validate
 
-**In care-loop (Step 4.8):** read `<run-dir>/ui-surfaces.md` — written at Step 1. It lists changed screens, sibling surfaces, routes, which surfaces require login, and long-content stress candidates.
+**In care-loop (Step 4c):** read `<run-dir>/ui-surfaces.md` — written at Step 1. It lists changed screens, sibling surfaces, routes, which surfaces require login, and long-content stress candidates.
 
 **Standalone:** derive from the diff:
 
@@ -140,6 +175,10 @@ For each surface, repeat at **375×812** (mobile), **768×1024** (tablet), **128
 
 Where the change renders variable-length text (a name, a label, a status string), inject a long value (50+ characters) via `browser_type`/`browser_fill_form` or `browser_evaluate`, then re-screenshot and re-probe. Confirm truncation/wrapping actually fires — it's `Convention` if the class is present but doesn't engage (e.g. `truncate` on an `inline` element), `Broken` if text overflows the container entirely.
 
+<!-- /care-loop:methodology -->
+
+<!-- care-loop:methodology name="static" -->
+
 ## Output format
 
 ```
@@ -163,8 +202,10 @@ Where the change renders variable-length text (a name, a label, a status string)
 
 Omit any section that is empty. A result with no `Broken` and no `Convention` findings is a valid clean pass — say so plainly.
 
+<!-- /care-loop:methodology -->
+
 ## Dispatched mode notes
 
 **When invoked by `/care-review` (third lens, static only):** return findings in the format above; the care-review orchestrator maps `Broken` → "Worth deciding" and `Polish` → "Optional/FYI".
 
-**When invoked by `care-loop` Step 4c (`care-ux-validator` agent):** run live+static per `guides/04c-ui-validate.md`; write screenshots to `<run-dir>/ui/round-<N>/`; return the tiered verdict; the orchestrator gates on `Broken`.
+**When invoked by `care-loop` (loopd):** the headless reviewer (Step 4a) injects this skill's `static` methodology region when the diff touches `src/**/*.tsx` and returns the tiered verdict; the orchestrator gates on `Broken`. Live browser validation (Mode 2) is not yet wired into loopd.

@@ -5,7 +5,7 @@
 # are shared singletons. This serializes access so only one loop touches the DB / runs specs at a
 # time. Wraps an arbitrary command: acquires the lock, restores the DB snapshot for a clean start
 # (unless -S), runs the command, releases the lock, and exits with the command's status. The wait
-# is a token-free sleep loop that heartbeats to the run dir so watch-agents.sh won't flag a stall.
+# is a token-free sleep loop that heartbeats to the run dir to avoid a false stall.
 #
 # Usage: pw-lock.sh [-t TIMEOUT_S] [-i INTERVAL_S] [-d RUN_DIR] [-S] [--] <command...>
 #        pw-lock.sh -H [-t TIMEOUT_S] [-d RUN_DIR] [-S]     # acquire and HOLD (no command)

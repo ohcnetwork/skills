@@ -1,86 +1,69 @@
 ---
 name: care-loop-doctor
-description: Self-diagnosis for the care-loop skill — collate Copilot session evidence (auto-discovered VS Code chat sessions + optional debug-log exports) with care-loop run dirs, judge the run against a rubric, persist findings as memory, and apply improvements to the skill files behind one human gate. Use for "diagnose the loop", "why did the loop do X", "analyze this debug log", "loop retro", "improve care-loop from this run". Standalone — does not run the loop.
+description: Self-diagnosis for care-loop — read a headless loopd run's journal (journal.jsonl + skills/*.json sidecars + state.json + loop.log), judge it against a rubric, persist findings as memory, and apply improvements behind one human gate. Use for "diagnose the loop", "why did the loop do X", "loop retro", "improve care-loop from this run". Standalone — does not run the loop.
 user-invocable: true
-argument-hint: "[log/session path(s) | run-dir slug]"
+argument-hint: "[run-dir slug or path]"
 ---
 
 # CARE Loop Doctor (diagnose → gated self-improvement)
 
-Turn a care-loop run's evidence into (1) a diagnosis report, (2) durable memory, and (3) — with
-**one human gate** — applied improvements to the care-loop skill files. Standalone from the loop;
-this skill + the loop are designed to eventually merge into a self-improving agent, with
-`diagnoses/` as its seed memory.
+Turn a **loopd** run's on-disk trace into (1) a diagnosis report, (2) durable memory, and (3) — with
+**one human gate** — applied improvements to the loop's files. Standalone from the loop; `diagnoses/`
+is the seed memory for the eventual self-improving-agent merge.
 
 Diagnosis is **judgment work** — run on a strong model, and record `diagnosed-by: <model>` in the
 report header (same honesty rule as the loop's `planned-by:`).
 
-## Evidence tiers (manual exports are OPTIONAL — never block on them)
+## Evidence — a loopd run dir is self-contained
 
-| Tier | Source                                                                        | Gets you                                                                                                | Availability                               |
-| ---- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| J    | `<run-dir>/journal.jsonl` + `agents/*.result.json` (headless `care-loopd` runs) | exact step/spawn/decision timeline, `model_used` per spawn, cost, reason codes, checkpoints             | headless runs only (once `care-loopd` ships — PLAN-orchestrator-architecture §5) |
-| A    | VS Code chat-session storage (`workspaceStorage/<hash>/chatSessions/*.jsonl`) | per-request `modelId`, agent, timeline, tool invocations, marker counts, silence gaps                   | **auto-discovered** via `find-sessions.sh` |
-| B    | manual UI export `agent-debug-log-<session>.json`                             | per-turn token counts, spawn model args, tool errors, mid-turn-death detection                          | only if the user exported it               |
-| C    | `care-loop/runs/<slug>/` run dir                                              | state.json, loop.log, agents/\*.log, plan artifacts, gate logs, addressed.md/declined.md verdict memory | always                                     |
+loopd is headless and writes a first-class, structured trace _built for this skill_
+([skill-log.ts] header: "SKILL SELF-IMPROVEMENT"). There is no chat session to reconstruct and no
+pairing step — everything is in `care-loop/runs/<repo>-<branch>/`:
 
-**Tier J outranks A/B when present.** A journal-emitting run is diagnosed from J + C alone — read
-`journal.jsonl` directly (one compact fact per line; grep by `event`, no digest script needed).
-Chat sessions then serve one purpose only: an occasional honesty spot-check that session `modelId`s
-match the journal's `model_used`. A/B remain the primary path for editor-hosted (legacy) runs.
+| Tier  | Source                                                                                                                | What it gives                                                                                                                                                                                            |
+| ----- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **J** | `journal.jsonl` (hash-chained events) + `skills/<role>-r<N>.result.json` sidecars + `state.json` + `loop.log`         | the exact step/spawn/decision timeline, per-spawn `model_used` + `modelPinSatisfied`, verdicts + reason codes, durations, findings, CI rounds, checkpoints, crash signal (missing `run.end` / torn tail) |
+| **C** | plan artifacts (`task.md`/`criteria.md`/`baseline.md`/`decisions.md`/`ui-surfaces.md`) + `feedback.md` + `gate/*.log` | the ground truth the timeline refers to — acceptance criteria, scope baseline, bot feedback, raw helper output                                                                                           |
 
-If Tier B is absent and the diagnosis needs its depth (token economics, spawn args), say exactly
-what's missing and how to export — _VS Code: Copilot chat panel → `…` menu → "Export Debug Log"
-(or `⇧⌘P` → "Chat: Export…"), save anywhere, pass the path_ — then **proceed on A + C anyway**.
-A `copilot_all_prompts_*.json` export has no parser; grep it selectively (model lines,
-system-prompt headers) only when provided.
+Both are **always present** for a loopd run. Read `loop.log` first (one line/event, human-rendered
+from the journal); grep `journal.jsonl` by `event` for specifics; open the `skills/*.result.json`
+sidecars for verdict/model/finding detail. Never needed: a session parser or a `-r` workspace scope
+(chat-session forensics is retired — loopd leaves no session, and pre-loopd runs are already
+diagnosed).
 
 ## Workflow
 
-1. **Gather.** Explicit paths in the invocation win. Otherwise: list `care-loop/runs/*/`
-   candidates (Tier C) and check each for `journal.jsonl` (Tier J) **first**; then
-   `find-sessions.sh -r care_fe` (Tier A) and glob `~/Desktop`/`~/Downloads` for
-   `agent-debug-log-*.json` (Tier B). Show what was found before digesting.
-   **Tier-A scoping (IMP-11 — a wrong default here produced a wrong diagnosis on 2026-07-12):**
-   loop sessions live in the TARGET repo's VS Code workspace (`Desktop/care_fe`), never in the
-   skills workspace — **always pass `-r care_fe`** (or run from a care_fe checkout). Never rely on
-   the cwd-derived default when the doctor is invoked from the skills repo: it scopes to the
-   skills workspace, which holds only skill-development sessions, and every loop run is missed.
-2. **Digest.** Tier A/B: one `digest-session.py <all files>` call — it auto-detects both formats
-   and emits ~50 factual lines per session, including **marker counts** (helper-script adherence,
-   drift signals, agent spawns, crash strings) and **silence gaps ≥10 min** — do not hand-roll
-   these analyses. Tier J needs no digestion (read/grep the journal directly). Never parse the
-   raw session JSON in-context.
-3. **Pair.** Match sessions ↔ run dirs: time window vs `state.json`/artifact mtimes, branch/PR
-   strings in the digest timeline vs `state.json`. State the pairing (or that none was found).
-4. **Analyze.** Apply [rubric.md](./rubric.md) — trends dimension **first** (read
-   `diagnoses/IMPROVEMENTS.md` + last 2–3 reports), then the seven evidence dimensions. For
-   dimension 8 (escape attribution), read `addressed.md` from **all** run dirs found in step 1,
-   not just the paired one — the aggregate is the signal. Every finding carries an evidence
-   pointer. When Tier J is present, dimensions 1/3/4/5 (model tier, token/cost, pipeline order,
-   schema adherence) are **exact reads** from the journal, not inferences from session forensics.
-   **escape → fixture:** any escape attributed to a *skill* miss/false-positive (a review that
-   missed a real defect, a test-grade that rubber-stamped) is a `care-evals` fixture candidate —
-   note it in the report so the regression can be reproduced offline as a ground-truth task (see
-   `care-evals/SKILL.md`). The doctor discovers; care-evals verifies the fix with a before/after delta.
-5. **Report.** Write `diagnoses/<yyyy-mm-dd>-<sess8>.md` (append `-b`, `-c`… on same-day rerun —
-   never clobber):
+1. **Gather.** An explicit path/slug in the invocation wins. Otherwise list `care-loop/runs/*/` and
+   keep the ones containing `journal.jsonl`. Show what was found.
+2. **Read.** `loop.log` (narrative) + `state.json` (final step/outcome); grep `journal.jsonl` by
+   `event` for the specifics; open `skills/*.result.json` for verdict/model/findings. No parsing
+   script — the journal is one fact per line and `loop.log` is pre-rendered.
+3. **Analyze.** Apply [rubric.md](./rubric.md) — dim 7 (trends) **first** (read `IMPROVEMENTS.md` +
+   the last 2–3 reports), then the rest. All eight are exact reads (IMP-14 cost +
+   IMP-15 verdict list landed 2026-07-14): dim 3 reads `cost_cum`/`cost_usd` from the journal, dim 8
+   reads `verdicts.md`'s `class × missed_by` rows. Every finding carries an evidence
+   pointer (journal `seq`/event or sidecar path). **escape → fixture:** when a bot caught a real
+   defect our reviewer's `findings` missed, the sidecar `skills/care-reviewer-r<N>.input.json` is the
+   exact diff it saw — a ready-made `care-evals` fixture; note it so the regression is reproducible
+   offline (see `care-evals/SKILL.md`).
+4. **Report + Backlog.** Write `diagnoses/<yyyy-mm-dd>-<runslug>.md` (append `-b`, `-c`… on same-day
+   rerun — never clobber), then merge findings into `diagnoses/IMPROVEMENTS.md` (one fingerprinted
+   entry per distinct issue; re-observations bump `seen:`, never duplicate):
 
    ```
-   # Diagnosis — <date> — session <sess8> (<run-dir slug or "unpaired">)
+   # Diagnosis — <date> — <run-dir slug>
    diagnosed-by: <model>
-   evidence: <tier-A files> · <tier-B files or "none"> · <run dir or "none">
+   evidence: journal.jsonl (<n> events) · <sidecars / artifacts cited>
 
    ## Findings (ranked by impact)
    1. [<rubric dim>] <one-line finding>
-      evidence: <digest line / artifact path>
+      evidence: <journal seq/event or sidecar path>
       proposed edit: <file + section, concrete> | none
    ## Healthy signals
    - <what worked — regressions are detected by these disappearing>
    ```
 
-6. **Backlog.** Merge findings into `diagnoses/IMPROVEMENTS.md` — one fingerprinted entry per
-   distinct issue:
+   Backlog entry shape:
 
    ```
    ## IMP-<n> · <short title>
@@ -90,19 +73,90 @@ system-prompt headers) only when provided.
    proposed edit: <file + section>
    ```
 
-   Re-observations bump `seen:` and append the report pointer — **never duplicate an entry**. An
-   `applied` entry re-observed = flag as regression in the report. A `declined` entry is not
-   re-proposed without materially new evidence.
+   An `applied` entry re-observed = flag as regression. A `declined` entry is not re-proposed without
+   materially new evidence.
 
-7. **Gate + apply.** Present **one consolidated ask**: the proposed edits grouped by target file,
-   each tagged with its `IMP-<n>`. On approval — apply them to `care-loop/` (or this skill's own
-   files), mark the entries `applied (<date>)`. Declined items → `declined (<reason>)`. **No
-   approval → the report + backlog stand; nothing else is touched.** The apply scope is skill
-   files ONLY — never `care_fe` code, never `runs/` artifacts.
+5. **Gate + apply.** Present **one consolidated ask**, edits grouped by target file, each tagged with
+   its `IMP-<n>`, and **split by apply-authority**:
+   - **Apply-now (behind the gate):** methodology regions in `care-loop/guides/01-plan.md` /
+     `06a-triage.md`, the standalone lens files (`care-*-review/SKILL.md`), `care-loop/models.json`,
+     and this skill's own files — all markdown/config the doctor can safely edit.
+   - **Propose-only:** anything under `care-loop/orchestrator/src/*.ts` is **tested code** — write the
+     concrete patch as the finding, tag it "loopd change — apply via an orchestrator edit +
+     `npm test`", and **do not auto-apply** it (the doctor can't run the test gate it would need).
+
+   On approval, apply the apply-now edits and mark entries `applied (<date>)`; declined → `declined
+(<reason>)`. **No approval → the report + backlog stand; nothing else is touched.** Never edit
+   `care_fe` code or `runs/` artifacts.
+
+## Escape → care-evals fixture (closed-loop improvement)
+
+When your diagnosis surfaces an escape (bot caught what your reviewer's findings missed), convert it to a **care-evals fixture** so the regression is caught offline forever.
+
+### Fixture creation workflow
+
+1. **Extract the MRE (minimal reproducible example) from the run:**
+   - Diff context: the changed files from the run, with 5 lines before/after each change
+   - Bot finding: copy the text from `feedback.md` or the PR review comment
+   - Expected verdict: what should your reviewer have flagged? (`blocked` or `findings`?)
+   - Why it escaped: one-line explanation (e.g., "logic: null de-reference after conditional that doesn't guarantee non-null")
+
+2. **Create a fixture in `care-evals/fixtures/` (alongside the existing ground-truth tasks):**
+
+   ```json
+   {
+     "name": "reviewer-escaped-null-deref-2026-07-15",
+     "description": "Reviewer missed null de-reference after optional-chain conditional",
+     "diff": "<the diff from run's sidecar skills/care-reviewer-r<N>.input.json>",
+     "expected_verdict": "blocked",
+     "expected_class": "logic",
+     "expected_reason": "Function de-references `user.profile.name` without null guard after `if (user?.id) { … }`",
+     "source_run": "care_fe-eng-729-…",
+     "source_report": "2026-07-15-care_fe-eng-729-….md"
+   }
+   ```
+
+3. **Run the eval to baseline the current model:**
+
+   ```bash
+   cd care-evals
+   npm run eval -- --fixture reviewer-escaped-null-deref-2026-07-15 --model claude-opus-4.8
+   ```
+
+   Output shows: did the reviewer catch it? What verdict/class did it return?
+
+4. **Record in the doctor's backlog (`care-loop-doctor/diagnoses/IMPROVEMENTS.md`):**
+
+   ```markdown
+   ## IMP-N · Reviewer missed null de-reference in conditional path
+   status: open
+   first-seen: 2026-07-15 · seen: 1 · dimension: 8 (escape attribution)
+   evidence: 2026-07-15-care_fe-eng-729-….md
+   proposed edit: care-diff-review/SKILL.md — add null-safety check to Logic section
+   fixture: care-evals/fixtures/reviewer-escaped-null-deref-2026-07-15.json
+   ```
+
+5. **Fix the skill (if needed) and verify the eval delta:**
+
+   Once you've edited the reviewer's methodology, re-run the eval with the updated skill. The fixture now guards the fix — if the skill regresses, the eval fails.
+
+   ```bash
+   npm run eval -- --fixture reviewer-escaped-null-deref-2026-07-15 --model claude-opus-4.8 --before-after
+   ```
+
+### Why fixtures matter
+
+- **Offline regression detection** — the escape is never forgotten; if the skill regresses, the eval catches it
+- **Quantified improvement** — you can measure "before/after fix" delta on the exact diff that escaped
+- **Generalization** — the fixture's class (logic, types, a11y, etc.) becomes a seed for other similar defects
+- **Speed** — offline eval is much faster than running a full care-loop; you can iterate on skill improvements in minutes, not hours
+
+---
 
 ## Non-goals
 
-- Does not run or resume the loop (that's `care-loop` + its `00-resume.md`).
-- No Claude Code transcript ingestion in v1 (separate format; later).
+- Does not run or resume the loop (that's loopd).
+- Chat-session / debug-log ingestion is retired (headless loopd leaves none). A pre-loopd run is
+  diagnosed only from its existing `diagnoses/` report.
 - No scheduler — user-invoked. The self-improving-agent conversion is a future plan that reuses
   `diagnoses/` as memory.

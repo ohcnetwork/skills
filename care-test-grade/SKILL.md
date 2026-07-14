@@ -23,9 +23,8 @@ the specs around it (`playwright` skill conventions, `CLAUDE.md`).
 ## Step 1 — Gather the three inputs (triangulate)
 
 1. **Acceptance criteria = ground truth.**
-   - **Loop-invoked** (a run dir `<care-loop skill dir>/runs/<repo>-<branch>/` exists — see
-     care-loop's `guides/observability.md`): read `<run-dir>/criteria.md` (persisted by care-loop
-     Step 1). Do not re-derive them.
+   - **Loop-invoked** (a run dir `<care-loop skill dir>/runs/<repo>-<branch>/` exists): read
+     `<run-dir>/criteria.md` (persisted by care-loop Step 1). Do not re-derive them.
    - **Standalone:** take the criteria the user gives; if none, ask for them (what the user can
      *do/see*). Don't invent criteria from the code — that's the circularity this skill exists to
      catch.
@@ -50,6 +49,47 @@ For every criterion, assess:
 - **Correctness** — no spec contradicts the criteria or asserts unrelated behavior.
 - **Edge / negative cases** — the criterion's failure/empty/boundary path, where it has one.
 
+### Faithfulness — does the spec exercise the real user flow?
+
+**Real flow:** user action (click, type, submit) → app handles it → verify outcome
+
+**Shortcuts (flag as Weak or Wrong):**
+- **Seeding state directly** — e.g., `page.goto("…?patientId=123")` instead of searching for the patient or logging in
+- **Mocking API responses** without going through the real request (bypasses request/response handling)
+- **Asserting on internal state** or implementation details (e.g., `store.userCount === 5`) the user never sees
+- **Skipping required interactions** — accepting a consent modal, confirming a destructive action — to speed up the test
+- **Testing in isolation** — a feature that depends on authentication skips the login flow
+
+**When shortcuts are justified:**
+If a flow is blocked by slow/unreliable backend, clarify in the finding: "Backend pagination is timeout-prone; testing with seeded data until pagination stabilizes." Flag for follow-up testing once the backend is fixed.
+
+### Common interaction patterns — checklist
+
+If the spec touches any of these, verify the full pattern is covered:
+
+**Modals:** 
+- Opened (trigger + appears) + Closed (Escape key, outside click, close button)  
+- Focus trap maintained inside modal
+
+**Dropdowns:** 
+- Open (click / arrow key), Select (click / keyboard arrow + Enter), Close (Escape / outside click)  
+- Focus management when closed
+
+**Tabs:** 
+- Select (click / arrow keys), Content updates correctly, Focus stays on tab button
+
+**Forms:** 
+- Validation pre-submit (error feedback shown in real-time), Submission (happy path + error path with retry)  
+- Form state resets after successful submit (if applicable)
+
+**Lists / Tables:** 
+- Pagination (prev/next buttons work, page indicator accurate), Sorting (order verified both directions), Filtering (correct items shown)
+
+**Async operations:** 
+- Loading state shown (spinner / skeleton), Success state (data rendered correctly), Error state (error message + retry shown)
+
+Flag a **Weak** verdict when a pattern is touched but the full interaction isn't tested (e.g., "Modal opens but doesn't test Escape key close"). Flag **Wrong** if a shortcut skips essential user interaction.
+
 **Verdict per criterion — one of:**
 
 | Verdict | Meaning | Disposition |
@@ -60,6 +100,47 @@ For every criterion, assess:
 | **Wrong** | a spec contradicts the criteria or asserts unrelated behavior (rubber-stamps the implementation) | **blocks** |
 
 Give the **minimal fix** for every non-Covered verdict.
+
+### Criticality — prioritize the fixes
+
+Not all unmet criteria are equally important. Mark each criterion's criticality so implementers prioritize fixes:
+
+**Critical path:**
+- User action (search, submit, confirm, delete) in the main workflow
+- Failure means the feature is broken or unusable
+- Example: "User can submit the form and see the success message"
+- → A `Weak` or `Missing` verdict on a critical path should be highlighted: "Recommend fixing before merge"
+
+**Secondary / edge case:**
+- Fallback behavior, error handling, empty states
+- Failure means degraded UX, not broken feature
+- Example: "Search returns no results → empty state shown"
+- → A `Weak` verdict here can ship (good-but-optional fix)
+
+**Polish / rare flow:**
+- Uncommon task, nice-to-have, UX quality
+- Example: "User can undo the last action"
+- → `Missing` verdict can ship; no loopback needed
+
+**Output format:**
+
+```markdown
+### Per-criterion verdicts
+
+| Criterion | Verdict | Criticality | Finding |
+|-----------|---------|-------------|---------|
+| User can submit the form | Weak | Critical | Only tests happy path; missing validation error handling |
+| Success message appears | Covered | Critical | — |
+| Search returns no results | Missing | Secondary | No spec for empty state (good-to-have) |
+| Undo last action | Missing | Polish | Not in scope for this PR |
+
+### Summary
+Critical findings (must fix): 1 (form validation)
+Secondary findings (good-to-fix): 1 (empty state)
+Polish findings (optional): 1 (undo)
+```
+
+This lets implementers fix critical gaps immediately while understanding that secondary/polish gaps can ship.
 
 ### Anti-circularity (the core check)
 

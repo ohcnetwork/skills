@@ -78,8 +78,8 @@ diagnosed).
 
 5. **Gate + apply.** Present **one consolidated ask**, edits grouped by target file, each tagged with
    its `IMP-<n>`, and **split by apply-authority**:
-   - **Apply-now (behind the gate):** methodology regions in `care-loop/guides/01-plan.md` /
-     `06a-triage.md`, the standalone lens files (`care-*-review/SKILL.md`), `care-loop/models.json`,
+   - **Apply-now (behind the gate):** methodology regions in the role skills (`care-planner/SKILL.md`,
+     `care-triager/SKILL.md`), the standalone lens files (`care-*-review/SKILL.md`), `care-loop/models.json`,
      and this skill's own files — all markdown/config the doctor can safely edit.
    - **Propose-only:** anything under `care-loop/orchestrator/src/*.ts` is **tested code** — write the
      concrete patch as the finding, tag it "loopd change — apply via an orchestrator edit +

@@ -81,6 +81,12 @@ export interface JobResult {
   model_used: string;
 }
 
-const ajv = new Ajv({ allErrors: true });
+// `removeAdditional: true` STRIPS (not rejects) top-level keys outside the schema before the rest of
+// validation runs. opencode's native structured output does not strictly enforce `additionalProperties:
+// false` across providers — Copilot's claude-opus was observed adding a stray `questions: ""` to an
+// otherwise valid `findings` JobResult, which hard-crashed the live loop. Dropping harmless extras keeps
+// the boundary robust while still strictly validating every REQUIRED field (missing fields, bad enums,
+// wrong const all still fail). The stripped result matches the JobResult type exactly.
+const ajv = new Ajv({ allErrors: true, removeAdditional: true });
 export const validateJobResult: ValidateFunction<JobResult> =
   ajv.compile<JobResult>(JOBRESULT_SCHEMA);

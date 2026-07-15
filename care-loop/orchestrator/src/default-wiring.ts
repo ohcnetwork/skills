@@ -52,7 +52,7 @@ export function defaultSeams(cfg: WiringConfig): Seams {
   const logger = makeSkillLogger({ runDir: cfg.runDir, runId });
   const reviewer = withSkillLog("care-reviewer", opencodeReviewer(models), logger);
   const implementer = withSkillLog("implementer", opencodeImplementer(models), logger);
-  const triager = withSkillLog("care-triager", opencodeTriager(models), logger);
+  const triager = withSkillLog("care-triager", opencodeTriager(models, cfg.worktree), logger);
   const buildArgs = cfg.buildLess ? ["-n"] : [];
   const provision = cfg.provision ?? symlinkProvisioner();
   const gateOf = (runDir: string, worktree: string, tag: string) =>

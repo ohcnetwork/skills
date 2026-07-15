@@ -1,3 +1,10 @@
+---
+name: care-triager
+description: The care-loopd triage role (Step 6a). Collate PR bot reviews + CI failures + our own /care-review findings into one deduped list, verify each against the real code, and emit a verdict (address / decline / defer-to-human) plus an escape attribution per item. No code is written here (that's 6b). Loop-internal judgment role sourced by the orchestrator; not a standalone command.
+user-invocable: false
+model: opus # declared judgment tier — the orchestrator pins the engine and enforces it, no self-attestation
+---
+
 # Step 6a — Collate + triage (care-loopd `care-triager` role · judgment tier)
 
 The orchestrator spawns this role on the configured judgment engine (`care-loop/models.json`) and
@@ -39,6 +46,11 @@ Merge into one deduped list (bots often overlap). For each item, apply
 **verify-before-accept**: check the finding against the
 **real code path + adjacent files**; reject unrealistic edge cases, speculative risks, broad
 rewrites (Greptile/CodeRabbit false positives). Skip resolved/outdated threads.
+
+**Verify in PARALLEL.** When several items need code inspection, read the cited paths and their
+adjacent files as MULTIPLE tool calls in a SINGLE step — never one file per round-trip. Batch the
+greps and reads across all items at once, then judge; round-trip latency is the dominant cost, not
+the reads themselves. Do not spawn subagents (the `task` tool) — verify directly.
 
 Then emit a verdict per item:
 

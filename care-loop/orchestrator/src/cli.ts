@@ -9,10 +9,12 @@ import { join, resolve } from "node:path";
 import { Journal } from "./journal.js";
 import { projectAndWrite, projectState } from "./state.js";
 import { renderEvent } from "./render.js";
-import { acquireLock } from "./lock.js";
-import { runStart } from "./orchestrate.js";
+import { withLock } from "./lock.js";
+import { runStart, reduceTriage } from "./orchestrate.js";
+import { runCiRounds, type CiRoundsConfig } from "./ci-round.js";
 import { runPlan, hasApprovedPlan } from "./plan.js";
 import { terminalFront, derivePaths } from "./front-terminal.js";
+import { probePr, planResume } from "./resume.js";
 import type { PlanInput } from "./plan-front.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 
@@ -30,7 +32,9 @@ Usage:
               --build-less · --max-rounds <n> · --poll-timeout-ms <ms>
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
-  care-loopd resume <run-dir>    Acquire the run lock, recover the journal head, report re-entry.
+  care-loopd resume <run-dir>    Reconcile the PR (probePr: head · CI · bots-at-head) and RE-ENTER the
+       CI-round loop at the journal-head round against the existing PR — no re-push, no duplicate PR.
+       Resumes the CI stage only (a PR must be open); pass --main if the checkout isn't the default.
 
 Advanced (the two phases of \`run\`, split for scripting/debugging):
   care-loopd plan  [flags]       Just the interactive plan stage — writes criteria.md / baseline.md /
@@ -74,44 +78,138 @@ function cmdStatus(runDir: string): void {
   const { events, truncatedTail } = journalOf(runDir).read();
   const s = projectState(events);
   console.log(`run:  ${runDir}`);
-  console.log(`step=${s.step}  round=${s.round}  pr=${s.pr ?? "-"}  head=${s.head_sha.slice(0, 9)}  ci-branch=${s.branch}`);
-  console.log(`updated_at=${s.updated_at}${truncatedTail ? "   (journal tail torn — crash-recovered)" : ""}`);
+  console.log(
+    `step=${s.step}  round=${s.round}  pr=${s.pr ?? "-"}  head=${s.head_sha.slice(0, 9)}  ci-branch=${s.branch}`,
+  );
+  console.log(
+    `updated_at=${s.updated_at}${truncatedTail ? "   (journal tail torn — crash-recovered)" : ""}`,
+  );
   console.log(`\nlast events:`);
   for (const e of events.slice(-6)) console.log("  " + renderEvent(e));
 }
 
-function cmdResume(runDir: string): void {
+async function cmdResume(
+  runDir: string,
+  flags: Record<string, string | true>,
+): Promise<void> {
   if (!existsSync(join(runDir, "journal.jsonl"))) {
     console.error(`no journal at ${runDir} — nothing to resume`);
     process.exit(2);
   }
-  const lock = acquireLock(runDir); // refused if another orchestrator holds this run
-  try {
-    const { events, truncatedTail } = journalOf(runDir).read();
-    const state = projectAndWrite(runDir, events); // rewrite derived state.json from the recovered head
-    console.log(`resume: ${runDir}   (lock pid ${lock.pid})`);
-    if (truncatedTail) console.log(`  recovered: torn journal tail truncated (crash mid-append)`);
-    console.log(`  head:  step=${state.step}  round=${state.round}  pr=${state.pr ?? "-"}  head_sha=${state.head_sha.slice(0, 9)}`);
-    console.log(`  next:  reconcile ground truth (git tree · PR head · CI) then continue at step ${state.step}`);
-    console.log(`  note:  full resume-probe reconcile + step dispatch land with the agent-runner wiring.`);
-  } finally {
-    lock.release();
+  const { events, truncatedTail } = journalOf(runDir).read();
+  const plan = planResume(events);
+  const s = plan.state;
+  console.log(`resume: ${runDir}`);
+  if (truncatedTail)
+    console.log(`  recovered: torn journal tail truncated (crash mid-append)`);
+  console.log(
+    `  head:  step=${s.step}  round=${s.round}  pr=${s.pr ?? "-"}  head_sha=${s.head_sha.slice(0, 9)}`,
+  );
+  if (!plan.resumable) {
+    console.error(`  cannot resume: ${plan.reason}`);
+    process.exit(2);
   }
+
+  // Reconstruct the same real seams `start` uses (mainRepoPath from --main; worktree/repo/branch/task
+  // come from the journal-head state, so resume needs no re-supplied seed flags).
+  const { mainRepoPath } = derivePaths(s.branch, flags);
+  const base = typeof flags.base === "string" ? flags.base : "develop";
+  const buildLess = flags["build-less"] === true;
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+  const seams = defaultSeams({
+    repo: s.repo,
+    mainRepoPath,
+    worktree: s.worktree,
+    branch: s.branch,
+    base,
+    task: s.task,
+    runDir,
+    buildLess,
+    modelsFile,
+  });
+
+  // Reconcile PR ground truth (probePr = the resume-probe PR half) BEFORE re-entering the loop.
+  const probe = await probePr(seams.gh, plan.pr!, plan.headSha!);
+  console.log(
+    `  probe: pr #${plan.pr}  state=${probe.state}  ci=${probe.ci}  pr-head=${probe.prHead.slice(0, 9)}  bots@head=[${probe.botsAtHead.join(", ")}]`,
+  );
+  if (probe.state !== "open") {
+    console.error(
+      `  cannot resume: PR #${plan.pr} is ${probe.state} (nothing to converge)`,
+    );
+    process.exit(2);
+  }
+
+  const cfg: CiRoundsConfig = {};
+  if (typeof flags["max-rounds"] === "string")
+    cfg.maxRounds = Number(flags["max-rounds"]);
+  if (typeof flags["poll-timeout-ms"] === "string")
+    cfg.pollTimeoutMs = Number(flags["poll-timeout-ms"]);
+
+  // Re-enter the CI-round loop under the run lock, on the SAME journal (a stale lock from the crashed
+  // run is stolen — its holder pid is dead). runCiRounds picks up at the recorded round against the
+  // existing PR: no re-push, no duplicate PR (that was the whole reason `start` could not resume).
+  console.log(
+    `\n── resuming autonomous loop at CI round ${s.round} (pr #${plan.pr}) ${"─".repeat(20)}\n`,
+  );
+  const res = await withLock(runDir, async () => {
+    const j = journalOf(runDir);
+    j.append({
+      event: "run.resume",
+      step: s.step,
+      round: s.round,
+      data: { pr: plan.pr, head_sha: plan.headSha },
+    });
+    projectAndWrite(runDir, j.read().events);
+    return runCiRounds({
+      gh: seams.gh,
+      runDir,
+      repo: s.repo,
+      branch: s.branch,
+      pr: plan.pr!,
+      headSha: plan.headSha!,
+      sinceIso: plan.sinceIso!,
+      bots: seams.bots,
+      triage: reduceTriage(seams.triage),
+      apply: seams.apply,
+      gate: seams.gate,
+      push: seams.pushRound,
+      cfg,
+      startRound: s.round,
+    });
+  });
+  console.log(
+    `\ndone: outcome=${res.outcome}  rounds=${res.rounds}  pr=#${plan.pr}`,
+  );
+  if (res.outcome !== "converged") process.exit(1);
 }
 
 async function cmdPlan(flags: Record<string, string | true>): Promise<void> {
   // The pluggable front sources the input + pairs the terminal gate; the planner is the default
   // opencode Opus skill; runPlan is the invariant core. A different workflow swaps only the front.
   const { input, gate } = await terminalFront(flags).resolve();
-  const modelsFile = typeof flags.models === "string" ? flags.models : undefined;
-  const { planner } = defaultPlanSeams({ repo: input.repo, branch: input.branch, runDir: input.runDir, modelsFile });
-  console.log(`care-loopd plan: ${input.repo}  branch=${input.branch}  ticket=${input.ticket}`);
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+  const { planner } = defaultPlanSeams({
+    repo: input.repo,
+    branch: input.branch,
+    runDir: input.runDir,
+    modelsFile,
+  });
+  console.log(
+    `care-loopd plan: ${input.repo}  branch=${input.branch}  ticket=${input.ticket}`,
+  );
   console.log(`  run dir: ${input.runDir}\n`);
 
   const res = await runPlan({ input, planner, gate });
-  console.log(`\nplan: ${res.outcome}  (${res.reasonCode})${res.classification ? `  tier=${res.classification}` : ""}`);
+  console.log(
+    `\nplan: ${res.outcome}  (${res.reasonCode})${res.classification ? `  tier=${res.classification}` : ""}`,
+  );
   if (res.outcome === "approved") {
-    console.log(`  next: care-loopd start --task '${input.task}' --ticket ${input.ticket} --branch ${input.branch} --summary '${input.summary}'`);
+    console.log(
+      `  next: care-loopd start --task '${input.task}' --ticket ${input.ticket} --branch ${input.branch} --summary '${input.summary}'`,
+    );
   } else {
     process.exit(1);
   }
@@ -137,37 +235,76 @@ async function cmdStart(flags: Record<string, string | true>): Promise<void> {
   // authorizes pushing — SKILL.md). `--skip-plan` bypasses it for a throwaway/dev run.
   const skipPlan = flags["skip-plan"] === true;
   const journalPath = join(runDir, "journal.jsonl");
-  const priorEvents = existsSync(journalPath) ? journalOf(runDir).read().events : [];
+  const priorEvents = existsSync(journalPath)
+    ? journalOf(runDir).read().events
+    : [];
   if (!skipPlan && !hasApprovedPlan(priorEvents)) {
-    console.error(`start: no approved plan in ${runDir} — run \`care-loopd plan …\` first (or pass --skip-plan for a throwaway run).`);
+    console.error(
+      `start: no approved plan in ${runDir} — run \`care-loopd plan …\` first (or pass --skip-plan for a throwaway run).`,
+    );
     process.exit(2);
   }
 
-  await startFromInput({ task, ticket, branch, summary, repo, mainRepoPath, worktree, runDir }, flags);
+  await startFromInput(
+    { task, ticket, branch, summary, repo, mainRepoPath, worktree, runDir },
+    flags,
+  );
 }
 
 /** Run the autonomous loop (build → PR → CI rounds) from a resolved `PlanInput` + the advanced flags.
  *  Shared by `start` (raw flag path) and `run` (post-approval continuation) so neither re-derives the
  *  tier/prBody/seams. Reads the tier from the journal the plan stage wrote. */
-async function startFromInput(input: PlanInput, flags: Record<string, string | true>): Promise<void> {
-  const { task, ticket, branch, summary, repo, mainRepoPath, worktree, runDir } = input;
+async function startFromInput(
+  input: PlanInput,
+  flags: Record<string, string | true>,
+): Promise<void> {
+  const {
+    task,
+    ticket,
+    branch,
+    summary,
+    repo,
+    mainRepoPath,
+    worktree,
+    runDir,
+  } = input;
   const base = typeof flags.base === "string" ? flags.base : "develop";
   const buildLess = flags["build-less"] === true;
-  const modelsFile = typeof flags.models === "string" ? flags.models : undefined;
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
 
   // Tier flows plan → start via the projected state. A trivial change notes the test skip in the PR.
-  const priorEvents = existsSync(join(runDir, "journal.jsonl")) ? journalOf(runDir).read().events : [];
+  const priorEvents = existsSync(join(runDir, "journal.jsonl"))
+    ? journalOf(runDir).read().events
+    : [];
   const tier = priorEvents.length ? projectState(priorEvents).tier : "standard";
-  let prBody = typeof flags.body === "string" ? flags.body : `## Changes\n\n${summary}`;
+  let prBody =
+    typeof flags.body === "string" ? flags.body : `## Changes\n\n${summary}`;
   if (tier === "trivial") prBody += `\n\n_Tests skipped — trivial change._`;
 
   const cfg: { maxRounds?: number; pollTimeoutMs?: number } = {};
-  if (typeof flags["max-rounds"] === "string") cfg.maxRounds = Number(flags["max-rounds"]);
-  if (typeof flags["poll-timeout-ms"] === "string") cfg.pollTimeoutMs = Number(flags["poll-timeout-ms"]);
+  if (typeof flags["max-rounds"] === "string")
+    cfg.maxRounds = Number(flags["max-rounds"]);
+  if (typeof flags["poll-timeout-ms"] === "string")
+    cfg.pollTimeoutMs = Number(flags["poll-timeout-ms"]);
 
-  const seams = defaultSeams({ repo, mainRepoPath, worktree, branch, base, task, runDir, buildLess, modelsFile });
-  console.log(`care-loopd start: ${repo}  branch=${branch}  worktree=${worktree}`);
-  console.log(`  PR title will be: [${ticket}] ${summary}${buildLess ? "   (build-less gate)" : ""}${tier ? `   (tier=${tier})` : ""}\n`);
+  const seams = defaultSeams({
+    repo,
+    mainRepoPath,
+    worktree,
+    branch,
+    base,
+    task,
+    runDir,
+    buildLess,
+    modelsFile,
+  });
+  console.log(
+    `care-loopd start: ${repo}  branch=${branch}  worktree=${worktree}`,
+  );
+  console.log(
+    `  PR title will be: [${ticket}] ${summary}${buildLess ? "   (build-less gate)" : ""}${tier ? `   (tier=${tier})` : ""}\n`,
+  );
 
   const res = await runStart({
     runDir,
@@ -182,7 +319,9 @@ async function startFromInput(input: PlanInput, flags: Record<string, string | t
     cfg,
     ...seams,
   });
-  console.log(`\ndone: phase=${res.phase}  outcome=${res.outcome}${res.pr ? `  pr=#${res.pr}` : ""}`);
+  console.log(
+    `\ndone: phase=${res.phase}  outcome=${res.outcome}${res.pr ? `  pr=#${res.pr}` : ""}`,
+  );
   if (res.phase === "ci" && res.outcome !== "converged") process.exit(1);
 }
 
@@ -192,16 +331,28 @@ async function startFromInput(input: PlanInput, flags: Record<string, string | t
  *  (runPlan just wrote `plan.approved`); it is no longer a CLI boundary. */
 async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   const { input, gate } = await terminalFront(flags).resolve();
-  const modelsFile = typeof flags.models === "string" ? flags.models : undefined;
-  const { planner } = defaultPlanSeams({ repo: input.repo, branch: input.branch, runDir: input.runDir, modelsFile });
-  console.log(`care-loopd: ${input.repo}  branch=${input.branch}  ticket=${input.ticket}`);
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+  const { planner } = defaultPlanSeams({
+    repo: input.repo,
+    branch: input.branch,
+    runDir: input.runDir,
+    modelsFile,
+  });
+  console.log(
+    `care-loopd: ${input.repo}  branch=${input.branch}  ticket=${input.ticket}`,
+  );
   console.log(`  run dir: ${input.runDir}\n`);
 
   const plan = await runPlan({ input, planner, gate });
-  console.log(`\nplan: ${plan.outcome}  (${plan.reasonCode})${plan.classification ? `  tier=${plan.classification}` : ""}`);
+  console.log(
+    `\nplan: ${plan.outcome}  (${plan.reasonCode})${plan.classification ? `  tier=${plan.classification}` : ""}`,
+  );
   if (plan.outcome !== "approved") process.exit(1);
 
-  console.log(`\n── plan approved — starting the autonomous loop ${"─".repeat(28)}\n`);
+  console.log(
+    `\n── plan approved — starting the autonomous loop ${"─".repeat(28)}\n`,
+  );
   await startFromInput(input, flags);
 }
 
@@ -221,7 +372,7 @@ async function main(): Promise<void> {
       break;
     case "resume":
       if (!rest[0]) usage();
-      cmdResume(resolve(rest[0]));
+      await cmdResume(resolve(rest[0]), parseFlags(rest.slice(1)));
       break;
     case "run":
       await cmdRun(parseFlags(rest));
@@ -238,6 +389,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(`care-loopd: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(
+    `care-loopd: ${err instanceof Error ? err.message : String(err)}`,
+  );
   process.exit(1);
 });

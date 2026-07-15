@@ -94,17 +94,20 @@ export function reviewerMethodology(opts: { tsx: boolean }): string {
 
 /**
  * The planner methodology injected into both the interview-phase and plan-phase system prompts.
- * Sources from guides/01-plan.md (Phases 1–4, enforcement/persistence excluded).
- * Both phases receive the same methodology body; the per-phase preamble controls what to output.
+ * Sources from the `care-planner` skill (Phases 1–4; the persist/hand-back mechanics outside the
+ * region are excluded). Both phases receive the same methodology body; the per-phase preamble
+ * controls what to output. Promoted from guides/01-plan.md to a standalone skill so it's eval-able
+ * via care-evals like the reviewer lenses (see PLAN-skill-sourcing.md).
  */
 export function plannerMethodology(): string {
-  return loadMethodology(resolve(LOOP_DIR, "guides/01-plan.md"), "default");
+  return loadMethodology(resolve(SKILLS_ROOT, "care-planner/SKILL.md"), "default");
 }
 
 /**
  * The triage methodology injected into the 6a triager's system prompt.
- * Sources from guides/06a-triage.md (Collate + Triage core, enforcement/persistence excluded).
+ * Sources from the `care-triager` skill (Collate + Triage core; the persist/output mechanics outside
+ * the region are excluded). Promoted from guides/06a-triage.md to a standalone skill.
  */
 export function triagerMethodology(): string {
-  return loadMethodology(resolve(LOOP_DIR, "guides/06a-triage.md"), "default");
+  return loadMethodology(resolve(SKILLS_ROOT, "care-triager/SKILL.md"), "default");
 }

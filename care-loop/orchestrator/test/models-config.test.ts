@@ -40,6 +40,25 @@ test("tier default applies to all judgment roles when no per-role override", () 
   assert.equal(m.planner, "JUDGE");
   assert.equal(m.triager, "JUDGE");
   assert.equal(m.implementer, "MAKE");
+  // Recon is navigation, not judgment → it follows the MAKER tier, not judgment (the planner speed lever).
+  assert.equal(m.plannerRecon, "MAKE");
+});
+
+test("plannerRecon defaults to the maker tier but honors an explicit role override", () => {
+  const def = loadModels(
+    write(tmp(), JSON.stringify({ tiers: { judgment: "J", maker: "M" } })),
+  );
+  assert.equal(def.plannerRecon, "M"); // recon ≠ judgment: falls to maker, not the judgment tier
+  assert.equal(def.planner, "J"); // the gated PLAN phase still judgment
+
+  const override = loadModels(
+    write(
+      tmp(),
+      JSON.stringify({ tiers: { judgment: "J", maker: "M" }, roles: { plannerRecon: "FAST" } }),
+    ),
+  );
+  assert.equal(override.plannerRecon, "FAST"); // explicit override wins
+  assert.equal(override.planner, "J"); // unaffected
 });
 
 test("missing file → all-undefined (factories fall back to their built-in defaults), no throw", () => {

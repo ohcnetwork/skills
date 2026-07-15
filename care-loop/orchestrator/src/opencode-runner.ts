@@ -89,25 +89,12 @@ const JUDGMENT_PERMISSION = {
   external_directory: "allow",
 } as const;
 
-/** Reject if `p` doesn't settle within `ms` — the un-hang backstop for a judgment spawn. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms,
-    );
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
+// withTimeout is intentionally removed — the old setTimeout-based approach did NOT work: when the
+// timer fired it rejected the outer promise but the inner `session.prompt` fetch was still pending,
+// so `promptStructuredOnce` never actually unblocked (observed: two concurrent planner sessions both
+// hung for 15+ min with 480s limits). The real fix is in promptStructuredOnce: kill the embedded
+// opencode server when the deadline fires, which tears down the HTTP connection and causes the
+// pending fetch to fail immediately with a network error. Control then unwinds normally.
 
 // The SDK hardcodes `--port=4096` for every embedded server, and `opencode serve --port=0` ignores 0
 // and also binds 4096 — so concurrent OR retried spawns (and stale/zombie servers left by a killed run)
@@ -202,62 +189,82 @@ async function promptStructuredOnce(
   modelPinSatisfied: boolean;
   cost?: SpawnCost;
 }> {
-  const oc = await startOpencodeOnFreePort({ permission: JUDGMENT_PERMISSION });
+  // `tools: { task: false }` disables the subagent-spawn tool for judgment spawns. SSE-traced: the
+  // planner recon spent ~90s of a 146s run inside two serial `task` subagents (each its own slow agentic
+  // loop) — pure latency the planner doesn't need (direct batched grep/glob/read is faster). Harmless for
+  // the reviewer/triager, which don't spawn subagents anyway. Combined with the batch directive in the
+  // planner prompt, this is the "explore in parallel like Claude Code" fix (no index, no accuracy loss).
+  const oc = await startOpencodeOnFreePort({
+    permission: JUDGMENT_PERMISSION,
+    tools: { task: false },
+  });
   const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
+  // Deadline backstop (server-kill, per the note above): when the timer fires, CLOSE the embedded
+  // server. That tears down the HTTP connection so the still-pending session.prompt fetch fails
+  // immediately with a network error and control unwinds — unlike the old setTimeout-rejects-outer
+  // approach, which left the fetch pending forever. Still timer-driven, so it bounds wall-clock but is
+  // NOT sleep-proof (App Nap pauses the timer); the SSE-activity + session.abort un-hang (Tier A) is
+  // the planned replacement that makes this precise. `timedOut` re-labels the resulting network error
+  // as a timeout so promptStructured's isTransient retry doesn't re-run a spawn we deliberately killed.
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    void oc.server?.close?.();
+  }, timeoutMs);
   try {
-    return await withTimeout(
-      (async () => {
-        const session = unwrap<any>(
-          await oc.client.session.create({
-            body: { title: `${spec.role} r${spec.round}` },
-          }),
-        );
-        const sessionId = session.id ?? session.sessionID;
-        if (!sessionId)
-          throw new Error("opencode: session.create returned no id");
-
-        const res = unwrap<any>(
-          await oc.client.session.prompt({
-            path: { id: sessionId },
-            // `format` (structured output) is in the runtime API + docs but missing from this SDK
-            // version's published body type, so the body is cast. Proven live (spike-reviewer).
-            body: {
-              model: { providerID: spec.providerID, modelID: spec.modelID },
-              system: spec.system,
-              parts: [{ type: "text", text: spec.task }],
-              format: { type: "json_schema", schema },
-            } as any,
-          }),
-        );
-
-        const info = res?.info ?? res;
-        if (info?.error?.name === "StructuredOutputError") {
-          throw new Error(
-            `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
-          );
-        }
-        const structured = info?.structured ?? info?.structured_output;
-        if (structured == null) {
-          throw new Error(
-            `opencode returned no structured output. info keys: ${Object.keys(info ?? {}).join(", ")}`,
-          );
-        }
-        const modelReported: string | undefined =
-          info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
-        const modelPinSatisfied = modelReported
-          ? modelReported.includes(spec.modelID)
-          : true;
-        return {
-          data: structured,
-          modelReported,
-          modelPinSatisfied,
-          cost: extractCost(info),
-        };
-      })(),
-      timeoutMs,
-      `opencode judgment spawn (${spec.role})`,
+    const session = unwrap<any>(
+      await oc.client.session.create({
+        body: { title: `${spec.role} r${spec.round}` },
+      }),
     );
+    const sessionId = session.id ?? session.sessionID;
+    if (!sessionId) throw new Error("opencode: session.create returned no id");
+
+    const res = unwrap<any>(
+      await oc.client.session.prompt({
+        path: { id: sessionId },
+        // `format` (structured output) is in the runtime API + docs but missing from this SDK
+        // version's published body type, so the body is cast. Proven live (spike-reviewer).
+        body: {
+          model: { providerID: spec.providerID, modelID: spec.modelID },
+          system: spec.system,
+          parts: [{ type: "text", text: spec.task }],
+          format: { type: "json_schema", schema },
+        } as any,
+      }),
+    );
+
+    const info = res?.info ?? res;
+    if (info?.error?.name === "StructuredOutputError") {
+      throw new Error(
+        `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
+      );
+    }
+    const structured = info?.structured ?? info?.structured_output;
+    if (structured == null) {
+      throw new Error(
+        `opencode returned no structured output. info keys: ${Object.keys(info ?? {}).join(", ")}`,
+      );
+    }
+    const modelReported: string | undefined =
+      info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
+    const modelPinSatisfied = modelReported
+      ? modelReported.includes(spec.modelID)
+      : true;
+    return {
+      data: structured,
+      modelReported,
+      modelPinSatisfied,
+      cost: extractCost(info),
+    };
+  } catch (e) {
+    if (timedOut)
+      throw new Error(
+        `opencode judgment spawn (${spec.role}) timed out after ${timeoutMs}ms (embedded server killed)`,
+      );
+    throw e;
   } finally {
+    clearTimeout(deadline);
     await oc.server?.close?.();
   }
 }

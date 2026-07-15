@@ -133,7 +133,7 @@ function consolidatedAsk(input: PlanInput, p: PlannerPayload) {
   };
 }
 
-/** Persist the plan artifacts the downstream runners consume (guides/01-plan.md "Persist to the run
+/** Persist the plan artifacts the downstream runners consume (the `care-planner` skill, "Persist to the run
  *  dir"): criteria.md (Step-4b grader + Step-3), baseline.md (Scope Governor + test-surface for the
  *  e2e author), decisions.md (6a triage citation-declines), ui-surfaces.md (Step-4c, only when .tsx). */
 function writeArtifacts(input: PlanInput, p: PlannerPayload, questions: PlanQuestion[], answers: PlanAnswer[]): void {

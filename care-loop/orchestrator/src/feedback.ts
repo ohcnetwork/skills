@@ -65,14 +65,17 @@ export interface FeedbackInputs {
 }
 
 /** Render the feedback.md digest (pure). */
-export function renderFeedback(inp: FeedbackInputs): { markdown: string; count: number } {
+export function renderFeedback(inp: FeedbackInputs): {
+  markdown: string;
+  count: number;
+} {
   const resolved = new Set(inp.resolvedIds);
   const now = inp.now ?? new Date().toISOString().replace(/\.\d+Z$/, "Z");
   const L: string[] = [
     `# PR #${inp.pr} — pre-digested bot feedback   (${now})`,
     "# (author · path:line · thread-id · trimmed body) — grouped by file+line; every comment",
     "# kept (co-located bots each keep their thread id). [resolved] threads are skippable.",
-    "# Source of truth is the live thread; this is the triage starting point (see 06a-triage.md).",
+    "# Source of truth is the live thread; this is the triage starting point (see the care-triager skill).",
     "",
   ];
   let count = 0;
@@ -83,7 +86,12 @@ export function renderFeedback(inp: FeedbackInputs): { markdown: string; count: 
   L.push("## Inline comments");
   const inline = inp.reviewComments
     .filter((c) => isBot(c.user))
-    .sort((a, b) => (a.path ?? "").localeCompare(b.path ?? "") || (a.line ?? 0) - (b.line ?? 0) || (a.id ?? 0) - (b.id ?? 0));
+    .sort(
+      (a, b) =>
+        (a.path ?? "").localeCompare(b.path ?? "") ||
+        (a.line ?? 0) - (b.line ?? 0) ||
+        (a.id ?? 0) - (b.id ?? 0),
+    );
   let prevLoc = "";
   for (const c of inline) {
     const loc = `${c.path ?? "-"}:${c.line ?? "-"}`;
@@ -119,13 +127,21 @@ function indent(text: string, n: number): string {
 }
 
 /** Fetch + render + write feedback.md. CI checks and our own /care-review findings are NOT here. */
-export async function collectFeedback(gh: GitHubApi, opts: { pr: number; runDir?: string }): Promise<{ markdown: string; count: number }> {
+export async function collectFeedback(
+  gh: GitHubApi,
+  opts: { pr: number; runDir?: string },
+): Promise<{ markdown: string; count: number }> {
   const [reviewComments, issueComments, resolvedIds] = await Promise.all([
     gh.listReviewComments(opts.pr),
     gh.listIssueComments(opts.pr),
     gh.listResolvedReviewCommentIds(opts.pr),
   ]);
-  const rendered = renderFeedback({ pr: opts.pr, reviewComments, issueComments, resolvedIds });
+  const rendered = renderFeedback({
+    pr: opts.pr,
+    reviewComments,
+    issueComments,
+    resolvedIds,
+  });
   if (opts.runDir) {
     mkdirSync(opts.runDir, { recursive: true });
     writeFileSync(join(opts.runDir, "feedback.md"), rendered.markdown);

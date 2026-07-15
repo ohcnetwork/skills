@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { probePr } from "../src/resume.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { probePr, planResume } from "../src/resume.ts";
+import { Journal } from "../src/journal.ts";
 import type { PrReview } from "../src/github.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
 
@@ -61,4 +65,121 @@ test("probePr: no reviews at head → empty botsAtHead (nobody re-reviewed the n
   const probe = await probePr(gh, 1, "newsha");
   assert.deepEqual(probe.botsAtHead, []);
   assert.equal(probe.ci, "pending");
+});
+
+// ── planResume: the pure "can this run dir re-enter the CI loop?" decision ────────────────────────
+
+const BASE_STATE = {
+  task: "Enhance patient age (ENG-747)",
+  repo: "ohcnetwork/care_fe",
+  branch: "enhance-patient-age",
+  worktree: "/tmp/wt",
+  tier: "standard" as const,
+  pr: null as number | null,
+  round: 1,
+  step: "1" as const,
+  head_sha: "seed",
+  last_reviewed_sha: "",
+};
+
+function journalWith(events: (j: Journal) => void): Journal {
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-resume-"));
+  const j = new Journal(join(dir, "journal.jsonl"), "run-747");
+  j.append({
+    event: "run.start",
+    step: "1",
+    round: 1,
+    data: { state: BASE_STATE },
+  });
+  events(j);
+  return j;
+}
+
+test("planResume: a run with an open PR mid-CI is resumable at its head round", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "push",
+      data: {
+        state: { head_sha: "ea1ad6b8a", step: "5-pushing" },
+        head_sha: "ea1ad6b8a",
+      },
+    });
+    j.append({
+      event: "decision",
+      data: {
+        note: "pr-opened",
+        pr: 16571,
+        state: { pr: 16571, step: "5-await" },
+      },
+    });
+    j.append({ event: "step.enter", step: "6a", round: 2 });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, true);
+  assert.equal(plan.pr, 16571);
+  assert.equal(plan.headSha, "ea1ad6b8a");
+  assert.equal(plan.round, 2);
+});
+
+test("planResume: sinceIso is the CURRENT head's push time, not resume-time (else the poll waits forever for already-arrived bots)", () => {
+  let pushTs = "";
+  const j = journalWith((j) => {
+    j.append({
+      event: "push",
+      data: {
+        state: { head_sha: "headA", step: "5-pushing" },
+        head_sha: "headA",
+      },
+    });
+    pushTs = j.read().events.at(-1)!.ts;
+    j.append({
+      event: "decision",
+      data: {
+        note: "pr-opened",
+        pr: 16571,
+        state: { pr: 16571, step: "5-await" },
+      },
+    });
+    j.append({ event: "step.enter", step: "6a", round: 2 });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(
+    plan.sinceIso,
+    pushTs,
+    "sinceIso must be the head's push timestamp",
+  );
+});
+
+test("planResume: no PR opened yet → NOT resumable (CI-stage only), with a clear reason", () => {
+  const j = journalWith((j) => {
+    j.append({ event: "step.enter", step: "3", round: 1 });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, false);
+  assert.match(plan.reason, /no PR opened yet/);
+  assert.equal(plan.pr, undefined);
+});
+
+test("planResume: an already-ended run is NOT resumable (nothing to converge)", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "decision",
+      data: {
+        note: "pr-opened",
+        pr: 16571,
+        state: { pr: 16571, step: "5-await" },
+      },
+    });
+    j.append({
+      event: "run.end",
+      data: {
+        outcome: "converged",
+        reason_code: "ci_clean",
+        state: { step: "merged" },
+      },
+    });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, false);
+  assert.match(plan.reason, /already ended/);
 });

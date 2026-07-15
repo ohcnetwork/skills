@@ -23,6 +23,7 @@ export interface ModelsConfig {
   roles?: {
     reviewer?: string;
     planner?: string;
+    plannerRecon?: string; // interview/recon phase; defaults to the maker tier (fast)
     triager?: string;
     implementer?: string;
   };
@@ -56,6 +57,9 @@ export function loadModels(configPath?: string): SkillModels {
     provider: config.provider,
     reviewer: config.roles?.reviewer ?? judgment,
     planner: config.roles?.planner ?? judgment,
+    // Recon is navigation, not judgment → defaults to the fast MAKER tier (not judgment), the planner
+    // speed lever. Explicit roles.plannerRecon wins; else maker; else the factory's built-in fallback.
+    plannerRecon: config.roles?.plannerRecon ?? maker,
     triager: config.roles?.triager ?? judgment,
     implementer: config.roles?.implementer ?? maker,
   };

@@ -1,3 +1,10 @@
+---
+name: care-planner
+description: The care-loopd planning role (Step 1). Recon the repo read-only, interview until every diff-changing decision is settled, then draft the plan (scope/files/approach, testable acceptance criteria, non-goals, test-surface contract, change classification) the rest of the loop runs on. Loop-internal judgment role sourced by the orchestrator; not a standalone command.
+user-invocable: false
+model: opus # declared judgment tier — the orchestrator pins the engine and enforces `plannedBy` at the plan gate
+---
+
 # Step 1 — Plan (care-loopd `care-planner` role · judgment tier)
 
 Agree the approach with the user and produce the plan the rest of the loop runs on. The orchestrator
@@ -13,10 +20,12 @@ Four phases, in order:
 ## Phase 1 — Recon
 
 Recon before drafting anything — thoroughness per tier (skim / quick / thorough; see the tier
-definitions in Phase 3). If your host lets a spawn spawn, delegate to a **read-only Explore subagent
-with an explicit model arg** (a bare spawn inherits the session model); if not
-(the usual case — you are yourself a one-shot spawn), **do the recon yourself with read-only
-tools**: confirm the actual files that will be touched, the nearest existing
+definitions in Phase 3). **Do the recon yourself with read-only tools, exploring in PARALLEL:** issue
+your independent searches and file reads as MULTIPLE tool calls in a SINGLE step — never one at a
+time — and batch aggressively (fire all the symbol greps at once, then read all the candidate files
+at once). The per-step model round-trip is the dominant cost of recon, so minimizing the number of
+sequential steps is what keeps it fast *without* trading away depth. Do **not** spawn subagents (the
+`task` tool) — explore directly. Confirm the actual files that will be touched, the nearest existing
 pattern/component/hook to reuse, and existing Playwright specs covering the area. The plan must
 cite **real paths** — `baseline.md` becomes a grounded estimate, not a blind prediction.
 

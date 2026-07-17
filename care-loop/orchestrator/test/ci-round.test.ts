@@ -841,3 +841,72 @@ test("declined thread re-surfaced by a bot carries [addressed round N] tag in ne
   // We cannot test the LLM's decision, but we CAN assert the CONTEXT it receives is correct.
   // The tag is the lever; the model handles the judgment.
 });
+
+test("ci-fix track: the mocked CI failure (with extracted job-log detail) reaches the fixer intact", async () => {
+  // The whole point of getCheckFailureContext: the fixer must receive the REAL failure — the failing
+  // spec + expected-vs-received from the Actions job log — not just "shard N failed" runner noise.
+  // Mock a red CI whose getCheckFailureContext yields a log-bearing failure and capture what the
+  // fixer is handed. Bots are clean, so the loop takes the CI-fix residual track in 6b.
+  const failure = {
+    name: "Test (1/4)",
+    summary: "Process completed with exit code 1.",
+    annotations: [
+      { path: "shard-1", line: 0, message: "shard 1 failed" }, // runner noise
+    ],
+    log: [
+      "1) [chromium] › tests/facility/patient/patientRegistration.spec.ts:352:5 › registers a patient",
+      "   Error: expect(locator).toHaveText(expected)",
+      '   Expected string: "25 Y"',
+      '   Received string: "25y"',
+    ].join("\n"),
+  };
+  let gotFailures: import("../src/skill-result.ts").CiFailure[] | undefined;
+  const gh = makeFakeGitHub({
+    ...convergingGh("fail"),
+    getCheckFailureContext: async () => [failure],
+  });
+  const ciFix: CiFixFn = async ({ ciFailures }) => {
+    gotFailures = ciFailures;
+    return { outcome: "handoff" }; // stop after one pass; we only care about the input
+  };
+  const res = await runCiRounds(
+    opts({
+      gh,
+      triage: async () => ({ addressCount: 0, declineCount: 0 }),
+      ciFix,
+    }),
+  );
+  assert.equal(res.outcome, "deferred"); // handoff with bots clean → ci_red_human checkpoint
+  assert.ok(gotFailures, "the ci-fixer was invoked with the CI failure context");
+  assert.equal(gotFailures!.length, 1);
+  assert.equal(gotFailures![0].name, "Test (1/4)");
+  // The extracted job-log detail — the assertion the fixer actually reasons over — survives the hop.
+  assert.match(gotFailures![0].log ?? "", /patientRegistration\.spec\.ts:352/);
+  assert.match(gotFailures![0].log ?? "", /Received string: "25y"/);
+});
+
+test("ci-fix track: getCheckFailureContext throwing degrades to an empty context, not a crash", async () => {
+  // Best-effort contract: if the enriched-context fetch throws, the fixer still runs (with []),
+  // rather than the loop blowing up. Proves the try/catch around getCheckFailureContext holds.
+  let invoked = false;
+  const gh = makeFakeGitHub({
+    ...convergingGh("fail"),
+    getCheckFailureContext: async () => {
+      throw new Error("gh API 500");
+    },
+  });
+  const ciFix: CiFixFn = async ({ ciFailures }) => {
+    invoked = true;
+    assert.deepEqual(ciFailures, []);
+    return { outcome: "handoff" };
+  };
+  const res = await runCiRounds(
+    opts({
+      gh,
+      triage: async () => ({ addressCount: 0, declineCount: 0 }),
+      ciFix,
+    }),
+  );
+  assert.equal(invoked, true, "fixer still runs despite the context fetch throwing");
+  assert.equal(res.outcome, "deferred");
+});

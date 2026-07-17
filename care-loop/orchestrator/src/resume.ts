@@ -53,12 +53,22 @@ export interface ResumePlan {
  */
 export function planResume(events: JournalEvent[]): ResumePlan {
   const state = projectState(events);
-  if (events.some((e) => e.event === "run.end")) {
-    return {
-      resumable: false,
-      reason: `run already ended (step=${state.step})`,
-      state,
-    };
+  // A `run.end` normally means terminal — EXCEPT `deferred`, which is a CHECKPOINT (an external-stuck
+  // state: CI red with no more auto-fixes, or a poll timeout). `deferred` is exactly what resume is
+  // meant to pick up: re-enter the CI stage, re-poll, re-triage, and (with 6c wired) run the ci-fix
+  // track. Every other outcome — converged | capped | gate-blocked | aborted | push-failed — is
+  // genuinely terminal and stays refused. We read the LAST run.end so a resumed-then-re-deferred run
+  // can be resumed again.
+  const lastEnd = [...events].reverse().find((e) => e.event === "run.end");
+  if (lastEnd) {
+    const outcome = (lastEnd.data as { outcome?: string } | undefined)?.outcome;
+    if (outcome !== "deferred") {
+      return {
+        resumable: false,
+        reason: `run already ended (outcome=${outcome ?? "unknown"}, step=${state.step})`,
+        state,
+      };
+    }
   }
   if (state.pr == null) {
     return {

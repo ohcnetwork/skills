@@ -120,7 +120,8 @@ export interface CiFixPayload {
 export interface CiFailure {
   name: string; // check-run name or legacy-status context
   summary?: string; // truncated output summary, when available
-  annotations?: { path: string; line: number; message: string }[]; // future use
+  annotations?: { path: string; line: number; message: string }[]; // runner-level annotations
+  log?: string; // extracted failure detail from the Actions job log (the real assertion/stack)
 }
 
 /** Planner payload — the 4th skill. A planner spawn runs in one of two phases: `interview` (recon →

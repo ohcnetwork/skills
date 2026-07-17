@@ -955,19 +955,25 @@ export function opencodeUxValidator(models: SkillModels = {}): UxValidator {
 
 /** Is any failing check a Playwright / e2e spec? Gates the conditional injection of the
  *  playwright mechanics region (CARE selector/assertion idioms + flaky triage) — irrelevant noise
- *  for a tsc/lint/unit failure, load-bearing for an e2e assertion edit. Matches on the check name
- *  OR an annotation path that looks like a spec / lives under tests/. */
-function isPlaywrightFailure(ciFailures: CiFailure[]): boolean {
+ *  for a tsc/lint/unit failure, load-bearing for an e2e assertion edit. Matches on the check name,
+ *  an extracted job-log that reads like a Playwright assertion, OR an annotation path that looks
+ *  like a spec / lives under tests/. Exported for unit testing. */
+export function isPlaywrightFailure(ciFailures: CiFailure[]): boolean {
   return ciFailures.some(
     (f) =>
       /playwright|e2e|end.to.end/i.test(f.name) ||
+      /playwright|\.spec\.tsx?[:(]|toHaveText|toContainText|locator\(/i.test(
+        f.log ?? "",
+      ) ||
       (f.annotations ?? []).some((a) =>
         /\.spec\.tsx?$|(^|\/)tests\//.test(a.path),
       ),
   );
 }
 
-function formatCiFailures(
+/** Render the failing-check context into the fixer prompt — name, summary, runner annotations, and
+ *  (most importantly) the extracted job-log failure detail. Exported for unit testing. */
+export function formatCiFailures(
   ciFailures: import("./skill-result.js").CiFailure[],
 ): string {
   if (!ciFailures.length) return "(no CI failure details available)";
@@ -981,6 +987,14 @@ function formatCiFailures(
           parts.push(`  - ${a.path}:${a.line} — ${a.message}`);
         }
       }
+      if (f.log) {
+        // The real failure detail (which spec, expected-vs-received) — the annotations are usually
+        // just runner noise ("shard N failed"). This is what the fixer actually reasons over.
+        parts.push("Failure log (extracted from the job log):");
+        parts.push("```");
+        parts.push(f.log);
+        parts.push("```");
+      }
       return parts.join("\n");
     })
     .join("\n\n");
@@ -993,7 +1007,12 @@ export function opencodeCiFixer(
 ): CiFixer {
   const provider = models.provider ?? defaults.provider;
   const model = models.ciFixer ?? models.implementer ?? defaults.implementer;
-  return async ({ ciFailures, runDir, round, findings: gateFindingsOverride }) => {
+  return async ({
+    ciFailures,
+    runDir,
+    round,
+    findings: gateFindingsOverride,
+  }) => {
     const startedAt = new Date().toISOString();
     const methodology = ciFixerMethodology();
     const before = worktree
@@ -1009,8 +1028,7 @@ export function opencodeCiFixer(
     };
 
     // Build the CI failure context block.
-    const failureBlock =
-      `=== FAILING CI CHECKS ===\n${formatCiFailures(ciFailures)}\n=== END FAILING CI CHECKS ===`;
+    const failureBlock = `=== FAILING CI CHECKS ===\n${formatCiFailures(ciFailures)}\n=== END FAILING CI CHECKS ===`;
 
     // Plan context (criteria + decisions) — same pattern as the implementer's planContext().
     const criteria = readRunFile("criteria.md");
@@ -1032,7 +1050,8 @@ export function opencodeCiFixer(
     let diffBlock = "";
     if (worktree && base) {
       const diff = git(worktree, "diff", `${base}...HEAD`).out;
-      if (diff) diffBlock = `\n\n=== CHANGE DIFF ===\n${diff}\n=== END DIFF ===`;
+      if (diff)
+        diffBlock = `\n\n=== CHANGE DIFF ===\n${diff}\n=== END DIFF ===`;
     }
 
     // Build the prompt: gate-loopback findings override the normal CI-fix flow.
@@ -1079,9 +1098,7 @@ export function opencodeCiFixer(
       timeoutMs: 300_000,
     });
 
-    const after = worktree
-      ? git(worktree, "rev-parse", "HEAD").out.trim()
-      : "";
+    const after = worktree ? git(worktree, "rev-parse", "HEAD").out.trim() : "";
     const porcelain = worktree
       ? git(worktree, "status", "--porcelain").out.trim()
       : "";

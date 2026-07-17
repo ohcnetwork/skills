@@ -183,3 +183,40 @@ test("planResume: an already-ended run is NOT resumable (nothing to converge)", 
   assert.equal(plan.resumable, false);
   assert.match(plan.reason, /already ended/);
 });
+
+test("planResume: a DEFERRED run IS resumable (ci_red_human is a checkpoint, not terminal)", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "push",
+      data: {
+        state: { head_sha: "d6626ef9", step: "5-pushing" },
+        head_sha: "d6626ef9",
+      },
+    });
+    j.append({
+      event: "decision",
+      data: {
+        note: "pr-opened",
+        pr: 16571,
+        state: { pr: 16571, step: "5-await" },
+      },
+    });
+    j.append({ event: "step.enter", step: "6a", round: 3 });
+    j.append({
+      event: "run.end",
+      data: {
+        outcome: "deferred",
+        reason_code: "ci_red_human",
+        state: { step: "6b", round: 3 },
+      },
+    });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(
+    plan.resumable,
+    true,
+    "a deferred checkpoint re-enters the CI loop (→ re-poll → triage → ci-fix)",
+  );
+  assert.equal(plan.pr, 16571);
+  assert.equal(plan.headSha, "d6626ef9");
+});

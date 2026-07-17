@@ -108,9 +108,10 @@ export interface GitHubApi {
   /** Failing check-run names + summaries for a given ref. Used by the CiFixer track to feed
    *  the ci-fix skill and the human-handoff PR comment. Returns [] on any error. */
   listFailingChecks(ref: string): Promise<{ name: string; summary?: string }[]>;
-  /** Enriched failing-check context for the CI-fixer: per failing check, its annotations (file, line,
-   *  message from the check run) so the fixer can read the exact assertion failures. Returns [] on
-   *  any error (best-effort — never throws). */
+  /** Enriched failing-check context for the CI-fixer: per failing check, its runner annotations AND
+   *  the failure detail extracted from the Actions job log (the real Playwright assertion / stack —
+   *  annotations alone are usually just "shard N failed" noise). Returns [] on any error
+   *  (best-effort — never throws). */
   getCheckFailureContext(
     ref: string,
   ): Promise<import("./skill-result.js").CiFailure[]>;
@@ -130,6 +131,31 @@ export function resolveToken(explicit?: string): string {
       "no GitHub token: set GITHUB_AUTH_TOKEN in skills/.env or run `gh auth login`",
     );
   }
+}
+
+/** Extract just the failure detail from a raw GitHub Actions job log — strips per-line ISO timestamps
+ *  and ANSI colour, then keeps the lines carrying the assertion/stack signal (Playwright: the failing
+ *  spec, `expect(...)`, Expected/Received, code frame). Bounded so the ci-fixer gets the real error,
+ *  not a megabyte of setup noise. Falls back to the log tail if no signal line matches. Exported for
+ *  unit testing. */
+export function extractCiFailureLog(raw: string): string | undefined {
+  if (!raw) return undefined;
+  const lines = raw
+    .replace(/\x1b\[[0-9;]*m/g, "") // strip ANSI colour
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s/, "")); // strip Actions timestamps
+  const SIGNAL =
+    /\b\d+\)\s|›|Error:|Expected|Received|expect\(|Timed out|toHaveText|toContainText|toBeVisible|locator\(|\.spec\.ts[:(]|AssertionError|✘|✕|\d+\s+failed/i;
+  const keep = lines.filter((l) => l.trim() && SIGNAL.test(l));
+  const out = keep.join("\n").trim();
+  if (out) return out.slice(-4000); // keep the most recent failure detail, bounded
+  // No recognisable failure signal — return the log tail so the fixer at least sees the end.
+  const tail = lines
+    .filter((l) => l.trim())
+    .slice(-40)
+    .join("\n")
+    .trim();
+  return tail ? tail.slice(-3000) : undefined;
 }
 
 export class OctokitGitHub implements GitHubApi {
@@ -348,6 +374,10 @@ export class OctokitGitHub implements GitHubApi {
           r.conclusion &&
           FAIL_CONCLUSIONS.has(r.conclusion),
       );
+      // The check annotations are runner-level noise for CARE's Playwright CI ("shard N failed",
+      // "exit code 1") — the REAL failure (which spec, expected-vs-received) lives in the Actions
+      // JOB LOG. Fetch + extract those so the ci-fixer has something to act on (else it noops).
+      const jobLogs = await this.failingJobLogs(ref);
       const results: import("./skill-result.js").CiFailure[] = [];
       for (const run of failing.slice(0, 8)) {
         let annotations: { path: string; line: number; message: string }[] = [];
@@ -379,12 +409,74 @@ export class OctokitGitHub implements GitHubApi {
           name: run.name ?? "(unknown check)",
           summary: run.output?.summary?.slice(0, 400) ?? undefined,
           annotations: annotations.length > 0 ? annotations : undefined,
+          log: jobLogs.get(run.name ?? "") ?? undefined,
         });
+      }
+      // Fallback: if no check-run name matched a job (name skew between the check + the Actions job),
+      // but we DID pull logs, attach the combined extract to the first failing check so the detail
+      // isn't lost.
+      if (
+        results.length > 0 &&
+        !results.some((r) => r.log) &&
+        jobLogs.size > 0
+      ) {
+        results[0].log = [...jobLogs.values()].join("\n\n").slice(0, 6000);
       }
       return results;
     } catch {
       return [];
     }
+  }
+
+  /** Failing Actions job logs at `ref`, keyed by job name, with only the failure detail extracted
+   *  (Playwright assertion / stack). Best-effort — returns an empty map on any failure so the CI-fix
+   *  path degrades to annotations-only rather than throwing. */
+  private async failingJobLogs(ref: string): Promise<Map<string, string>> {
+    const byName = new Map<string, string>();
+    try {
+      const runsRes = await this.kit.rest.actions.listWorkflowRunsForRepo({
+        ...this.base(),
+        head_sha: ref,
+        per_page: 20,
+      });
+      const wfRuns = (runsRes.data.workflow_runs ?? []).filter(
+        (r) =>
+          r.conclusion &&
+          r.conclusion !== "success" &&
+          r.conclusion !== "skipped",
+      );
+      for (const wf of wfRuns.slice(0, 5)) {
+        const jobs = await this.kit.paginate(
+          this.kit.rest.actions.listJobsForWorkflowRun,
+          { ...this.base(), run_id: wf.id, per_page: 50 },
+        );
+        const failedJobs = jobs.filter(
+          (j) =>
+            j.conclusion &&
+            ["failure", "timed_out", "cancelled"].includes(j.conclusion),
+        );
+        for (const job of failedJobs.slice(0, 8)) {
+          try {
+            const logRes =
+              await this.kit.rest.actions.downloadJobLogsForWorkflowRun({
+                ...this.base(),
+                job_id: job.id,
+              });
+            const text =
+              typeof logRes.data === "string"
+                ? logRes.data
+                : Buffer.from(logRes.data as ArrayBuffer).toString("utf8");
+            const extracted = extractCiFailureLog(text);
+            if (extracted) byName.set(job.name ?? "", extracted);
+          } catch {
+            /* best-effort per job */
+          }
+        }
+      }
+    } catch {
+      /* best-effort — degrade to annotations-only */
+    }
+    return byName;
   }
 
   async listResolvedReviewCommentIds(pr: number): Promise<number[]> {

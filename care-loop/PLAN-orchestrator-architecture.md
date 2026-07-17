@@ -7,7 +7,7 @@
 > document is only the control plane.
 
 > **REVISION 2026-07-13 — runner changed: opencode + GitHub Copilot (supersedes the Claude Agent SDK
-> choice in §0/§4).** The *design* is unchanged — every design principle, the FSM, journal,
+> choice in §0/§4).** The _design_ is unchanged — every design principle, the FSM, journal,
 > single-writer state, resume table, gate, and budget are runner-agnostic and stand as written. Only
 > the **runner** swaps, because the plan deliberately kept it behind the §3 JobResult boundary. Why:
 > (1) **cost/access** — drive judgment/mechanical spawns on the existing **GitHub Copilot
@@ -37,12 +37,12 @@ are architectural, not prose-fixable — the last several doctor IMPs were band-
 
 **Adopt-first was evaluated seriously, then declined on arithmetic — not preference.** Bernstein
 (`chernistry/bernstein`, Apache-2.0) is the closest prior art: a deterministic Python scheduler with
-worktree-per-task, crash recovery, and a ledger/replay journal. It fits care-loop's *spine* but not
-its *shape*. Bernstein is a **fan-out** engine (one goal → N parallel tasks); care-loop is **one task
+worktree-per-task, crash recovery, and a ledger/replay journal. It fits care-loop's _spine_ but not
+its _shape_. Bernstein is a **fan-out** engine (one goal → N parallel tasks); care-loop is **one task
 iterated in rounds** against external feedback (bots/CI/humans). Its two documented limits —
 **one-shot plan approval** (no interactive interview) and **`BLOCKED`-with-manual-resume** (no
 bot-review round loop) — are precisely care-loop's two signature features, so both wrappers land on
-*our* side of the seam: the **interview gate runs before** Bernstein (= our runner + gate) and the
+_our_ side of the seam: the **interview gate runs before** Bernstein (= our runner + gate) and the
 **bot-review loop runs after** it (= our fsm + journal + resume). We would own ~70% of `care-loopd`
 anyway, plus a framework dependency and the seam between them, while Bernstein kept only "implement
 this list in a worktree" — one SDK call. No best-case spike outcome (its only unknowns were the
@@ -62,22 +62,22 @@ adopted).
 ## Design principles (each traces to an observed failure)
 
 1. **No LLM in the control loop.** Every scheduling/transition decision is plain Python over
-   validated inputs (exit codes, JobResults, git/gh facts). *Fixes: router drift (IMP-3/7), the
-   Sonnet-router contract collapse of 2026-07-12.*
+   validated inputs (exit codes, JobResults, git/gh facts). _Fixes: router drift (IMP-3/7), the
+   Sonnet-router contract collapse of 2026-07-12._
 2. **The model never writes state.** Agents produce artifacts + a typed result; the orchestrator is
-   the single writer of `state.json` and the journal. *Fixes: state drift by construction.*
+   the single writer of `state.json` and the journal. _Fixes: state drift by construction._
 3. **Waits are real blocking calls.** `poll-pr.sh` blocks a thread, not a chat turn. When it
-   returns, the next line of Python runs. *Fixes: the "status check?" nudge (IMP-5).*
+   returns, the next line of Python runs. _Fixes: the "status check?" nudge (IMP-5)._
 4. **Crash-only design.** The process may die at any instruction; recovery is always
    journal-replay + ground-truth reconcile, never "hope it was between steps." There is no
-   graceful-shutdown path to maintain — startup IS the recovery path. *Fixes: the VS Code OOM class
-   (IMP-6/9), formalizes PLAN-resume.*
+   graceful-shutdown path to maintain — startup IS the recovery path. _Fixes: the VS Code OOM class
+   (IMP-6/9), formalizes PLAN-resume._
 5. **Judgment is pinned, mechanical is cheap, and the split is enforced by config, not prose.**
-   The SDK pins each agent's model; the orchestrator costs nothing per decision. *Retires IMP-1
-   attestation, resolves IMP-7.*
+   The SDK pins each agent's model; the orchestrator costs nothing per decision. _Retires IMP-1
+   attestation, resolves IMP-7._
 6. **Every run is explainable from its journal alone.** The doctor (and a human) must be able to
-   reconstruct what happened without chat-session archaeology. *Fixes: IMP-11, the doctor's
-   reconstruction tax.*
+   reconstruct what happened without chat-session archaeology. _Fixes: IMP-11, the doctor's
+   reconstruction tax._
 
 ## Component map
 
@@ -135,20 +135,20 @@ and human muscle memory). The `-ing` markers become unnecessary — the journal 
 `step.enter`/`step.exit` events with finer grain — but are still written to `state.json` for
 human/legacy readability.
 
-| step | owner | does | success → | failure → |
-|---|---|---|---|---|
-| `1` plan | **care-planner** (judgment) | recon, draft criteria/baseline/decisions/ui-surfaces, batched questions | GATE (plan gate) | escalate/abort |
-| GATE | **human** via gate adapter | answer interview, approve plan | `2` | abort (nothing pushed) |
-| `2` setup | orchestrator | worktree + branch (`git worktree add -b`), node_modules clone, env copy | `3` | abort |
-| `3` implement | **implementer** (maker) | code + specs per plan; inner `run_gate.sh -n` | `4a` | retry ×R → escalate |
-| `4a` review | **care-reviewer** (judgment) | /care-review lenses on the diff, apply worth-deciding findings, declined.md | `4b` | block → `3` with findings |
-| `4b` test-grade | **care-test-grader** (judgment, checker≠maker) | grade specs vs criteria | `4c` | Wrong → `3` with grade |
-| `4c` ux-validate | **care-ux-validator** (judgment) | breakpoints/overflow/siblings via ui-surfaces.md | `5` | block → `3` with findings |
-| `5` gate+push | orchestrator | full `run_gate.sh`, commit if dirty, push if ahead, `gh pr create` (round 1), post screens/replies | `5-waiting-ci` | gate red → `3` with log tail |
-| `5-waiting-ci` | orchestrator | **blocking** `poll-pr.sh -s -c <sha>` (tier timeout; re-invoke ×N) | `6a` | timeout budget spent → checkpoint |
-| `6a` triage | **care-triager** (judgment) | collect-feedback digest → verdicts.md (address/decline/defer) | `6b` (address >0) / `7`-check | defer-to-human → checkpoint |
-| `6b` apply | **implementer** | apply address verdicts, stage replies.md | `5` (next round) | retry → escalate |
-| `7` done | orchestrator | exit report, terminal state, worktree-cleanup reminder | — | — |
+| step             | owner                                          | does                                                                                               | success →                     | failure →                         |
+| ---------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------- |
+| `1` plan         | **care-planner** (judgment)                    | recon, draft criteria/baseline/decisions/ui-surfaces, batched questions                            | GATE (plan gate)              | escalate/abort                    |
+| GATE             | **human** via gate adapter                     | answer interview, approve plan                                                                     | `2`                           | abort (nothing pushed)            |
+| `2` setup        | orchestrator                                   | worktree + branch (`git worktree add -b`), node_modules clone, env copy                            | `3`                           | abort                             |
+| `3` implement    | **implementer** (maker)                        | code + specs per plan; inner `run_gate.sh -n`                                                      | `4a`                          | retry ×R → escalate               |
+| `4a` review      | **care-reviewer** (judgment)                   | /care-review lenses on the diff, apply worth-deciding findings, declined.md                        | `4b`                          | block → `3` with findings         |
+| `4b` test-grade  | **care-test-grader** (judgment, checker≠maker) | grade specs vs criteria                                                                            | `4c`                          | Wrong → `3` with grade            |
+| `4c` ux-validate | **care-ux-validator** (judgment)               | breakpoints/overflow/siblings via ui-surfaces.md                                                   | `5`                           | block → `3` with findings         |
+| `5` gate+push    | orchestrator                                   | full `run_gate.sh`, commit if dirty, push if ahead, `gh pr create` (round 1), post screens/replies | `5-waiting-ci`                | gate red → `3` with log tail      |
+| `5-waiting-ci`   | orchestrator                                   | **blocking** `poll-pr.sh -s -c <sha>` (tier timeout; re-invoke ×N)                                 | `6a`                          | timeout budget spent → checkpoint |
+| `6a` triage      | **care-triager** (judgment)                    | collect-feedback digest → verdicts.md (address/decline — **no defer-to-human**, removed 2026-07-16; out-of-scope is declined-with-reason) | `6b` (address >0) / `7`-check | ci_red_no_verdicts → checkpoint   |
+| `6b` apply       | **implementer**                                | apply address verdicts, stage replies.md                                                           | `5` (next round)              | retry → escalate                  |
+| `7` done         | orchestrator                                   | exit report, terminal state, worktree-cleanup reminder                                             | —                             | —                                 |
 
 **Round loop:** `5 → 5-waiting-ci → 6a → 6b → 5 …` until 6a yields zero address items AND CI green
 AND bot threshold met (the existing ≥4/5 Greptile-style exit), or **STOP** fires (below). All exit
@@ -164,29 +164,31 @@ this is what makes the run replayable/auditable (Bernstein's property, minus the
 Transport: **opencode structured output — schema-validated at the runner** (REVISION 2026-07-13).
 The orchestrator sends the role's task via `session.prompt({ format: { type:"json_schema", schema:
 <JobResult@1> } })`; opencode returns the validated object as `structured_output` (with `retryCount`
-+ a `StructuredOutputError` on repeated failure), so a malformed result is the runner's problem, not
-ours. The agent is ALSO told to write `<run-dir>/agents/<role>-r<round>.result.json` (same bytes) as
-the durable, SDK-independent artifact the journal points at and the doctor reads; the orchestrator
-cross-checks the file against the structured payload. (The original file-transport + independent
-hash-guard remains the fallback for the `opencode run --format json` subprocess path if the language
-decision lands on driving the CLI instead of the SDK.)
+
+- a `StructuredOutputError` on repeated failure), so a malformed result is the runner's problem, not
+  ours. The agent is ALSO told to write `<run-dir>/agents/<role>-r<round>.result.json` (same bytes) as
+  the durable, SDK-independent artifact the journal points at and the doctor reads; the orchestrator
+  cross-checks the file against the structured payload. (The original file-transport + independent
+  hash-guard remains the fallback for the `opencode run --format json` subprocess path if the language
+  decision lands on driving the CLI instead of the SDK.)
 
 ```jsonc
 {
   "schema": "care-loop/jobresult@1",
-  "role": "care-reviewer",              // enum, must match the spawned role
+  "role": "care-reviewer", // enum, must match the spawned role
   "run_id": "care_fe-eng-729-…",
   "round": 1,
-  "terminal_state": "done",             // done | needs_input | blocked | failed
-  "verdict": "pass",                    // role-specific enum: pass | findings | wrong | overflow | …
+  "terminal_state": "done", // done | needs_input | blocked | failed
+  "verdict": "pass", // role-specific enum: pass | findings | wrong | overflow | …
   "reason_code": "review_findings_applied", // machine-readable outcome for the FSM + doctor
-  "artifact": "agents/review-r1.md",    // the real output (human-readable, as today)
+  "artifact": "agents/review-r1.md", // the real output (human-readable, as today)
   "artifact_sha256": "…",
-  "questions": null,                    // needs_input only: [{id, q, options?, recommended?}]
+  "questions": null, // needs_input only: [{id, q, options?, recommended?}]
   "evidence": ["src/…/PrintInvoice.tsx:88", "gate/tsc.log"],
-  "model_used": "claude-opus-4-8",      // agent self-report; cross-checked vs SDK metadata
-  "cost": {"input_tokens": 0, "output_tokens": 0, "usd_est": 0.0},
-  "started_at": "…", "ended_at": "…"
+  "model_used": "claude-opus-4-8", // agent self-report; cross-checked vs SDK metadata
+  "cost": { "input_tokens": 0, "output_tokens": 0, "usd_est": 0.0 },
+  "started_at": "…",
+  "ended_at": "…",
 }
 ```
 
@@ -196,9 +198,9 @@ suspenders on IMP-1). **Invalid/missing result = the spawn failed**, regardless 
 agent produced → retry policy applies. `verdict`/`reason_code` vocabularies are defined per role in
 one `roles.py` table next to the FSM — the FSM switches ONLY on these, never on artifact prose.
 
-**Guarantee precision (be honest about which class each is):** *state integrity* is
-impossible-by-construction — only `state.py` writes state, and no LLM output can change that. *Agent
-compliance* (writing a valid JobResult) is NOT impossible-by-construction — it is the same class of
+**Guarantee precision (be honest about which class each is):** _state integrity_ is
+impossible-by-construction — only `state.py` writes state, and no LLM output can change that. _Agent
+compliance_ (writing a valid JobResult) is NOT impossible-by-construction — it is the same class of
 problem as write-state.sh-by-LLM: an LLM asked to end with a valid artifact. What the boundary
 upgrades is the failure mode: non-compliance is **loud, journaled, and retried** (detect-and-retry)
 instead of silently absorbed — the Sonnet-router collapse of 2026-07-12 was dangerous precisely
@@ -238,13 +240,23 @@ because it was silent. Do not describe the second guarantee as the first.
 ## 5. Journal — single source of truth
 
 `<run-dir>/journal.jsonl`, append-only, one JSON object per line, `fsync` after each append,
-hash-chained (`prev` = sha256 of previous line — tamper/truncation *detection*, no HMAC/signing):
+hash-chained (`prev` = sha256 of previous line — tamper/truncation _detection_, no HMAC/signing):
 
 ```jsonc
-{"seq": 41, "ts": "…", "run_id": "…", "event": "step.exit",
- "step": "4a", "round": 1,
- "data": {"reason_code": "review_findings_applied", "result": "agents/care-reviewer-r1.result.json"},
- "cost_cum": {"usd_est": 3.41}, "prev": "sha256:…"}
+{
+  "seq": 41,
+  "ts": "…",
+  "run_id": "…",
+  "event": "step.exit",
+  "step": "4a",
+  "round": 1,
+  "data": {
+    "reason_code": "review_findings_applied",
+    "result": "agents/care-reviewer-r1.result.json",
+  },
+  "cost_cum": { "usd_est": 3.41 },
+  "prev": "sha256:…",
+}
 ```
 
 Event vocabulary: `run.start|resume|end`, `step.enter|exit`, `gate.asked|answered`,
@@ -253,6 +265,7 @@ Event vocabulary: `run.start|resume|end`, `step.enter|exit`, `gate.asked|answere
 `checkpoint.written`.
 
 Derived views (never hand-written, always regenerable):
+
 - **`state.json`** — snapshot projection of the journal head, same schema as today (single writer:
   `state.py`). Fleet view `cat runs/*/state.json` keeps working unchanged.
 - **`loop.log`** — human narrative rendered from events (what the orchestrator used to ask the LLM
@@ -281,7 +294,7 @@ retry ladder. A crashed **orchestrator** is steps 1–5. There is no third case.
 
 **Event-driven invariant (pins the cloud path open, §11):** no state may accumulate in-process across
 any wait that isn't already in the journal. Consequence: every blocking wait (CI poll, gate) is
-trivially convertible to *checkpoint + exit + resume-on-event*, exercising the exact code path the
+trivially convertible to _checkpoint + exit + resume-on-event_, exercising the exact code path the
 `kill -9` acceptance test already proves.
 
 ## 7. Gate adapter — the one human seam
@@ -293,9 +306,10 @@ trivially convertible to *checkpoint + exit + resume-on-event*, exercising the e
 - **`checkpoint`** (v1, also the timeout/defer path): write
   `<run-dir>/gate/questions-r<n>.md`, journal `checkpoint.written`, **exit 0 with a clear
   message**. The human edits `answers-r<n>.md` and runs `care-loopd resume` — the resume path picks
-  the answers up and resumes the planner session. This same mechanism serves 6a's defer-to-human
-  verdicts, poll-timeout escalation, and (later) becomes the cloud async gate from
-  PLAN-cloud-headless (post to Jira/Slack instead of a local file; the state machine is identical).
+  the answers up and resumes the planner session. This same mechanism serves the CI-round `deferred`
+  checkpoints (poll-timeout, ci_red_no_verdicts — external stuck states, NOT the removed
+  defer-to-human triage verdict) and (later) becomes the cloud async gate from PLAN-cloud-headless
+  (post to Jira/Slack instead of a local file; the state machine is identical).
 
 Authorization boundary is unchanged: **nothing is pushed before plan approval; plan approval
 authorizes everything after it** (with the Scope Governor as the standing tripwire, evaluated by
@@ -338,9 +352,9 @@ TS package; the `.py` filenames above become `.ts`) · **JobResult = opencode st
 2. **`runner.py` + JobResult** — spawn ONE real agent (care-reviewer, opus-tier `github-copilot/`
    model, unattended) **through opencode** (`opencode serve` + a `session.prompt` with the
    JobResult@1 json_schema, on the Copilot subscription) against a real diff from a terminal;
-   validate the structured result + the mirrored `.result.json`. *This is the old Phase-0 spike,
+   validate the structured result + the mirrored `.result.json`. _This is the old Phase-0 spike,
    now inside the real skeleton — and the first proof that opencode + Copilot drives a pinned
-   judgment agent headlessly.* Prove: headless judgment works end-to-end outside any editor.
+   judgment agent headlessly._ Prove: headless judgment works end-to-end outside any editor.
    **ABORT CRITERION (the build's own go/no-go):** if unattended spawns can't produce a valid
    JobResult in **≥9/10 runs** across two different roles, STOP and re-evaluate the whole direction
    (including Bernstein) — every downstream phase assumes a reliable runner, and no orchestrator
@@ -356,8 +370,9 @@ TS package; the `.py` filenames above become `.ts`) · **JobResult = opencode st
    > self-improvement — the doctor discovers escapes, care-evals verifies fixes with before/after
    > deltas, and its **ladder scorecard feeds [`guides/models.md`](./guides/models.md)**, turning the
    > "judgment = Opus" tier table from doctrine into a per-skill empirical result (cheapest model
-   > that passes, human-gated). Standing rule once it exists: *no skill edit lands without an eval
-   > delta on the same model-id.*
+   > that passes, human-gated). Standing rule once it exists: _no skill edit lands without an eval
+   > delta on the same model-id._
+
 3. **`fsm.py` + `shell.py` half-pipe** — steps 2→3→4a→5 on a scratch branch (no PR): worktree,
    implementer, reviewer, gate, commit. Prove: deterministic control flow over mixed
    agent/helper inputs.
@@ -389,7 +404,7 @@ exists so each step ships value even if later phases slip.
 ## 11. Event-driven / cloud (future — designed-for, not built)
 
 The headless local design is one config flip from event-triggered; the loop core never changes. What
-gets added *around* it (all orthogonal to the orchestrator itself):
+gets added _around_ it (all orthogonal to the orchestrator itself):
 
 - **Trigger + Dispatcher** — a webhook (e.g. a Jira ticket assigned to the agent) → a queue → provision
   the worktree, write the initial `state.json` + task one-liner, launch `care-loopd`.
@@ -402,7 +417,7 @@ gets added *around* it (all orthogonal to the orchestrator itself):
 - **Autonomy without the editor's per-command prompt** — a headless runtime does not autorun by
   default; the interactive safety net is replaced by: an **ephemeral sandboxed container** (throwaway
   per job), the runner's **allow/deny tool lists** (§4), a **least-privilege token**, and **egress
-  limits** (GitHub + npm only). Approval is *relocated*, not abolished: the one plan-gate approval
+  limits** (GitHub + npm only). Approval is _relocated_, not abolished: the one plan-gate approval
   authorizes everything downstream (SKILL: "pushing authorized by plan approval").
 
 Not on the critical path — the local headless loop is the milestone; this is the graft point once it works.

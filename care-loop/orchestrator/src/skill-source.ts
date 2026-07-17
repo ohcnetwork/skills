@@ -1,7 +1,7 @@
 // skill-source.ts — loads the reusable methodology body from skill/guide source files.
 //
-// Strategy 2 (from PLAN-skill-sourcing.md): inject the methodology as the role's system prompt at
-// startup rather than having the model load it via the skill tool at runtime. This is equivalent in
+// Strategy 2 (file-injection, not the native skill tool): inject the methodology as the role's system
+// prompt at startup rather than having the model load it via the skill tool at runtime. This is equivalent in
 // what reaches the model, deterministic, adds zero latency (no extra agentic turn), and avoids
 // re-opening the ENG-613 permission-prompt hang class.
 //
@@ -47,7 +47,9 @@ export function loadMethodology(absPath: string, regionName: string): string {
   try {
     text = readFileSync(absPath, "utf8");
   } catch (e) {
-    console.warn(`[skill-source] warning: could not read ${absPath}: ${(e as Error).message}`);
+    console.warn(
+      `[skill-source] warning: could not read ${absPath}: ${(e as Error).message}`,
+    );
     cache.set(key, "");
     return "";
   }
@@ -64,7 +66,9 @@ export function loadMethodology(absPath: string, regionName: string): string {
   }
 
   if (blocks.length === 0) {
-    console.warn(`[skill-source] warning: no methodology region name="${regionName}" found in ${absPath}`);
+    console.warn(
+      `[skill-source] warning: no methodology region name="${regionName}" found in ${absPath}`,
+    );
   }
 
   const result = blocks.join("\n\n");
@@ -83,11 +87,22 @@ export function loadMethodology(absPath: string, regionName: string): string {
  */
 export function reviewerMethodology(opts: { tsx: boolean }): string {
   const parts: string[] = [
-    loadMethodology(resolve(SKILLS_ROOT, "care-diff-review/SKILL.md"), "default"),
-    loadMethodology(resolve(SKILLS_ROOT, "care-technical-review/SKILL.md"), "default"),
+    loadMethodology(
+      resolve(SKILLS_ROOT, "care-diff-review/SKILL.md"),
+      "default",
+    ),
+    loadMethodology(
+      resolve(SKILLS_ROOT, "care-technical-review/SKILL.md"),
+      "default",
+    ),
   ];
   if (opts.tsx) {
-    parts.push(loadMethodology(resolve(SKILLS_ROOT, "care-ux-review/SKILL.md"), "static"));
+    parts.push(
+      loadMethodology(
+        resolve(SKILLS_ROOT, "care-ux-review/SKILL.md"),
+        "static",
+      ),
+    );
   }
   return parts.filter(Boolean).join("\n\n---\n\n");
 }
@@ -97,10 +112,13 @@ export function reviewerMethodology(opts: { tsx: boolean }): string {
  * Sources from the `care-planner` skill (Phases 1–4; the persist/hand-back mechanics outside the
  * region are excluded). Both phases receive the same methodology body; the per-phase preamble
  * controls what to output. Promoted from guides/01-plan.md to a standalone skill so it's eval-able
- * via care-evals like the reviewer lenses (see PLAN-skill-sourcing.md).
+ * via care-evals like the reviewer lenses.
  */
 export function plannerMethodology(): string {
-  return loadMethodology(resolve(SKILLS_ROOT, "care-planner/SKILL.md"), "default");
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "care-planner/SKILL.md"),
+    "default",
+  );
 }
 
 /**
@@ -109,5 +127,60 @@ export function plannerMethodology(): string {
  * the region are excluded). Promoted from guides/06a-triage.md to a standalone skill.
  */
 export function triagerMethodology(): string {
-  return loadMethodology(resolve(SKILLS_ROOT, "care-triager/SKILL.md"), "default");
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "care-triager/SKILL.md"),
+    "default",
+  );
+}
+
+/**
+ * The test-grade methodology injected into the 4b test-grader's system prompt.
+ * Sources from `care-test-grade` (Working agreement + Steps 2 + 3). Step 1 (gather inputs) is
+ * excluded — the headless spawn receives inputs inline (diff, criteria.md, spec file content).
+ */
+export function testGraderMethodology(): string {
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "care-test-grade/SKILL.md"),
+    "default",
+  );
+}
+
+/**
+ * The CI-fixer methodology injected into the care-ci-fix skill's system prompt (Step 6b ci-fix track).
+ * Sources from `care-ci-fix` (test-vs-code classification + guardrails). The implementer preamble
+ * carries the edit-only / no-git constraints separately.
+ */
+export function ciFixerMethodology(): string {
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "care-ci-fix/SKILL.md"),
+    "default",
+  );
+}
+
+/**
+ * The Playwright mechanics region injected into the CI-fixer ONLY when a failing check is an
+ * e2e/Playwright spec. Sources the `name="mechanics"` region of the standalone `playwright` skill
+ * (Critical Rules + Mindset + the Fixing-a-Failing-Test workflow + flaky triage) — NOT its
+ * interactive authoring workflow, which would push a headless fixer to rewrite/expand specs.
+ * Conditional, like reviewerMethodology's ux-review append when the diff touches .tsx.
+ */
+export function playwrightMechanics(): string {
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "playwright/SKILL.md"),
+    "mechanics",
+  );
+}
+
+/**
+ * The UX-review static methodology injected into the 4c ux-validator's system prompt.
+ * Sources from `care-ux-review` (name="static") — Mode 1 only, diff-bounded.
+ * Mode 2 (live browser) is excluded: the 4c ux-validator is a bash:deny judgment spawn.
+ * (The same static region is also blended into the 4a reviewer when the diff touches .tsx;
+ *  4c runs it as a dedicated full-pass UX review.)
+ */
+export function uxValidatorMethodology(): string {
+  return loadMethodology(
+    resolve(SKILLS_ROOT, "care-ux-review/SKILL.md"),
+    "static",
+  );
 }

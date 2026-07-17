@@ -5,18 +5,27 @@
 // PR → CI rounds) via the default opencode/shell/octokit seams (default-wiring.ts).
 
 import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 import { Journal } from "./journal.js";
 import { projectAndWrite, projectState } from "./state.js";
 import { renderEvent } from "./render.js";
 import { withLock } from "./lock.js";
-import { runStart, reduceTriage } from "./orchestrate.js";
+import {
+  runStart,
+  reduceTriage,
+  reduceCiFix,
+  reduceTestGrade,
+} from "./orchestrate.js";
 import { runCiRounds, type CiRoundsConfig } from "./ci-round.js";
 import { runPlan, hasApprovedPlan } from "./plan.js";
 import { terminalFront, derivePaths } from "./front-terminal.js";
 import { probePr, planResume } from "./resume.js";
 import type { PlanInput } from "./plan-front.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
+import { startDashboard } from "./dashboard.js";
 
 function usage(): never {
   console.error(`care-loopd — headless care-loop orchestrator
@@ -30,6 +39,9 @@ Usage:
        flags: --repo owner/name (ohcnetwork/care_fe) · --main <care_fe path> · --worktree <path>
               --run-dir <path> · --base <develop> · --body <pr body> · --models <file>
               --build-less · --max-rounds <n> · --poll-timeout-ms <ms>
+
+  care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
+       flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
   care-loopd resume <run-dir>    Reconcile the PR (probePr: head · CI · bots-at-head) and RE-ENTER the
@@ -173,8 +185,15 @@ async function cmdResume(
       bots: seams.bots,
       triage: reduceTriage(seams.triage),
       apply: seams.apply,
+      ciFix: seams.ciFix
+        ? reduceCiFix(seams.ciFix, s.worktree)
+        : undefined,
+      testGrade: seams.testGrade
+        ? reduceTestGrade(seams.testGrade, s.worktree, base)
+        : undefined,
       gate: seams.gate,
       push: seams.pushRound,
+      reply: seams.reply,
       cfg,
       startRound: s.round,
     });
@@ -366,6 +385,13 @@ async function main(): Promise<void> {
     return;
   }
   switch (cmd) {
+    case "dashboard": {
+      const df = parseFlags(rest);
+      const port = typeof df.port === "string" ? Number(df.port) : 3141;
+      const runsDir = typeof df["runs-dir"] === "string" ? df["runs-dir"] : join(__dirname, "../../runs");
+      startDashboard(runsDir, port);
+      return;
+    }
     case "status":
       if (!rest[0]) usage();
       cmdStatus(resolve(rest[0]));

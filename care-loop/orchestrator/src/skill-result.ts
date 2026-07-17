@@ -61,22 +61,66 @@ export interface ImplementPayload {
   timedOut: boolean; // hit the wall-clock cap (transient — own retry budget)
 }
 
-/** One triaged feedback item — the per-comment accept/decline/defer the doctor uses to tune skills. */
+/** One triaged feedback item — the per-comment address/decline the doctor uses to tune skills. */
 export interface TriageItem {
   source?: string; // bot / reviewer name
   id?: string; // comment id
   path?: string;
   line?: number;
   class?: string; // correctness | legibility | overengineering | ux | test | other
+  /** Bot-declared severity, normalized across bots. CodeRabbit tags every finding inline
+   *  (🔴 Critical/🟠 Major → "high"; 🟡 Minor → "medium"; 🧹 Nitpick → "low"). Copilot's
+   *  severity badge is a GitHub-UI-only field that never appears in the comment body, so
+   *  Copilot items are always "none". Greptile prose carries no structured severity → "none".
+   *  "none" also covers untagged CodeRabbit items. */
+  severity?: "high" | "medium" | "low" | "none";
   missedBy?: string; // which of OUR steps should have caught it first: care-reviewer | care-technical-review | care-ux-review | care-test-grade | novel | none — the dim-8 escape-attribution signal
-  verdict: "address" | "decline" | "defer";
+  verdict: "address" | "decline"; // two verdicts only — the loop handles everything, nothing is deferred to a human (out-of-scope items are declined with a reason)
   reason?: string;
+  threads?: number[]; // GitHub review-thread comment id(s) this verdict covers (from the feedback digest's `(thread NNN)` refs); Step 7 replies + resolves these. Union of all deduped bot comments' ids.
 }
 export interface TriagePayload {
   addressCount: number;
   declineCount: number;
-  deferCount: number;
   items?: TriageItem[]; // per-item detail (Phase 2 enriches the triage schema to fill this)
+}
+
+// ── Step-4b / 4c payloads ────────────────────────────────────────────────────────────────────────
+
+export interface TestGradeFinding {
+  criterion: string;
+  verdict: "Covered" | "Weak" | "Missing" | "Wrong";
+  criticality: "Critical" | "Secondary" | "Polish";
+  finding?: string; // what is weak/missing/wrong
+  fix?: string; // minimal fix suggestion
+}
+export interface TestGradePayload {
+  hasSpecs: boolean; // false when no spec files were found in the diff (grade is skipped)
+  criteriaGrades: TestGradeFinding[];
+}
+
+export interface UxFinding {
+  severity: "Broken" | "Convention" | "Polish";
+  file: string;
+  lineHint?: string;
+  note: string;
+}
+export interface UxValidatePayload {
+  findings: UxFinding[];
+}
+
+/** CI-fixer payload — returned by the CiFixer port (Step 6b ci-fix track). */
+export interface CiFixPayload {
+  /** fixed = committed a change; handoff = can't fix (human checkpoint); noop = nothing to do */
+  outcome: "fixed" | "handoff" | "noop";
+  filesChanged: string[];
+}
+
+/** A single failing CI check as reported by listFailingChecks. */
+export interface CiFailure {
+  name: string; // check-run name or legacy-status context
+  summary?: string; // truncated output summary, when available
+  annotations?: { path: string; line: number; message: string }[]; // future use
 }
 
 /** Planner payload — the 4th skill. A planner spawn runs in one of two phases: `interview` (recon →

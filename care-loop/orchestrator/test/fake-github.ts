@@ -27,9 +27,16 @@ export function makeFakeGitHub(o: Partial<GitHubApi> = {}): GitHubApi {
       statuses: [],
     }),
     listResolvedReviewCommentIds: async (): Promise<number[]> => [],
+    listReviewThreads: async () => [],
+    replyToReviewComment: async (): Promise<void> => {},
+    resolveReviewThread: async (): Promise<void> => {},
     createPr: async (): Promise<number> => 1,
     addLabel: async (): Promise<void> => {},
     createComment: async (): Promise<void> => {},
+    listFailingChecks: async (): Promise<
+      { name: string; summary?: string }[]
+    > => [],
+    getCheckFailureContext: async () => [],
     ...o,
   };
 }

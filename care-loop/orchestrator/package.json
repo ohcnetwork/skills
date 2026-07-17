@@ -6,6 +6,7 @@
   "description": "Headless deterministic orchestrator for care-loop (opencode + GitHub Copilot runner). Phase-2 spike seed.",
   "scripts": {
     "cli": "tsx src/cli.ts",
+    "dashboard": "tsx src/cli.ts dashboard",
     "spike:reviewer": "tsx src/spike-reviewer.ts",
     "smoke:reviewer": "tsx src/smoke-reviewer.ts",
     "smoke:triager": "tsx src/smoke-triager.ts",

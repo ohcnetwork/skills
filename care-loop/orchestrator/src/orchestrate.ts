@@ -13,12 +13,21 @@ import {
   type CiRoundsConfig,
   type GateFn,
   type PushFn,
+  type ReplyFn,
   type TriageFn,
 } from "./ci-round.js";
 import { withLock } from "./lock.js";
 import type { Bot } from "./poll.js";
 import type { GitHubApi } from "./github.js";
-import type { Implementer, Reviewer, Triager } from "./ports.js";
+import type {
+  Implementer,
+  Planner,
+  Reviewer,
+  Triager,
+  TestGrader,
+  UxValidator,
+  CiFixer,
+} from "./ports.js";
 
 export interface StartOptions {
   runDir: string;
@@ -42,8 +51,11 @@ export interface StartOptions {
   };
   triage: Triager;
   apply: ApplyFn;
+  ciFix?: CiFixer; // CI-fix track (optional; unset = human-handoff for red CI)
+  testGrade?: TestGrader; // 4b guard over the CI-fixer's spec edits (optional)
   gate: GateFn;
   pushRound: PushFn;
+  reply?: ReplyFn; // Step 7 — reply to + resolve triaged threads (optional)
   bots: Bot[];
 
   cfg?: CiRoundsConfig;
@@ -145,8 +157,13 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
         bots: o.bots,
         triage: reduceTriage(o.triage),
         apply: o.apply,
+        ciFix: o.ciFix ? reduceCiFix(o.ciFix, o.worktree) : undefined,
+        testGrade: o.testGrade
+          ? reduceTestGrade(o.testGrade, o.worktree, o.base ?? "develop")
+          : undefined,
         gate: o.gate,
         push: o.pushRound,
+        reply: o.reply,
         cfg: o.cfg,
         pollDeps: o.pollDeps,
       });
@@ -164,6 +181,8 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
 export function roleSpawn(opts: {
   reviewer: Reviewer;
   implementer: Implementer;
+  testGrader?: TestGrader; // 4b — optional; noop pass if absent
+  uxValidator?: UxValidator; // 4c — optional; noop pass if absent
   worktree: string;
   task: string;
   base?: string; // base branch the change is measured against (default "develop")
@@ -201,6 +220,32 @@ export function roleSpawn(opts: {
         model_used: r.modelUsed,
       };
     }
+    if (role === "care-test-grader" && opts.testGrader) {
+      const r = await opts.testGrader({
+        diff: diffOf(opts.worktree, base),
+        runDir,
+        round,
+      });
+      return {
+        terminal_state: r.terminalState,
+        verdict: r.verdict,
+        reason_code: r.reasonCode,
+        model_used: r.modelUsed,
+      };
+    }
+    if (role === "care-ux-validator" && opts.uxValidator) {
+      const r = await opts.uxValidator({
+        diff: diffOf(opts.worktree, base),
+        runDir,
+        round,
+      });
+      return {
+        terminal_state: r.terminalState,
+        verdict: r.verdict,
+        reason_code: r.reasonCode,
+        model_used: r.modelUsed,
+      };
+    }
     return {
       terminal_state: "done",
       verdict: "pass",
@@ -218,9 +263,45 @@ export function reduceTriage(t: Triager): TriageFn {
     return {
       addressCount: r.payload.addressCount,
       declineCount: r.payload.declineCount,
-      deferCount: r.payload.deferCount,
       items: r.payload.items,
     };
+  };
+}
+
+/** Adapt the CiFixer skill envelope down to the ci-round driver's minimal CiFixFn digest.
+ *  `worktree` is baked in by the caller (default-wiring closes over cfg.worktree when building the
+ *  CiFixer). Pass it explicitly here so the real skill receives the actual checkout path. */
+export function reduceCiFix(
+  c: CiFixer,
+  worktree: string,
+): import("./ci-round.js").CiFixFn {
+  return async (input) => {
+    const r = await c({ worktree, ...input });
+    return { outcome: r.payload.outcome, filesChanged: r.payload.filesChanged };
+  };
+}
+
+/** Adapt the TestGrader skill envelope down to the ci-round driver's minimal TestGradeFn digest —
+ *  the §3 guard over the CI-fixer's spec edits. Computes the diff (branch vs base + uncommitted, like
+ *  roleSpawn's reviewer) so the grader sees the fixer's edit, then reduces to `blocking` (the grader's
+ *  top-level `wrong` verdict) + a short summary of the Wrong criteria for the handoff comment. */
+export function reduceTestGrade(
+  g: TestGrader,
+  worktree: string,
+  base: string,
+): import("./ci-round.js").TestGradeFn {
+  return async ({ round, runDir }) => {
+    const r = await g({ diff: defaultDiffOf(worktree, base), runDir, round });
+    const wrongs = (r.payload.criteriaGrades ?? []).filter(
+      (c) => c.verdict === "Wrong",
+    );
+    const summary = wrongs.length
+      ? "Test-grader flagged: " +
+        wrongs
+          .map((c) => `${c.criterion} — ${c.finding ?? "wrong"}`)
+          .join("; ")
+      : undefined;
+    return { blocking: r.verdict === "wrong", summary };
   };
 }
 

@@ -26,10 +26,16 @@ export interface ModelsConfig {
     plannerRecon?: string; // interview/recon phase; defaults to the maker tier (fast)
     triager?: string;
     implementer?: string;
+    testGrader?: string; // 4b judgment tier
+    uxValidator?: string; // 4c judgment tier
+    ciFixer?: string; // CI-fix track; defaults to the maker tier
   };
 }
 
-const DEFAULT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../models.json");
+const DEFAULT_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../models.json",
+);
 
 /**
  * Load a models config file and resolve it to a SkillModels map suitable for passing to the
@@ -46,7 +52,9 @@ export function loadModels(configPath?: string): SkillModels {
     try {
       config = JSON.parse(readFileSync(filePath, "utf8")) as ModelsConfig;
     } catch (e) {
-      console.warn(`[models-config] warning: ${filePath} exists but could not be parsed (${(e as Error).message}) — falling back to built-in model defaults.`);
+      console.warn(
+        `[models-config] warning: ${filePath} exists but could not be parsed (${(e as Error).message}) — falling back to built-in model defaults.`,
+      );
     }
   }
 
@@ -62,5 +70,8 @@ export function loadModels(configPath?: string): SkillModels {
     plannerRecon: config.roles?.plannerRecon ?? maker,
     triager: config.roles?.triager ?? judgment,
     implementer: config.roles?.implementer ?? maker,
+    testGrader: config.roles?.testGrader ?? judgment,
+    uxValidator: config.roles?.uxValidator ?? judgment,
+    ciFixer: config.roles?.ciFixer ?? maker,
   };
 }

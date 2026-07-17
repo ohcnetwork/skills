@@ -32,7 +32,7 @@ async function one(i: number, feedbackPath: string): Promise<boolean> {
     const res = await opencodeTriager()({ pr: 123, round: 1, runDir: "/tmp", feedbackPath });
     const s = ((Date.now() - t0) / 1000).toFixed(1);
     const p = res.payload;
-    console.log(`  [${i}] ✔ ${s}s — verdict=${res.verdict} address=${p.addressCount} decline=${p.declineCount} defer=${p.deferCount} model=${res.modelUsed}`);
+    console.log(`  [${i}] ✔ ${s}s — verdict=${res.verdict} address=${p.addressCount} decline=${p.declineCount} model=${res.modelUsed}`);
     return true;
   } catch (e) {
     const s = ((Date.now() - t0) / 1000).toFixed(1);

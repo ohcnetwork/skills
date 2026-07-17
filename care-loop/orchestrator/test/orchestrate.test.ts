@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { runStart, roleSpawn, type StartOptions } from "../src/orchestrate.ts";
 import type { SpawnFn, HelperFn } from "../src/pipeline.ts";
 import type { CiConclusion } from "../src/github.ts";
-import type { Reviewer, Implementer } from "../src/ports.ts";
+import type {
+  Reviewer,
+  Implementer,
+  TestGrader,
+  UxValidator,
+} from "../src/ports.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
 
 const rd = () => mkdtempSync(join(tmpdir(), "careloopd-orch-"));
@@ -163,4 +168,117 @@ test("roleSpawn dispatches implementer + reviewer to the injected skills", async
     runDir: "/tmp",
   });
   assert.equal(rev.verdict, "pass"); // diffOf returned "clean diff"
+});
+
+test("roleSpawn routes 4b/4c to testGrader and uxValidator with their blocking verdicts", async () => {
+  const testGrader: TestGrader = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "care-test-grader",
+    round: 1,
+    terminalState: "done",
+    verdict: "wrong",
+    reasonCode: "spec_wrong",
+    payload: { hasSpecs: true, criteriaGrades: [] },
+  });
+  const uxValidator: UxValidator = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "care-ux-validator",
+    round: 1,
+    terminalState: "done",
+    verdict: "overflow",
+    reasonCode: "overflow_found",
+    payload: { findings: [] },
+  });
+  const fakeReviewer: Reviewer = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "care-reviewer",
+    round: 1,
+    terminalState: "done",
+    verdict: "pass",
+    reasonCode: "r",
+    payload: { findings: [] },
+  });
+  const fakeImplementer: Implementer = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "implementer",
+    round: 1,
+    terminalState: "done",
+    verdict: "implemented",
+    reasonCode: "i",
+    payload: { filesChanged: [], staged: false, timedOut: false },
+  });
+  const spawn = roleSpawn({
+    reviewer: fakeReviewer,
+    implementer: fakeImplementer,
+    testGrader,
+    uxValidator,
+    worktree: "/tmp/wt",
+    task: "t",
+    diffOf: () => "diff",
+  });
+
+  const tg = await spawn({
+    role: "care-test-grader",
+    step: "4b",
+    round: 1,
+    runDir: "/tmp",
+  });
+  assert.equal(tg.verdict, "wrong");
+  assert.equal(tg.reason_code, "spec_wrong");
+
+  const uv = await spawn({
+    role: "care-ux-validator",
+    step: "4c",
+    round: 1,
+    runDir: "/tmp",
+  });
+  assert.equal(uv.verdict, "overflow");
+  assert.equal(uv.reason_code, "overflow_found");
+});
+
+test("roleSpawn noop-passes 4b/4c when skills not injected", async () => {
+  const fakeReviewer: Reviewer = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "care-reviewer",
+    round: 1,
+    terminalState: "done",
+    verdict: "pass",
+    reasonCode: "r",
+    payload: { findings: [] },
+  });
+  const fakeImplementer: Implementer = async () => ({
+    schema: "care-loop/skill-result@1",
+    skill: "implementer",
+    round: 1,
+    terminalState: "done",
+    verdict: "implemented",
+    reasonCode: "i",
+    payload: { filesChanged: [], staged: false, timedOut: false },
+  });
+  const spawn = roleSpawn({
+    reviewer: fakeReviewer,
+    implementer: fakeImplementer,
+    // no testGrader / uxValidator
+    worktree: "/tmp/wt",
+    task: "t",
+    diffOf: () => "diff",
+  });
+
+  const tg = await spawn({
+    role: "care-test-grader",
+    step: "4b",
+    round: 1,
+    runDir: "/tmp",
+  });
+  assert.equal(tg.verdict, "pass");
+  assert.equal(tg.reason_code, "role_noop");
+
+  const uv = await spawn({
+    role: "care-ux-validator",
+    step: "4c",
+    round: 1,
+    runDir: "/tmp",
+  });
+  assert.equal(uv.verdict, "pass");
+  assert.equal(uv.reason_code, "role_noop");
 });

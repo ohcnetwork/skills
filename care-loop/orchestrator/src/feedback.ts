@@ -3,7 +3,7 @@
 // comments, strips the CodeRabbit/Greptile HTML chrome, groups inline comments by file+line, tags
 // [resolved] threads, and renders a compact digest so 6a starts from judgment, not parsing.
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GitHubApi, PrComment } from "./github.js";
 
@@ -61,6 +61,8 @@ export interface FeedbackInputs {
   reviewComments: PrComment[]; // inline (have path/line/id)
   issueComments: PrComment[]; // summary/top-level (have id)
   resolvedIds: number[];
+  /** Thread IDs addressed by the implementer in prior rounds (from addressed-threads.json). */
+  addressedThreads?: { threadId: number; round: number }[];
   now?: string;
 }
 
@@ -70,6 +72,13 @@ export function renderFeedback(inp: FeedbackInputs): {
   count: number;
 } {
   const resolved = new Set(inp.resolvedIds);
+  // Map from threadId → round for threads addressed by the implementer in prior rounds.
+  // Tagged [addressed round N] so the triager declines re-litigating already-fixed findings.
+  const addressedMap = new Map<number, number>();
+  for (const { threadId, round } of inp.addressedThreads ?? []) {
+    // Keep the earliest round (first time addressed) for a stable label.
+    if (!addressedMap.has(threadId)) addressedMap.set(threadId, round);
+  }
   const now = inp.now ?? new Date().toISOString().replace(/\.\d+Z$/, "Z");
   const L: string[] = [
     `# PR #${inp.pr} — pre-digested bot feedback   (${now})`,
@@ -99,7 +108,12 @@ export function renderFeedback(inp: FeedbackInputs): {
       L.push(`- \`${loc}\``);
       prevLoc = loc;
     }
-    const tag = c.id !== undefined && resolved.has(c.id) ? " [resolved]" : "";
+    const tag =
+      c.id !== undefined && resolved.has(c.id)
+        ? " [resolved]"
+        : c.id !== undefined && addressedMap.has(c.id)
+          ? ` [addressed round ${addressedMap.get(c.id)}]`
+          : "";
     L.push(`  - **${c.user}** (thread ${c.id ?? "-"})${tag}`);
     L.push(indent(trimBody(c.body), 6));
     L.push("");
@@ -116,6 +130,51 @@ export function renderFeedback(inp: FeedbackInputs): {
   }
 
   return { markdown: L.join("\n") + "\n", count };
+}
+
+/** Group the rendered feedback.md into per-FILE clusters for the triager fan-out (PLAN-triager-fanout
+ *  §2): the "## Inline comments" section is emitted grouped by `path:line`, so a fork can own all of a
+ *  file's findings and read it once. Returns the per-file blocks (verbatim markdown) plus the
+ *  file-less "## Summary comments" body (bot walkthroughs) for the reduce pass. Pure — parses OUR own
+ *  stable `renderFeedback` format, not arbitrary markdown. */
+export function parseFeedbackClusters(md: string): {
+  clusters: { file: string; text: string }[];
+  summary: string;
+} {
+  const lines = md.split("\n");
+  const inlineIdx = lines.findIndex((l) => /^##\s+Inline comments/i.test(l));
+  const summaryIdx = lines.findIndex((l) => /^##\s+Summary comments/i.test(l));
+  const inline =
+    inlineIdx >= 0
+      ? lines.slice(inlineIdx + 1, summaryIdx >= 0 ? summaryIdx : undefined)
+      : [];
+  const summary =
+    summaryIdx >= 0
+      ? lines
+          .slice(summaryIdx + 1)
+          .join("\n")
+          .trim()
+      : "";
+
+  // A location header looks like: - `src/foo/Bar.tsx:169`  (line may be a number or "-"). The file is
+  // everything before the final `:<line>` — greedy `.+` backtracks to the last colon.
+  const headerRe = /^- `(.+):(?:\d+|-)`\s*$/;
+  const byFile = new Map<string, string[]>();
+  let curFile = "";
+  for (const l of inline) {
+    const m = headerRe.exec(l);
+    if (m) curFile = m[1];
+    if (curFile) {
+      const bucket = byFile.get(curFile) ?? [];
+      bucket.push(l);
+      byFile.set(curFile, bucket);
+    }
+  }
+  const clusters = [...byFile.entries()].map(([file, ls]) => ({
+    file,
+    text: ls.join("\n").trim(),
+  }));
+  return { clusters, summary };
 }
 
 function indent(text: string, n: number): string {
@@ -136,11 +195,23 @@ export async function collectFeedback(
     gh.listIssueComments(opts.pr),
     gh.listResolvedReviewCommentIds(opts.pr),
   ]);
+  // Load prior-round addressed thread IDs from run dir to annotate re-surfaced threads.
+  let addressedThreads: { threadId: number; round: number }[] = [];
+  if (opts.runDir) {
+    try {
+      addressedThreads = JSON.parse(
+        readFileSync(join(opts.runDir, "addressed-threads.json"), "utf8"),
+      );
+    } catch {
+      /* not found = first round, no prior addresses */
+    }
+  }
   const rendered = renderFeedback({
     pr: opts.pr,
     reviewComments,
     issueComments,
     resolvedIds,
+    addressedThreads,
   });
   if (opts.runDir) {
     mkdirSync(opts.runDir, { recursive: true });

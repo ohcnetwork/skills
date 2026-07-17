@@ -19,7 +19,8 @@ import { join } from "node:path";
 import { Journal, type EventType } from "./journal.js";
 import type { SkillArtifact, SkillResult } from "./skill-result.js";
 
-const sha256 = (s: string): string => "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
+const sha256 = (s: string): string =>
+  "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
 
 /** A run-scoped structured logger. `event` appends a bounded journal line; `artifact` writes a
  *  content-addressed sidecar under <run-dir>/skills/ and returns its {name,path,sha256} ref. Kept as
@@ -27,29 +28,50 @@ const sha256 = (s: string): string => "sha256:" + createHash("sha256").update(s,
  *  `skill.retry` breadcrumb — it can emit a STRUCTURED event through the same mechanism, not a freeform
  *  channel. No such consumer exists yet; the decorator is the only user today. */
 export interface SkillLogger {
-  event(type: EventType, data: Record<string, unknown>, opts?: { step?: string; round?: number; costUsd?: number }): void;
+  event(
+    type: EventType,
+    data: Record<string, unknown>,
+    opts?: { step?: string; round?: number; costUsd?: number },
+  ): void;
   artifact(relName: string, content: string): SkillArtifact;
 }
 
-export function makeSkillLogger(opts: { runDir: string; runId: string }): SkillLogger {
+export function makeSkillLogger(opts: {
+  runDir: string;
+  runId: string;
+}): SkillLogger {
   const journal = new Journal(join(opts.runDir, "journal.jsonl"), opts.runId);
   const skillsDir = join(opts.runDir, "skills");
   return {
     event(type, data, o) {
-      // Stamp cumulative cost when a call reports usd (IMP-14 → rubric dim 3): read the journal's
-      // last cost_cum and add this call's spend. Reading the tail keeps the total correct even
-      // across the two loggers one run creates (plan stage + build stage), each with its own closure.
+      // Stamp cumulative cost when a call reports usd (IMP-14 → rubric dim 3): scan backwards
+      // through the journal for the last event that actually carries cost_cum (not just head(),
+      // which may be a step.enter or similar that has no cost field) and add this call's spend.
+      // Scanning the tail keeps the total correct even across the two loggers one run creates
+      // (plan stage + build stage), each with its own closure.
       let cost_cum: { usd_est: number } | undefined;
       if (typeof o?.costUsd === "number") {
-        const prev = journal.head()?.cost_cum?.usd_est ?? 0;
+        const { events } = journal.read();
+        const prev =
+          [...events].reverse().find((e) => e.cost_cum)?.cost_cum?.usd_est ?? 0;
         cost_cum = { usd_est: prev + o.costUsd };
       }
-      journal.append({ event: type, step: o?.step, round: o?.round, data, cost_cum });
+      journal.append({
+        event: type,
+        step: o?.step,
+        round: o?.round,
+        data,
+        cost_cum,
+      });
     },
     artifact(relName, content) {
       mkdirSync(skillsDir, { recursive: true });
       writeFileSync(join(skillsDir, relName), content);
-      return { name: relName.replace(/\.[^.]+$/, ""), path: `skills/${relName}`, sha256: sha256(content) };
+      return {
+        name: relName.replace(/\.[^.]+$/, ""),
+        path: `skills/${relName}`,
+        sha256: sha256(content),
+      };
     },
   };
 }
@@ -59,8 +81,13 @@ function deriveCounts(res: SkillResult): Record<string, number> | undefined {
   const p = res.payload as Record<string, unknown> | undefined;
   if (!p) return undefined;
   if (Array.isArray(p.findings)) return { findings: p.findings.length };
-  if (typeof p.addressCount === "number") return { address: p.addressCount as number, decline: p.declineCount as number, defer: p.deferCount as number };
-  if (Array.isArray(p.filesChanged)) return { filesChanged: p.filesChanged.length };
+  if (typeof p.addressCount === "number")
+    return {
+      address: p.addressCount as number,
+      decline: p.declineCount as number,
+    };
+  if (Array.isArray(p.filesChanged))
+    return { filesChanged: p.filesChanged.length };
   return undefined;
 }
 
@@ -76,14 +103,23 @@ export function withSkillLog<I extends { runDir: string; round: number }, P>(
 ): (input: I) => Promise<SkillResult<P>> {
   return async (input) => {
     const round = input.round;
-    const inputRef = logger.artifact(`${name}-r${round}.input.json`, JSON.stringify(input, null, 2));
+    const inputRef = logger.artifact(
+      `${name}-r${round}.input.json`,
+      JSON.stringify(input, null, 2),
+    );
     logger.event("skill.invoke", { skill: name, input: inputRef }, { round });
 
     const t0 = Date.now();
     try {
       const res = await fn(input);
       const durationMs = Date.now() - t0;
-      const artifacts: SkillArtifact[] = [inputRef, logger.artifact(`${name}-r${round}.result.json`, JSON.stringify({ ...res, durationMs }, null, 2))];
+      const artifacts: SkillArtifact[] = [
+        inputRef,
+        logger.artifact(
+          `${name}-r${round}.result.json`,
+          JSON.stringify({ ...res, durationMs }, null, 2),
+        ),
+      ];
       logger.event(
         "skill.result",
         {
@@ -103,7 +139,13 @@ export function withSkillLog<I extends { runDir: string; round: number }, P>(
     } catch (err) {
       logger.event(
         "skill.result",
-        { skill: name, terminal_state: "failed", reason_code: "threw", error: String((err as Error)?.message ?? err), duration_ms: Date.now() - t0 },
+        {
+          skill: name,
+          terminal_state: "failed",
+          reason_code: "threw",
+          error: String((err as Error)?.message ?? err),
+          duration_ms: Date.now() - t0,
+        },
         { round },
       );
       throw err;

@@ -5,6 +5,7 @@ import {
   renderFeedback,
   isBot,
   collectFeedback,
+  parseFeedbackClusters,
 } from "../src/feedback.ts";
 import type { PrComment } from "../src/github.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
@@ -103,6 +104,56 @@ test("renderFeedback groups inline comments by path:line and tags resolved threa
   // co-located a.ts:10 header printed once, both bot threads under it
   assert.equal((markdown.match(/- `src\/a\.ts:10`/g) ?? []).length, 1);
   assert.match(markdown, /coderabbitai\[bot\]\*\* \(thread 101\)/);
+});
+
+test("renderFeedback tags [addressed round N] for prior-round fixed threads", () => {
+  const reviewComments = [
+    rc("coderabbitai[bot]", "src/a.ts", 10, 101, "issue A"),
+    rc("Copilot", "src/b.ts", 5, 103, "issue B (not yet addressed)"),
+  ];
+  const { markdown } = renderFeedback({
+    pr: 42,
+    reviewComments,
+    issueComments: [],
+    resolvedIds: [],
+    addressedThreads: [{ threadId: 101, round: 2 }],
+  });
+  assert.match(markdown, /\(thread 101\) \[addressed round 2\]/);
+  assert.doesNotMatch(markdown, /\(thread 103\).*\[addressed/);
+  // resolved takes priority — a simultaneously resolved + addressed thread should read [resolved]
+  const { markdown: m2 } = renderFeedback({
+    pr: 42,
+    reviewComments: [rc("coderabbitai[bot]", "src/a.ts", 10, 101, "issue A")],
+    issueComments: [],
+    resolvedIds: [101],
+    addressedThreads: [{ threadId: 101, round: 2 }],
+  });
+  assert.match(m2, /\(thread 101\) \[resolved\]/);
+  assert.doesNotMatch(m2, /\[addressed/);
+});
+
+test("parseFeedbackClusters groups the digest by file + splits the summary", () => {
+  const { markdown } = renderFeedback({
+    pr: 42,
+    reviewComments: [
+      rc("coderabbitai[bot]", "src/a.ts", 10, 101, "issue A"),
+      rc("greptile-apps[bot]", "src/a.ts", 22, 102, "issue A-2 other line"),
+      rc("Copilot", "src/b.ts", 5, 103, "issue B"),
+    ],
+    issueComments: [ic("greptile-apps[bot]", 200, "overall the PR reads fine")],
+    resolvedIds: [],
+  });
+
+  const { clusters, summary } = parseFeedbackClusters(markdown);
+  assert.deepEqual(clusters.map((c) => c.file).sort(), [
+    "src/a.ts",
+    "src/b.ts",
+  ]); // two files, a.ts's two lines collapse into one cluster
+  const a = clusters.find((c) => c.file === "src/a.ts")!;
+  assert.match(a.text, /src\/a\.ts:10/);
+  assert.match(a.text, /src\/a\.ts:22/); // both of a.ts's locations in its one cluster
+  assert.doesNotMatch(a.text, /src\/b\.ts/); // not another file's
+  assert.match(summary, /overall the PR reads fine/); // summary section carried separately, not a cluster
 });
 
 test("collectFeedback fetches via the boundary and returns the digest", async () => {

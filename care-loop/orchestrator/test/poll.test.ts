@@ -173,11 +173,22 @@ class FakeGitHub implements GitHubApi {
   async listResolvedReviewCommentIds(): Promise<number[]> {
     return [];
   }
+  async listReviewThreads() {
+    return [];
+  }
+  async replyToReviewComment(): Promise<void> {}
+  async resolveReviewThread(): Promise<void> {}
   async createPr(): Promise<number> {
     return 1;
   }
   async addLabel(): Promise<void> {}
   async createComment(): Promise<void> {}
+  async listFailingChecks(): Promise<{ name: string; summary?: string }[]> {
+    return [];
+  }
+  async getCheckFailureContext() {
+    return [];
+  }
 }
 
 test("pollPr converges with ZERO nudges once all bots + CI arrive (IMP-5 kill-shot)", async () => {

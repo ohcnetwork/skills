@@ -285,3 +285,118 @@ test("seeds run.start only when the journal is empty (plan → start continuity)
   assert.ok(events.some((e) => e.event === "plan.approved"));
   assert.ok(events.some((e) => e.event === "step.enter" && e.step === "2"));
 });
+
+test("full [4a,4b,4c] profile: happy path 2→3→4a→4b→4c→5", async () => {
+  const dir = runDir();
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn: okSpawn(),
+    helper: okHelper(),
+    cfg: { reviewSteps: ["4a", "4b", "4c"], maxImplementRetries: 2 },
+  });
+  assert.deepEqual(res.visited, ["2", "3", "4a", "4b", "4c", "5"]);
+  assert.equal(res.outcome, "complete");
+});
+
+test("4b 'wrong' loopbacks to 3, re-implement then restarts review chain: 2→3→4a→4b→3→4a→4b→4c→5", async () => {
+  const dir = runDir();
+  let gradeCalls = 0;
+  const spawn: SpawnFn = async ({ role }) => {
+    if (role === "care-test-grader") {
+      gradeCalls++;
+      return gradeCalls === 1
+        ? {
+            terminal_state: "done",
+            verdict: "wrong",
+            reason_code: "spec_wrong",
+          }
+        : { terminal_state: "done", verdict: "pass", reason_code: "ok" };
+    }
+    return {
+      terminal_state: "done",
+      verdict: role === "implementer" ? "implemented" : "pass",
+      reason_code: "ok",
+    };
+  };
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn,
+    helper: okHelper(),
+    cfg: { reviewSteps: ["4a", "4b", "4c"], maxImplementRetries: 2 },
+  });
+  assert.deepEqual(res.visited, [
+    "2",
+    "3",
+    "4a",
+    "4b",
+    "3",
+    "4a",
+    "4b",
+    "4c",
+    "5",
+  ]);
+  assert.equal(res.outcome, "complete");
+});
+
+test("4c 'overflow' loopbacks to 3, re-implement then restarts review chain: 2→3→4a→4b→4c→3→4a→4b→4c→5", async () => {
+  const dir = runDir();
+  let uxCalls = 0;
+  const spawn: SpawnFn = async ({ role }) => {
+    if (role === "care-ux-validator") {
+      uxCalls++;
+      return uxCalls === 1
+        ? {
+            terminal_state: "done",
+            verdict: "overflow",
+            reason_code: "layout_broken",
+          }
+        : { terminal_state: "done", verdict: "pass", reason_code: "ok" };
+    }
+    return {
+      terminal_state: "done",
+      verdict: role === "implementer" ? "implemented" : "pass",
+      reason_code: "ok",
+    };
+  };
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn,
+    helper: okHelper(),
+    cfg: { reviewSteps: ["4a", "4b", "4c"], maxImplementRetries: 2 },
+  });
+  assert.deepEqual(res.visited, [
+    "2",
+    "3",
+    "4a",
+    "4b",
+    "4c",
+    "3",
+    "4a",
+    "4b",
+    "4c",
+    "5",
+  ]);
+  assert.equal(res.outcome, "complete");
+});
+
+test("4b 'advisory' is non-blocking: advances straight through to 4c", async () => {
+  const dir = runDir();
+  const spawn: SpawnFn = async ({ role }) => ({
+    terminal_state: "done",
+    verdict:
+      role === "care-test-grader"
+        ? "advisory"
+        : role === "implementer"
+          ? "implemented"
+          : "pass",
+    reason_code: "ok",
+  });
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn,
+    helper: okHelper(),
+    cfg: { reviewSteps: ["4a", "4b", "4c"], maxImplementRetries: 2 },
+  });
+  assert.deepEqual(res.visited, ["2", "3", "4a", "4b", "4c", "5"]);
+  assert.equal(res.outcome, "complete");
+});

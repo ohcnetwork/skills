@@ -24,10 +24,15 @@ definitions in Phase 3). **Do the recon yourself with read-only tools, exploring
 your independent searches and file reads as MULTIPLE tool calls in a SINGLE step — never one at a
 time — and batch aggressively (fire all the symbol greps at once, then read all the candidate files
 at once). The per-step model round-trip is the dominant cost of recon, so minimizing the number of
-sequential steps is what keeps it fast *without* trading away depth. Do **not** spawn subagents (the
+sequential steps is what keeps it fast _without_ trading away depth. Do **not** spawn subagents (the
 `task` tool) — explore directly. Confirm the actual files that will be touched, the nearest existing
 pattern/component/hook to reuse, and existing Playwright specs covering the area. The plan must
 cite **real paths** — `baseline.md` becomes a grounded estimate, not a blind prediction.
+
+**Anti-spin rule:** If a search returns no useful results, do **not** retry variants of it. Treat
+"I couldn't locate X" as an open question for the interview and move on immediately. Never re-issue
+the same grep pattern or re-read a file you have already read. A single failed search is information;
+repeated identical searches are a spin.
 
 ## Phase 2 — Interview (pre-plan grill)
 

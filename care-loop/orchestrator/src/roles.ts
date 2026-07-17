@@ -21,7 +21,7 @@ export type Signal =
   | "loopback" // judgment wants a fix → back to implement (step 3)
   | "retry" // maker failed but attempts remain → same step
   | "escalate" // retries exhausted
-  | "needs_input" // planner interview / defer → gate/checkpoint
+  | "needs_input" // planner interview → gate/checkpoint
   | "helper-ok"
   | "helper-fail"
   | "gate-ok"
@@ -46,7 +46,11 @@ export const LOOPBACK_VERDICTS: Partial<Record<Role, string[]>> = {
  * - judgment (reviewer/grader/ux): a blocking verdict (LOOPBACK_VERDICTS) → back to implement;
  *   anything else terminal-done (pass, findings-applied) → advance.
  */
-export function classifyJob(role: Role, terminalState: TerminalState, verdict: string): Signal {
+export function classifyJob(
+  role: Role,
+  terminalState: TerminalState,
+  verdict: string,
+): Signal {
   if (terminalState === "needs_input") return "needs_input";
   if (terminalState === "failed" || terminalState === "blocked") {
     return role === "implementer" ? "retry" : "loopback";

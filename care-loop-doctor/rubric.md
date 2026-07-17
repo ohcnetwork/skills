@@ -108,16 +108,20 @@ What did the bots catch that our own pipeline should have, and which step keeps 
 class?
 
 - **Evidence:** `<run-dir>/verdicts.md` — the triager's per-item verdict list, each row
-  `verdict · class · missed_by · source · reason`. `missed_by` names which of our steps
+  `verdict · class · missed_by · severity · source · reason`. `missed_by` names which of our steps
   (`care-reviewer` / `care-technical-review` / `care-ux-review` / `care-test-grade`) should have
-  caught the item first (`novel` = un-catchable pre-merge; `none` = not an escape). **Aggregate
-  `verdicts.md` across run dirs** — single-run attributions are noisy; the cross-run
+  caught the item first (`novel` = un-catchable pre-merge; `none` = not an escape). `severity` is
+  bot-declared and normalized: `high` (CodeRabbit Critical/Major) · `medium` (Minor) · `low` (Nitpick)
+  · `none` (Copilot, Greptile, untagged — these bots carry no structured severity in the comment body).
+  **Aggregate `verdicts.md` across run dirs** — single-run attributions are noisy; the cross-run
   `class × missed_by` pattern is the signal. Cross-check the reviewer's own `payload.findings` (what
   we DID catch) so an own-review finding isn't miscounted as an escape.
 - **Red flags:** the same `class × missed_by` pair recurring across runs (e.g. `care-technical-review`
   repeatedly missing a `correctness` class) — a missing check in that lens skill, and a weighted
   IMPROVEMENTS entry; everything attributed `novel` (attribution dodging); an `address`-heavy round
-  with no `verdicts.md` (the triager didn't emit items).
+  with no `verdicts.md` (the triager didn't emit items); a recurring `high`-severity escape in the
+  same `class × missed_by` bucket — a high-severity miss outweighs a nitpick miss and warrants
+  a priority IMPROVEMENTS entry.
 - **Output shape:** a finding here names the **target skill file** to improve (e.g. a
   `care-technical-review` methodology check), not another loop rule.
 - **escape → fixture:** when a bot caught a real defect our reviewer's `findings` missed, the sidecar

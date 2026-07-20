@@ -253,7 +253,7 @@ New findings target `orchestrator/src`, the methodology regions, the lens skills
 
 status: applied (2026-07-14)
 first-seen: 2026-07-14 · seen: 0 (raised by the doctor v2 rework) · dimension: 3 (token economy)
-evidence: PLAN-doctor-v2.md Gap A — `journal.ts` plumbs `cost_cum` and `render.ts` renders it, but no
+evidence: doctor v2 rework Gap A — `journal.ts` plumbs `cost_cum` and `render.ts` renders it, but no
 producer sets it; the `skills-opencode.ts` spawns discard opencode's per-response usage.
 proposed edit (**loopd — propose-only, needs `npm test`**): capture opencode's usage in
 `orchestrator/src/opencode-runner.ts` and accumulate into the journal `cost_cum.usd_est`, so rubric
@@ -269,7 +269,7 @@ build loggers) plus a per-call `cost_usd`; `render.ts` shows a `($X.XX)` suffix.
 
 status: applied (2026-07-14)
 first-seen: 2026-07-14 · seen: 0 (raised by the doctor v2 rework) · dimension: 8 (escape attribution) / 4 (pipeline)
-evidence: PLAN-doctor-v2.md Gap B — `opencodeTriager` returns `{addressCount, declineCount, deferCount}`
+evidence: doctor v2 rework Gap B — `opencodeTriager` returns `{addressCount, declineCount, deferCount}`
 and writes nothing; `default-wiring.ts:111` tells 6b's implementer to "address the items in
 verdicts.md" — a file **nothing writes** (dangling read); no `addressed.md`/`missed_by` anywhere.
 proposed edit (**loopd — propose-only, needs `npm test`**): extend the triager to emit a structured

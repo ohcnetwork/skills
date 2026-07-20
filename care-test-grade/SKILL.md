@@ -44,8 +44,9 @@ Grade **only when specs exist** — the e2e track is optional, so "no specs" is 
 For every criterion, assess:
 
 - **Coverage** — ≥1 spec asserts it. (Absent → _Missing_.)
-- **Assertion strength** — the spec fails if the behavior is wrong; no trivially-green asserts
-  (e.g. asserting an element exists when the criterion is about its _value/state_).
+- **Assertion strength** — the spec fails if the behavior is wrong. A trivially-green assert that
+  checks _presence_ where the criterion is about a _value/state_ does **not** verify the claim →
+  that's **Wrong** (rewrite), not a thin pass. See the Weak-vs-Wrong note under the verdict table.
 - **Faithfulness** — exercises the real user flow, not a shortcut (seeding state directly, asserting
   on an implementation detail the user never sees).
 - **Correctness** — no spec contradicts the criteria or asserts unrelated behavior.
@@ -104,11 +105,19 @@ Flag a **Weak** verdict when a pattern is touched but the full interaction isn't
 | Verdict     | Meaning                                                                                          | Disposition |
 | ----------- | ------------------------------------------------------------------------------------------------ | ----------- |
 | **Covered** | asserted, strong, faithful                                                                       | —           |
-| **Weak**    | covered but the assertion is thin or unfaithful                                                  | advisory    |
+| **Weak**    | **verifies the claim, but thinly** — fragile, coincidental, or partial (e.g. a loose match that could pass spuriously, or only part of a compound claim). Tighten the assertion, don't rewrite it. | advisory    |
 | **Missing** | no spec asserts it                                                                               | advisory    |
-| **Wrong**   | a spec contradicts the criteria or asserts unrelated behavior (rubber-stamps the implementation) | **blocks**  |
+| **Wrong**   | **the spec does not verify the criterion's claim** — contradicts the criteria, rubber-stamps a buggy value, asserts adjacent behavior instead of the claim, or asserts mere _presence_ where the criterion is about a _value_ (e.g. `toBeVisible()` on an element whose displayed value IS the claim). **Rewrite** the spec to assert the claim. | **blocks**  |
 
 Give the **minimal fix** for every non-Covered verdict.
+
+> **Weak vs Wrong — the load-bearing line.** Ask: *does the spec test the criterion's claim at all?*
+> Checks the right thing but weakly → **Weak** (tighten). Never checks the claim → **Wrong** (rewrite;
+> blocks). The trap is a presence-only assert on a value criterion: a green `toBeVisible()` survives
+> even if the value is completely broken, so it verifies nothing — **Wrong, not Weak**.
+> **Fixture corollary (IMP-10):** if the value can't be produced by the local fixture (a
+> server-assigned number, id, timestamp), it's still **Wrong**, but the fix routes **back to the
+> plan** to restate the criterion against a value the fixture yields — not a hollowed assert.
 
 ### Criticality — prioritize the fixes
 

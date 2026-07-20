@@ -27,7 +27,7 @@ Calibration: judge only the changed surfaces and their direct siblings. Unchange
 - **`.github/instructions/react-components.instructions.md`** — shadcn/ui + CAREUI medical components; `cn()` from `src/lib/utils.ts`; CVA for variants; `focus-visible:ring-1` focus states.
 - **`.github/instructions/pages.instructions.md`** + **`src/hooks/useBreakpoints.ts`** — mobile-first; breakpoints xs 480 / sm 640 / md 768 / lg 1024 / xl 1280 / 2xl 1536.
 - **`tailwind.config.js`** — color tokens (primary `#0d9f6e`); never hardcode colors inline.
-- Overflow idioms in this repo: `truncate` (+ `title` attribute for hover), `line-clamp`, `break-words`, `min-w-0` on flex children, `overflow-hidden` on containers.
+- Overflow idioms in this repo: `truncate` (+ `title` attribute for hover), `line-clamp`, `break-words`, `min-w-0` on flex children (horizontal) **and `min-h-0` for a vertical scroll chain** (see the scroll-trap check below), `overflow-hidden` on containers.
 <!-- /care-loop:methodology -->
 
 ## Step 0 — Resolve the diff
@@ -54,6 +54,14 @@ For every place user-supplied or server-supplied text is rendered:
 
 - Is there a `truncate` (with `title` for full text on hover), `line-clamp`, or `break-words`?
 - Are flex children given `min-w-0`? (Without it, a flex child can grow past its container.)
+- **Nested / vertical scroll — the `min-h-0` trap.** When a child is meant to scroll vertically
+  (`overflow-y-auto` / `overflow-auto` on a `flex-1` element), does that element **and every flex
+  ancestor between it and the bounded viewport** carry `min-h-0` (or an `overflow-hidden` container)?
+  A `flex-1 overflow-y-auto` child defaults to `min-height:auto`, so **it grows to its content height
+  and the scroller never engages** — the region overflows/clips instead of scrolling, and a
+  scroller-inside-a-scroller leaves *both* dead. Flag any `overflow-*` on an **unbounded flex child**
+  (declared scroll with no `min-h-0` / `overflow-hidden` bounding it). Overflow being *declared* is not
+  overflow *working* — name the dead scroller, not "add overflow."
 - Are containers given `overflow-hidden` or `overflow-auto`?
 - Does any newly-added fixed width (e.g. `w-64`, `w-[300px]`) risk breaking at a narrow viewport?
   **Validate down to the smallest supported device — 320px** (older/small Android, iPhone SE-class),
@@ -61,6 +69,14 @@ For every place user-supplied or server-supplied text is rendered:
   overflows there even when it looks fine at 375/flagship. Care runs on whatever phone is on the
   ward. Prefer fluid widths (`w-full` + `max-w-*`) over any `w-[…px]` ≥ 320.
 - Does any `absolute`-positioned element risk escaping its clipping parent at narrow widths?
+
+> **Static-mode job on spatial geometry: flag the pattern, don't prove the pixel.** In diff-only mode
+> you are reading code, not rendering it — reliably good at *pattern recognition* (a missing
+> `min-w-0`/`min-h-0`, a `w-[…px]` ≥ 320, an `overflow-*` on an unbounded flex child, a `md:`
+> breakpoint on a dense row), weak at *mental pixel arithmetic* across a breakpoint. So report these
+> as **`Broken` — verify in browser**: name the suspicious pattern and the viewport it endangers,
+> rather than asserting an exact overflow you computed by hand. When live mode runs, it confirms them
+> against the actual render; the two lenses are complementary, not redundant.
 
 ### Conventions
 

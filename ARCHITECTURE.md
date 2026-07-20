@@ -2,7 +2,7 @@
 
 **Document covers:** care-loop headless orchestrator (loopd), care-loop-doctor diagnostic system, data flows, workflow, and design principles.
 
-**Status:** Implemented (loopd built 2026-07-14; doctor v2 active 2026-07-14).
+**Status:** Implemented (loopd built 2026-07-14; doctor v2 active 2026-07-14; end-of-run auto-doctor default-on 2026-07-20).
 
 ---
 
@@ -37,7 +37,7 @@ It operates **headless** (detached from VS Code) and is designed to be **fully a
 
 ### What is care-loop-doctor?
 
-**care-loop-doctor** is a **standalone diagnostic tool** that:
+**care-loop-doctor** is a diagnostic tool that:
 
 1. Reads a completed loopd run's structured trace (journal, skill results, state)
 2. Judges it against a rubric (8 dimensions of loop health)
@@ -45,7 +45,9 @@ It operates **headless** (detached from VS Code) and is designed to be **fully a
 4. Tracks improvements across runs in a durable backlog
 5. Applies improvements to loop files behind one human gate
 
-It does NOT run or control the loop; it diagnoses post-run behavior and surfaces patterns.
+It does NOT run or control the loop; it diagnoses post-run behavior and surfaces patterns. It runs in
+two modes: **interactive** (human invokes it against a run dir, inline edits behind one gate) and
+**autonomous end-of-run** (loopd auto-invokes it after every run — see [Autonomous End-of-Run Mode](#autonomous-end-of-run-mode-auto-doctor)).
 
 ---
 
@@ -59,14 +61,14 @@ The core challenge: **the old architecture fused orchestration with VS Code's ch
 
 ### Response: Six design principles
 
-| # | Principle | Why | Fix class |
-|---|-----------|-----|-----------|
-| 1 | **No LLM in control loop** | Every scheduling decision is plain code over validated inputs | Router drift (IMP-3/7), Sonnet contract collapse |
-| 2 | **Model never writes state** | Orchestrator is sole writer of `state.json` and journal | State drift by construction |
-| 3 | **Waits are blocking calls** | `poll-pr.sh` blocks a thread; when it returns, next line runs | Manual nudges (IMP-5), "status check?" prompts |
-| 4 | **Crash-only design** | Recovery is always journal-replay + ground-truth reconcile | VS Code OOM class (IMP-6/9) |
-| 5 | **Judgment pinned, mechanical cheap** | SDK pins each agent's model; orchestrator code is free | IMP-1 (Sonnet plans), IMP-7 (mechanical non-compliance) |
-| 6 | **Explainable from journal alone** | No VS Code archaeology needed; doctor reads journal + sidecars | IMP-11 (reconstruction tax), IMP-2 (stale anchors) |
+| #   | Principle                             | Why                                                            | Fix class                                               |
+| --- | ------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
+| 1   | **No LLM in control loop**            | Every scheduling decision is plain code over validated inputs  | Router drift (IMP-3/7), Sonnet contract collapse        |
+| 2   | **Model never writes state**          | Orchestrator is sole writer of `state.json` and journal        | State drift by construction                             |
+| 3   | **Waits are blocking calls**          | `poll-pr.sh` blocks a thread; when it returns, next line runs  | Manual nudges (IMP-5), "status check?" prompts          |
+| 4   | **Crash-only design**                 | Recovery is always journal-replay + ground-truth reconcile     | VS Code OOM class (IMP-6/9)                             |
+| 5   | **Judgment pinned, mechanical cheap** | SDK pins each agent's model; orchestrator code is free         | IMP-1 (Sonnet plans), IMP-7 (mechanical non-compliance) |
+| 6   | **Explainable from journal alone**    | No VS Code archaeology needed; doctor reads journal + sidecars | IMP-11 (reconstruction tax), IMP-2 (stale anchors)      |
 
 ---
 
@@ -83,15 +85,17 @@ nohup care-loopd start … &
 ```
 
 **Concurrency** between runs is solved by:
+
 - **Worktree isolation** (each run gets its own git worktree via `git worktree add -b`)
 - **Global `pw-lock` mutex** (for shared Playwright backend)
 - **Per-run lockfile** (`<run-dir>/.orchestrator.lock`, atomic mkdir, steal stale locks)
 
 **In-process layout:**
+
 - FSM runs on main thread (state machine is single-threaded)
 - Agent spawns and blocking waits run inline (sequential loop)
 - No async framework — only what SDK does internally
-- Steps 4a/4b/4c *could* fan out as three parallel SDK calls but v1 runs sequentially
+- Steps 4a/4b/4c _could_ fan out as three parallel SDK calls but v1 runs sequentially
 
 ### Runner: OpenCode + GitHub Copilot
 
@@ -124,6 +128,7 @@ GATE  │ Human via adapter  │ Answer questions, approve plan    │ 2        
 ```
 
 **Round loop:** `5 → 5-waiting-ci → 6a → 6b → 5 …` until:
+
 - `6a` yields zero address items AND
 - CI is green AND
 - Bot threshold met (≥4/5 Greptile-style)
@@ -143,6 +148,7 @@ OR **STOP** fires (budget, escalation exhausted) → checkpoint.
 **Input:** The change request (a git branch or diff).
 
 **Output:**
+
 - `baseline.md` — scope, files, approach (cites real paths from recon)
 - `criteria.md` — acceptance criteria (what "done" looks like)
 - `decisions.md` — settled design decisions + dev credentials (if UI-touching)
@@ -154,6 +160,7 @@ OR **STOP** fires (budget, escalation exhausted) → checkpoint.
   - `modelPinSatisfied`: was the planner run on the configured judgment engine?
 
 **Interview gate (GATE):**
+
 - Human answers batched questions (or approves if no questions)
 - Plan approval **authorizes everything downstream** (with Scope Governor as tripwire)
 - No plan = no push
@@ -169,10 +176,12 @@ OR **STOP** fires (budget, escalation exhausted) → checkpoint.
 **Role:** Code + UI specs per plan.
 
 **Input:**
+
 - `plan.md`, `criteria.md`, `baseline.md`
 - Git branch ready to edit
 
 **Output:**
+
 - Code changes
 - Modified files
 - `loop.log` entry showing what was changed
@@ -182,17 +191,20 @@ OR **STOP** fires (budget, escalation exhausted) → checkpoint.
 ### Steps 4a–4c: Judgment gates
 
 **4a — Review (care-reviewer, judgment tier)**
+
 - Applies `/care-review` lenses: `care-diff-review` (intent/legibility) + `care-technical-review` (approach) + `care-ux-review` (static mode only) when `.tsx` touched
 - Verdict: `pass` | `findings` (non-blocking) | `blocked` (blocks round)
 - Blocked → loop back to Step 3 with findings
 - Findings → documented in `declined.md`, then proceed
 
 **4b — Test-grade (care-test-grader, judgment tier)**
+
 - Grades implementation against test specs in `criteria.md`
 - Verdict: `pass` | `wrong` (incomplete implementation)
 - Wrong → back to Step 3 with grade
 
 **4c — UX-validate (care-ux-validator, judgment tier)**
+
 - Playwright MCP: drive the app, check UI against `ui-surfaces.md`
 - Checks: overflow, truncation, mobile responsiveness (375/768/1280px), touch targets, A11y
 - Verdict: `pass` | `overflow` | `responsive-fail`
@@ -217,6 +229,7 @@ On gate failure → loop back to Step 3.
 **Input:** Pre-digested bot feedback from `collect-feedback.sh` + `feedback.md`.
 
 **Output:**
+
 - `verdicts.md` — per-item verdict list:
   ```
   item | verdict | class | missed_by | reason
@@ -226,6 +239,7 @@ On gate failure → loop back to Step 3.
 - Tallies: `addressCount`, `declineCount`, `deferCount`
 
 **Verdicts:**
+
 - **address** → implementer will fix in round+1
 - **decline** → documented, move on
 - **defer** → escalate to human checkpoint
@@ -261,13 +275,17 @@ Defer-to-human → checkpoint (6a outcome journaled; loop exits for human input)
   "event": "step.exit",
   "step": "4a",
   "round": 1,
-  "data": {"reason_code": "review_findings_applied", "result": "skills/care-reviewer-r1.result.json"},
-  "cost_cum": {"usd_est": 3.41},
-  "prev": "sha256:…"
+  "data": {
+    "reason_code": "review_findings_applied",
+    "result": "skills/care-reviewer-r1.result.json",
+  },
+  "cost_cum": { "usd_est": 3.41 },
+  "prev": "sha256:…",
 }
 ```
 
 **Event vocabulary:**
+
 - `run.start` / `run.resume` / `run.end`
 - `step.enter` / `step.exit`
 - `gate.asked` / `gate.answered`
@@ -278,6 +296,7 @@ Defer-to-human → checkpoint (6a outcome journaled; loop exits for human input)
 - `push`, `ci.wait` / `ci.done`, `checkpoint.written`, `budget.stop`, `plan.approved`
 
 **Derived views** (regenerable from journal):
+
 - **`state.json`** — snapshot projection, same schema as today (sole writer: `state.ts`)
 - **`loop.log`** — human narrative, one line per event
 - **Doctor input** — journal + JobResults directly
@@ -313,6 +332,7 @@ Transport: opencode structured output (schema-validated at runner).
 ```
 
 **Guarantee model:**
+
 - **State integrity:** impossible by construction (only `state.ts` writes state)
 - **Agent compliance:** NOT impossible by construction (LLM is fallible) — but **loud, journaled, retried** (detect-and-retry) instead of silently absorbed
   - Invalid/missing after retries = spawn failure → escalation ladder
@@ -322,20 +342,24 @@ Transport: opencode structured output (schema-validated at runner).
 
 Reviewer, planner, and triager prompts source their methodology from canonical files (via named HTML-comment regions) to prevent drift:
 
-| Role | Source | Region | Strategy |
-|------|--------|--------|----------|
+| Role            | Source                                                                                     | Region                                            | Strategy                                          |
+| --------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------- |
 | `care-reviewer` | `care-diff-review/SKILL.md` + `care-technical-review/SKILL.md` + `care-ux-review/SKILL.md` | `name="default"` (static mode only for ux-review) | Read at process start, compose into system prompt |
-| `care-planner` | `care-planner/SKILL.md` | `name="default"` | Read at process start, compose into system prompt |
-| `care-triager` | `care-triager/SKILL.md` | `name="default"` | Read at process start, compose into system prompt |
+| `care-planner`  | `care-planner/SKILL.md`                                                                    | `name="default"`                                  | Read at process start, compose into system prompt |
+| `care-triager`  | `care-triager/SKILL.md`                                                                    | `name="default"`                                  | Read at process start, compose into system prompt |
 
 Regions are marked with HTML comments:
+
 ```markdown
 <!-- care-loop:methodology name="default" -->
+
 … reusable methodology core …
+
 <!-- /care-loop:methodology -->
 ```
 
 This prevents:
+
 - Paraphrase drift (methodology stays in one place)
 - Dead prose ("do X" instructions that no longer apply to loopd)
 - Host-specific mechanics bleeding into headless spawns
@@ -361,6 +385,7 @@ This prevents:
 ```
 
 Tiers + optional per-role override allows:
+
 - Local models via `models.local.json` (same structure)
 - Decoupled from skill methodology (which says "judgment tier", not "specific model")
 - Plan gate enforces: planner must run on the configured judgment engine, checked via `modelPinSatisfied` (opencode's report)
@@ -373,10 +398,10 @@ Tiers + optional per-role override allows:
 
 A loopd run dir is self-contained and self-identifying. The doctor reads:
 
-| Tier | Source | What it gives |
-|------|--------|---------------|
+| Tier  | Source                                                                                  | What it gives                                                                         |
+| ----- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **J** | `journal.jsonl` + `skills/<role>-r<N>.result.json` sidecars + `state.json` + `loop.log` | Timeline, verdicts, models, durations, findings, CI rounds, checkpoints, crash signal |
-| **C** | Plan artifacts + `feedback.md` + `gate/*.log` | Ground truth (acceptance criteria, scope baseline, bot feedback, helper output) |
+| **C** | Plan artifacts + `feedback.md` + `gate/*.log`                                           | Ground truth (acceptance criteria, scope baseline, bot feedback, helper output)       |
 
 Both are **always present** for a loopd run.
 
@@ -384,16 +409,16 @@ Both are **always present** for a loopd run.
 
 ### Rubric (8 Dimensions, All Exact Reads)
 
-| # | Dimension | Evidence | Red flags |
-|---|-----------|----------|-----------|
-| 1 | **Model-tier compliance** | `skill.result.model` per spawn + sidecar `modelPinSatisfied` | judgment spawn on wrong tier; planner gate fired |
-| 2 | **Termination & resume** | `run.end` outcome + `-ing` markers in `state.json` at death | missing `run.end`; torn tail; stale resume |
-| 3 | **Token economy** | `cost_cum.usd_est` from journal; `durationMs` per spawn | high cost/duration; retry/escalate counts |
-| 4 | **Pipeline adherence** | `step.enter/exit` sequence + `helper.exec` before `push` | out-of-order steps; gate → push without proper order |
-| 5 | **Output validity** | `spawn.invalid` events (JobResult schema failures) | recurring invalid output per role |
-| 6 | **Bot-round efficiency** | `ci.wait`/`ci.done`; `round` increments; triager tallies | `budget.stop max_rounds` (capped); repeated timeouts; addressCount not trending down |
-| 7 | **Cross-run trends** | Read `IMPROVEMENTS.md` + recent reports FIRST | re-observed finding bumps `seen:`; `applied` entry recurs = regression |
-| 8 | **Escape attribution** | `verdicts.md` `class × missed_by` rows | same `class × missed_by` pair recurring (skill fix needed) |
+| #   | Dimension                 | Evidence                                                     | Red flags                                                                            |
+| --- | ------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| 1   | **Model-tier compliance** | `skill.result.model` per spawn + sidecar `modelPinSatisfied` | judgment spawn on wrong tier; planner gate fired                                     |
+| 2   | **Termination & resume**  | `run.end` outcome + `-ing` markers in `state.json` at death  | missing `run.end`; torn tail; stale resume                                           |
+| 3   | **Token economy**         | `cost_cum.usd_est` from journal; `durationMs` per spawn      | high cost/duration; retry/escalate counts                                            |
+| 4   | **Pipeline adherence**    | `step.enter/exit` sequence + `helper.exec` before `push`     | out-of-order steps; gate → push without proper order                                 |
+| 5   | **Output validity**       | `spawn.invalid` events (JobResult schema failures)           | recurring invalid output per role                                                    |
+| 6   | **Bot-round efficiency**  | `ci.wait`/`ci.done`; `round` increments; triager tallies     | `budget.stop max_rounds` (capped); repeated timeouts; addressCount not trending down |
+| 7   | **Cross-run trends**      | Read `IMPROVEMENTS.md` + recent reports FIRST                | re-observed finding bumps `seen:`; `applied` entry recurs = regression               |
+| 8   | **Escape attribution**    | `verdicts.md` `class × missed_by` rows                       | same `class × missed_by` pair recurring (skill fix needed)                           |
 
 **Era note:** IMP-1 through IMP-13 are pre-loopd and mostly **structurally obviated**. Don't re-propose edits against deleted guides.
 
@@ -410,9 +435,41 @@ Both are **always present** for a loopd run.
 ### Apply Scope
 
 Post-cut, improvements land on:
+
 - **Methodology** → `care-planner/SKILL.md` / `care-triager/SKILL.md` marked regions or lens skills (doctor applies directly)
 - **Model routing** → `models.json` (doctor applies directly)
 - **Behavior** → `orchestrator/src/*.ts` (doctor proposes as a patch; author applies + `npm test`)
+
+### Autonomous End-of-Run Mode (auto-doctor)
+
+Every completed loopd run auto-invokes the doctor (default-on; `--no-doctor` / `CARE_DOCTOR=0` to opt
+out). The autonomous flow diagnoses the run, applies **eval-covered** skill edits, verifies them with
+orchestrator tests + affected care-evals, and opens a **self-improvement PR** carrying the diagnosis.
+It is best-effort: any throw is journaled (`doctor.error`) and swallowed — the loop's real outcome is
+never affected.
+
+**Deterministic scaffold, LLM core.** The doctor LLM is invoked ONLY for judgment (diagnose + edit
+skill prose + author fixtures) via an injected `spawnDoctor` seam. Every side-effect — git branch,
+running tests/evals, the coherence check, `gh pr create`, journaling — is orchestrator-owned and
+deterministic. Risky verbs (git/gh/npm) stay off the autonomous agent. Code lives in
+`orchestrator/src/auto-doctor.ts` (pure decision logic, fake-testable) + `auto-doctor-wiring.ts` (real
+seams); the PR lands on the **skills** repo (`ohcnetwork/skills`), not the care_fe worktree.
+
+**Apply authority is tiered by eval coverage** — a control we can't measure with a fixture must not
+auto-merge:
+
+| Target                                                                            | Eval coverage                            | Authority                                                  |
+| --------------------------------------------------------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| `care-review`, `care-test-grade`, `care-ux-review`, `care-triager`, `care-ci-fix` | ✅ cr-\* / tg-\* / ux-\* / tr-\* / cf-\* | Auto-apply, gated by affected-eval regression + `npm test` |
+| `care-diff-review`, `care-technical-review` (lenses)                              | ⚠️ indirect (via cr-\*)                  | Auto-apply only if it keeps the cr numbers green           |
+| `care-planner`                                                                    | ❌ not diff-graded                       | Propose-only — unverifiable ⇒ draft PR                     |
+| `models.json`                                                                     | ✅ via the eval it re-pins               | Auto-apply, gated by an eval on the new pin                |
+| `orchestrator/src/*.ts`                                                           | n/a (computational)                      | Propose-only always — a human owns it                      |
+
+Red / coherence-fail / unverified-tier edits route to a **draft** PR; no edits → report-only commit,
+no PR. Journal events: `doctor.start` / `doctor.apply` / `doctor.coherence` / `doctor.verify` /
+`doctor.pr`. See [PLAN-auto-doctor.md](care-loop/PLAN-auto-doctor.md) for the full design (sensor-type
+framing, recurrence gate on fixtures, coherence gate).
 
 ---
 
@@ -439,6 +496,8 @@ care-loop/orchestrator/
     resume.ts             # Startup recovery + decision table
     skill-source.ts       # Load methodology regions from skill files
     models-config.ts      # Load model selections from models.json
+    auto-doctor.ts        # End-of-run self-improvement stage (pure decision logic)
+    auto-doctor-wiring.ts # Real seams for the auto-doctor (git/tests/evals/gh/spawn)
   test/
     *.test.ts             # FSM table tests, journal replay, resume decision tests
   package.json
@@ -481,6 +540,7 @@ care-loop-doctor/
 ### Why build instead of adopt (Bernstein)?
 
 **Bernstein** (Apache-2.0 Python scheduler) is the closest prior art: deterministic, crash-recovery, ledger/replay journal. But:
+
 - **Fit vs shape mismatch:** Bernstein is fan-out (one goal → N parallel tasks); care-loop is one-task-repeated-in-rounds (iteration against feedback)
 - **Two documented limits** are care-loop's signature features:
   - No interactive interview (care-loop needs it; costs ~70% of Bernstein wrapper)
@@ -490,6 +550,7 @@ care-loop-doctor/
 ### Why opencode + Copilot over Claude Agent SDK?
 
 **REVISION 2026-07-13:**
+
 1. **Cost/access** — drive judgment spawns on existing GitHub Copilot subscription (device-code OAuth, "zero setup") vs metered Anthropic API key
 2. **Native headless** — `opencode serve` (HTTP/OpenAPI) + `opencode run` exactly match the off-chat-turn runtime the design calls for
 3. **Schema boundary for free** — opencode's `session.prompt({ format: { type:"json_schema", schema } })` returns `structured_output` with built-in retries + validation; the JobResult v1 seam is enforced-and-retried by the runner
@@ -504,6 +565,7 @@ care-loop-doctor/
 ### Why inject methodology instead of native skill tool?
 
 **Strategy 2 (inject at process start)** vs Strategy 1 (native skill tool, two turns):
+
 - Strategy 1 costs ~2× latency/turn and re-opens the hang surface (agentic turn with tools back on)
 - Strategy 2 reads the same file once at startup, composes into system prompt, one structured turn
 - **Lenses have no includes** — no progressive-disclosure advantage to the skill tool
@@ -513,6 +575,7 @@ care-loop-doctor/
 ### Why single-writer state?
 
 Only `state.ts` writes `state.json`. Agents produce artifacts + typed results; orchestrator is the sole writer of durable state. This:
+
 - **Prevents drift by construction** — no agent prose accidentally modifying state
 - **Makes resume exact** — replay journal, project state.json, compare to ground truth, reconcile contradictions
 
@@ -538,6 +601,7 @@ Currently sequential; could run review, test-grade, ux-validate in parallel (che
 ### Skill-specific evals (care-evals)
 
 Offline eval harness (`care-evals/`) exercises reviewer/triager against pre-authored ground-truth diffs (seeded defects + controls) with no PR/CI in the way. Measures:
+
 - Valid JobResult rate (>90% pass threshold)
 - Severity calibration (blocked vs findings)
 - False-positive count
@@ -554,18 +618,18 @@ care-loop/runs/<owner>-<branch>/
   state.json                              # Snapshot projection
   loop.log                                # Human narrative
   .orchestrator.lock                      # Per-run lockfile (pid + atomic)
-  
+
   # Plan stage
   task.md                                 # Change request
   criteria.md                             # Acceptance criteria
   baseline.md                             # Scope, files, approach + planned_by
   decisions.md                            # Settled design decisions + dev creds
   ui-surfaces.md                          # UI breakpoints to validate (if tsx)
-  
+
   # Feedback stage
   feedback.md                             # Pre-digested bot feedback per round
   verdicts.md                             # Triager verdict list (per-item class × missed_by)
-  
+
   # Skill results (sidecars)
   skills/
     care-planner-r0.input.json            # What the skill saw
@@ -581,14 +645,14 @@ care-loop/runs/<owner>-<branch>/
     implementer-r1.input.json
     implementer-r1.result.json
     …
-  
+
   # Gate stage helper output
   gate/
     implementer.log                       # Step 3 helper logs
     push.log                              # Step 5 push + gate logs
     questions-r<N>.md                     # Interview questions (checkpoint gate)
     answers-r<N>.md                       # Human's answers (checkpoint gate)
-  
+
   # Git artifacts
   .git/
   worktree-ref                            # Symbolic ref to the main worktree
@@ -598,4 +662,4 @@ care-loop/runs/<owner>-<branch>/
 
 **End of Architecture Document**
 
-For updates to this guide, check `PLAN-orchestrator-architecture.md` and `PLAN-skill-sourcing.md` for design-of-record details.
+For updates to this guide, check `PLAN-orchestrator-architecture.md` for design-of-record details, and the repo's as-built change log for what actually shipped.

@@ -13,7 +13,11 @@ import { OctokitGitHub } from "./github.js";
 import { runHelper } from "./shell.js";
 import { Journal } from "./journal.js";
 import { loadModels } from "./models-config.js";
-import { promptStructured, driveDoctorSpawn } from "./opencode-runner.js";
+import {
+  promptStructured,
+  driveDoctorSpawn,
+  startEvalServer,
+} from "./opencode-runner.js";
 import { doctorMethodology, skillsRoot } from "./skill-source.js";
 import {
   runAutoDoctor,
@@ -26,6 +30,11 @@ const ORCHESTRATOR_DIR = resolve(skillsRoot, "care-loop/orchestrator");
 const EVALS_RUNNER_DIR = resolve(skillsRoot, "care-evals/runner");
 const EVALS_TASKS_DIR = resolve(skillsRoot, "care-evals/tasks");
 const HELPER_TIMEOUT = 15 * 60 * 1000; // tests/evals can be slow
+// The doctor spawn is a large multi-file EDITING session (read the whole run dir + edit skills + write
+// the diagnosis/IMPROVEMENTS/coverage/fixtures), NOT a quick judgment call — the 240s judgment default
+// starves it mid-Turn-A (dry smoke 2026-07-20: timed out at 240s having written the diagnosis + a
+// triager edit but never reaching the Turn-B manifest emit). Give it real headroom.
+const DOCTOR_SPAWN_TIMEOUT = 20 * 60 * 1000;
 
 /** Parse `git@github.com:owner/name.git` or `https://github.com/owner/name(.git)` → "owner/name". */
 export function parseRemoteSlug(url: string): string | null {
@@ -223,6 +232,7 @@ export async function runEndOfRunDoctor(
           editInstruction: `Diagnose the run at ${runDir} and apply the covered-skill improvements now.`,
           emitSystem,
           emitInstruction: "Emit the DoctorOutput manifest for the changes you made.",
+          timeoutMs: DOCTOR_SPAWN_TIMEOUT,
         },
         DOCTOR_OUTPUT_SCHEMA,
       );
@@ -244,15 +254,24 @@ export async function runEndOfRunDoctor(
     runEvals: async (prefixes: string[]) => {
       const tasks = tasksForPrefixes(prefixes);
       if (!tasks.length) return { ok: true, output: "no affected eval tasks" };
-      const r = runHelper({
-        cmd: "python3",
-        args: ["run_eval.py", tasks.join(","), "--adapter", "opencode", "--model", `${provider}/${model}`],
-        cwd: EVALS_RUNNER_DIR,
-        logPath: join(doctorLogDir, "evals.log"),
-        summaryMatch: /PASS|FAIL/,
-        timeoutMs: HELPER_TIMEOUT,
-      });
-      return { ok: r.exit === 0, output: r.summary };
+      // care-evals `--adapter opencode` talks to a warm serve at $OPENCODE_SERVER_URL — stand one up
+      // (reusing the orchestrator's embedded-server infra) around the sweep, else every task returns
+      // "connection refused" (smoke 2026-07-20 Bug C). Torn down in finally.
+      const server = await startEvalServer();
+      try {
+        const r = runHelper({
+          cmd: "python3",
+          args: ["run_eval.py", tasks.join(","), "--adapter", "opencode", "--model", `${provider}/${model}`],
+          cwd: EVALS_RUNNER_DIR,
+          env: { ...process.env, OPENCODE_SERVER_URL: server.url },
+          logPath: join(doctorLogDir, "evals.log"),
+          summaryMatch: /Valid JobResults|PASS|FAIL/,
+          timeoutMs: HELPER_TIMEOUT,
+        });
+        return { ok: r.exit === 0, output: r.summary };
+      } finally {
+        await server.close();
+      }
     },
 
     coherenceCheck: async (skills: string[]) => {
@@ -276,6 +295,10 @@ export async function runEndOfRunDoctor(
             "real contradiction, else {ok:true}.",
           task: bodies,
           round: 0,
+          // The judgment default (240s) starved this on a large inlined skill (smoke 2026-07-20 timed
+          // out here right after doctor.apply). It inlines the files (no exploration) but still reasons
+          // over big prose — give it headroom.
+          timeoutMs: DOCTOR_SPAWN_TIMEOUT,
         },
         COHERENCE_SCHEMA,
       );

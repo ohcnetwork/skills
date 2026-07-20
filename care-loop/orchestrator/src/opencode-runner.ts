@@ -152,6 +152,49 @@ async function startOpencodeOnFreePort(
   throw lastErr;
 }
 
+/**
+ * Start a warm opencode server for the care-evals `opencode` adapter, which POSTs to
+ * `$OPENCODE_SERVER_URL/session/.../message`. REUSES the same embedded-server infra as the judgment
+ * spawns (getFreePort + createOpencode, bind-race retry) instead of shelling a separate `opencode
+ * serve` — no binary resolution, no readiness polling (createOpencode resolves once listening), one
+ * code path. Returns the URL to hand run_eval.py as OPENCODE_SERVER_URL, plus a close(). The
+ * auto-doctor's `runEvals` seam brackets the eval sweep with start → run → close.
+ */
+export async function startEvalServer(
+  maxTries = 5,
+): Promise<{ url: string; close: () => Promise<void> }> {
+  let lastErr: unknown;
+  for (let i = 0; i < maxTries; i++) {
+    const port = await getFreePort();
+    try {
+      const oc = await startOpencodeOnFreePortAt(port);
+      return {
+        url: `http://127.0.0.1:${port}`,
+        close: async () => {
+          await oc.server?.close?.();
+        },
+      };
+    } catch (e) {
+      lastErr = e;
+      if (
+        !/EADDRINUSE|address already in use|Server exited|listen/i.test(
+          String((e as Error)?.message ?? e),
+        )
+      )
+        throw e;
+    }
+  }
+  throw lastErr;
+}
+
+/** createOpencode on a specific port (the eval server needs no special permission/tools — the eval
+ *  adapter sets tools-off per call and inlines all inputs into the prompt, so no file access). */
+function startOpencodeOnFreePortAt(
+  port: number,
+): Promise<Awaited<ReturnType<typeof createOpencode>>> {
+  return createOpencode({ port, config: {} as any });
+}
+
 /** Drive ONE prompt to completion via opencode's async transport (see the transport-model note above):
  *  subscribe to the `/event` bus, fire `promptAsync` (returns immediately), wait for `session.idle`,
  *  then fetch the finished assistant message. Returns that message's `info` (carries `structured`,

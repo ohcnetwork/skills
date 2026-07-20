@@ -53,8 +53,15 @@ function harness(
     evals?: boolean;
     coherence?: { ok: boolean; note?: string };
     spawnThrows?: boolean;
+    changed?: string[]; // git changedFiles() — defaults to "honest doctor" (disk matches manifest)
   } = {},
 ): Harness {
+  // Default: the doctor actually wrote what it claimed — every declared skill-edit file + a path per
+  // fixture shows as changed on disk. Tests override `changed` to simulate a phantom (claimed-not-written).
+  const defaultChanged = [
+    ...out.skillEdits.flatMap((e) => e.files),
+    ...out.fixtures.map((f) => `care-evals/tasks/${f.name}/task.md`),
+  ];
   const events: NewEvent[] = [];
   const reverted: string[] = [];
   const commits: string[] = [];
@@ -78,7 +85,7 @@ function harness(
         h.branchedTo = name;
       },
       revertFile: (p) => reverted.push(p),
-      changedFiles: () => [],
+      changedFiles: () => over.changed ?? defaultChanged,
       commitAll: (msg) => {
         commits.push(msg);
         return "sha123";
@@ -270,6 +277,50 @@ test("no edits at all ⇒ report-only commit, no PR", async () => {
   assert.match(h.commits[0], /report-only/);
   const pr = h.events.find((e) => e.event === "doctor.pr");
   assert.equal((pr!.data as { reason?: string }).reason, "report-only");
+});
+
+// ── manifest reconciliation: trust the LLM's claims only where disk agrees ────────────────────────
+
+test("phantom skill edit (claimed but file not changed on disk) is dropped, not applied", async () => {
+  const out = baseOutput({
+    skillEdits: [
+      { skill: "care-ux-review", files: ["care-ux-review/SKILL.md"], note: "real" },
+      { skill: "care-review", files: ["care-review/SKILL.md"], note: "phantom" },
+    ],
+  });
+  // only the ux file actually changed on disk; the care-review edit is a phantom claim
+  const h = harness(out, { changed: ["care-ux-review/SKILL.md"] });
+  const r = await runAutoDoctor(opts(), h.seams);
+  assert.deepEqual(r.applied, ["care-ux-review"]); // phantom care-review NOT applied
+  assert.deepEqual(h.ranEvalsWith, ["ux"]); // only the real edit's evals run
+  const phantom = h.events.find(
+    (e) => e.event === "doctor.apply" && (e.data as { phantom?: unknown }).phantom,
+  );
+  assert.deepEqual((phantom!.data as { phantom: { skills: string[] } }).phantom.skills, ["care-review"]);
+});
+
+test("phantom fixture (claimed but never written) is dropped from committed set", async () => {
+  const out = baseOutput({
+    skillEdits: [{ skill: "care-ux-review", files: ["care-ux-review/SKILL.md"], note: "x" }],
+    fixtures: [
+      { name: "ux-11-real", skill: "care-ux-review", kind: "verbatim", recurred: false },
+      { name: "ux-12-phantom", skill: "care-ux-review", kind: "verbatim", recurred: false },
+    ],
+  });
+  // ux-11 written, ux-12 claimed-not-written
+  const h = harness(out, {
+    changed: ["care-ux-review/SKILL.md", "care-evals/tasks/ux-11-real/task.md"],
+  });
+  const r = await runAutoDoctor(opts(), h.seams);
+  assert.deepEqual(r.fixtures.committed, ["ux-11-real"]);
+  assert.equal(r.fixtures.proposed.length, 0);
+  const phantom = h.events.find(
+    (e) => e.event === "doctor.apply" && (e.data as { phantom?: unknown }).phantom,
+  );
+  assert.deepEqual(
+    (phantom!.data as { phantom: { fixtures: string[] } }).phantom.fixtures,
+    ["ux-12-phantom"],
+  );
 });
 
 // ── dry run: apply + verify, but no branch/commit/PR ──────────────────────────────────────────────

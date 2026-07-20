@@ -193,12 +193,37 @@ export async function runAutoDoctor(
       repoRoot: opts.repoRoot,
     });
 
+    // ── Reconcile the manifest against GROUND TRUTH. The manifest is the LLM's self-report; trust it
+    //    only where it matches actual file changes on disk (the loop's validated-worker-boundary rule
+    //    — the orchestrator writes state from verified results, not the agent's word). A skill edit
+    //    whose declared files didn't actually change, or a fixture whose files were never written, is
+    //    a PHANTOM: dropped (never applied/committed) and journaled. Caught by the 2026-07-20 smoke,
+    //    where the manifest claimed a `committedFixtures` entry the doctor never wrote to disk. ──────
+    const changed = seams.git.changedFiles();
+    const realSkillEdits = out.skillEdits.filter((e) =>
+      e.files.some((f) => changed.includes(f)),
+    );
+    const realFixtures = out.fixtures.filter((fx) =>
+      changed.some((c) => c.includes(fx.name)),
+    );
+    const phantomSkills = out.skillEdits
+      .filter((e) => !realSkillEdits.includes(e))
+      .map((e) => e.skill);
+    const phantomFixtures = out.fixtures
+      .filter((fx) => !realFixtures.includes(fx))
+      .map((fx) => fx.name);
+    if (phantomSkills.length || phantomFixtures.length)
+      seams.append({
+        event: "doctor.apply",
+        data: { phantom: { skills: phantomSkills, fixtures: phantomFixtures } },
+      });
+
     // ── Authority tiering: an edit to a skill without eval coverage cannot auto-merge. Revert the
     //    file so the branch stays clean, and demote it to a propose-only item for the PR body. ──────
     const applied: string[] = [];
     const demoted: string[] = [];
     const proposeOnly: ProposeOnlyItem[] = [...out.proposeOnly];
-    for (const edit of out.skillEdits) {
+    for (const edit of realSkillEdits) {
       if (hasEvalCoverage(edit.skill)) {
         applied.push(edit.skill);
       } else {
@@ -217,7 +242,7 @@ export async function runAutoDoctor(
     //    unrecurred sibling is demoted to a proposed (human-review) fixture. Verbatim always commits.
     const committedFixtures: string[] = [];
     const proposedFixtures: string[] = [];
-    for (const fx of out.fixtures) {
+    for (const fx of realFixtures) {
       const trusted = fx.kind === "verbatim" || fx.recurred;
       if (trusted) committedFixtures.push(fx.name);
       else {

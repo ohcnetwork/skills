@@ -50,6 +50,7 @@ Usage:
   care-loopd resume <run-dir>    Reconcile the PR (probePr: head · CI · bots-at-head) and RE-ENTER the
        CI-round loop at the journal-head round against the existing PR — no re-push, no duplicate PR.
        Resumes the CI stage only (a PR must be open); pass --main if the checkout isn't the default.
+       Runs the end-of-run self-improvement doctor when the loop terminates (--no-doctor to skip).
 
 Advanced (the two phases of \`run\`, split for scripting/debugging):
   care-loopd plan  [flags]       Just the interactive plan stage — writes criteria.md / baseline.md /
@@ -232,9 +233,7 @@ async function cmdResume(
       bots: seams.bots,
       triage: reduceTriage(seams.triage),
       apply: seams.apply,
-      ciFix: seams.ciFix
-        ? reduceCiFix(seams.ciFix, s.worktree)
-        : undefined,
+      ciFix: seams.ciFix ? reduceCiFix(seams.ciFix, s.worktree) : undefined,
       testGrade: seams.testGrade
         ? reduceTestGrade(seams.testGrade, s.worktree, base)
         : undefined,
@@ -248,6 +247,13 @@ async function cmdResume(
   console.log(
     `\ndone: outcome=${res.outcome}  rounds=${res.rounds}  pr=#${plan.pr}`,
   );
+
+  await maybeRunDoctor(
+    runDir,
+    `${s.repo.replace("/", "-")}-${s.branch}`,
+    flags,
+  );
+
   if (res.outcome !== "converged") process.exit(1);
 }
 
@@ -389,26 +395,36 @@ async function startFromInput(
     `\ndone: phase=${res.phase}  outcome=${res.outcome}${res.pr ? `  pr=#${res.pr}` : ""}`,
   );
 
-  // End-of-run self-improvement (default-on; --no-doctor / CARE_DOCTOR=0 to skip). Best-effort — the
-  // doctor swallows its own errors, and a failed loop is exactly when there's most to learn, so this
-  // runs BEFORE the non-converged exit below.
-  const doctorEnabled =
-    flags["no-doctor"] !== true && process.env.CARE_DOCTOR !== "0";
-  if (doctorEnabled) {
-    const r = await runEndOfRunDoctor({
-      runDir,
-      runSlug: `${repo.replace("/", "-")}-${branch}`,
-      modelsFile,
-      enabled: true,
-    });
-    if (r.ran)
-      console.log(
-        `auto-doctor: ${r.pr ? `${r.draft ? "draft " : ""}PR #${r.pr}` : "report-only"}  applied=[${r.applied.join(",")}]  propose-only=${r.proposeOnly}`,
-      );
-    else console.log(`auto-doctor: skipped (${r.skipped})`);
-  }
+  await maybeRunDoctor(runDir, `${repo.replace("/", "-")}-${branch}`, flags);
 
   if (res.phase === "ci" && res.outcome !== "converged") process.exit(1);
+}
+
+/** End-of-run self-improvement (default-on; --no-doctor / CARE_DOCTOR=0 to skip). Best-effort — the
+ *  doctor swallows its own errors, and a failed loop is exactly when there's most to learn, so this
+ *  runs BEFORE any non-converged exit. Shared by every loop-terminating path (`start`/`run` AND
+ *  `resume`) so a resumed run gets the same self-improvement pass as a fresh one. */
+async function maybeRunDoctor(
+  runDir: string,
+  runSlug: string,
+  flags: Record<string, string | true>,
+): Promise<void> {
+  const enabled =
+    flags["no-doctor"] !== true && process.env.CARE_DOCTOR !== "0";
+  if (!enabled) return;
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+  const r = await runEndOfRunDoctor({
+    runDir,
+    runSlug,
+    modelsFile,
+    enabled: true,
+  });
+  if (r.ran)
+    console.log(
+      `auto-doctor: ${r.pr ? `${r.draft ? "draft " : ""}PR #${r.pr}` : "report-only"}  applied=[${r.applied.join(",")}]  propose-only=${r.proposeOnly}`,
+    );
+  else console.log(`auto-doctor: skipped (${r.skipped})`);
 }
 
 /** The single entry point: the questionnaire front sources + validates the seed input, `runPlan` drives
@@ -454,7 +470,8 @@ async function cmdDoctor(
     process.exit(2);
   }
   const dry = flags.dry === true;
-  const modelsFile = typeof flags.models === "string" ? flags.models : undefined;
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
   console.log(`care-loopd doctor${dry ? " (dry)" : ""}: ${runDir}\n`);
   const r = await runEndOfRunDoctor({
     runDir,
@@ -477,9 +494,13 @@ async function cmdDoctor(
     `  fixtures: committed=[${r.fixtures.committed.join(",")}] proposed=[${r.fixtures.proposed.join(",")}]`,
   );
   if (r.verify)
-    console.log(`  verify: tests=${r.verify.tests} evals=${r.verify.evals}  coherence=${r.coherenceOk}`);
+    console.log(
+      `  verify: tests=${r.verify.tests} evals=${r.verify.evals}  coherence=${r.coherenceOk}`,
+    );
   if (r.dry)
-    console.log(`\n  (dry run — inspect the working-tree edits with \`git status\` / \`git diff\`)`);
+    console.log(
+      `\n  (dry run — inspect the working-tree edits with \`git status\` / \`git diff\`)`,
+    );
 }
 
 async function main(): Promise<void> {
@@ -495,7 +516,10 @@ async function main(): Promise<void> {
     case "dashboard": {
       const df = parseFlags(rest);
       const port = typeof df.port === "string" ? Number(df.port) : 3141;
-      const runsDir = typeof df["runs-dir"] === "string" ? df["runs-dir"] : join(__dirname, "../../runs");
+      const runsDir =
+        typeof df["runs-dir"] === "string"
+          ? df["runs-dir"]
+          : join(__dirname, "../../runs");
       startDashboard(runsDir, port);
       return;
     }

@@ -220,3 +220,40 @@ test("planResume: a DEFERRED run IS resumable (ci_red_human is a checkpoint, not
   assert.equal(plan.pr, 16571);
   assert.equal(plan.headSha, "d6626ef9");
 });
+
+test("planResume: a CAPPED run IS resumable (round budget ran out — raise --max-rounds and continue)", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "push",
+      data: {
+        state: { head_sha: "d6626ef9", step: "5-pushing" },
+        head_sha: "d6626ef9",
+      },
+    });
+    j.append({
+      event: "decision",
+      data: {
+        note: "pr-opened",
+        pr: 16571,
+        state: { pr: 16571, step: "5-await" },
+      },
+    });
+    j.append({ event: "step.enter", step: "5", round: 6 });
+    j.append({
+      event: "run.end",
+      data: {
+        outcome: "capped",
+        reason_code: "max_rounds",
+        state: { step: "5", round: 6 },
+      },
+    });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(
+    plan.resumable,
+    true,
+    "a capped run continues the SAME PR from its head round once the cap is raised",
+  );
+  assert.equal(plan.pr, 16571);
+  assert.equal(plan.round, 6);
+});

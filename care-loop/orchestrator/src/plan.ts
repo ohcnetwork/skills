@@ -15,7 +15,14 @@ import { join } from "node:path";
 import { Journal, type JournalEvent } from "./journal.js";
 import { withLock } from "./lock.js";
 import { projectAndWrite, type CareState, type Tier } from "./state.js";
-import type { PlanAnswer, PlanGate, PlanInput, Planner, PlannerPayload, PlanQuestion } from "./ports.js";
+import type {
+  PlanAnswer,
+  PlanGate,
+  PlanInput,
+  Planner,
+  PlannerPayload,
+  PlanQuestion,
+} from "./ports.js";
 
 export interface RunPlanOptions {
   input: PlanInput;
@@ -61,25 +68,59 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           last_reviewed_sha: "",
           updated_at: new Date().toISOString(),
         };
-        j.append({ event: "run.start", step: "1", round: 1, data: { state: seed } });
+        j.append({
+          event: "run.start",
+          step: "1",
+          round: 1,
+          data: { state: seed },
+        });
       }
       j.append({ event: "step.enter", step: "1", round: 1 });
 
       let spawn = 1; // monotonic spawn counter → distinct logging sidecars (interview=1, drafts=2..)
 
       // ── Phase 1+2 — recon + interview ──────────────────────────────────────────────────────────
-      const iv = await o.planner({ task: input.task, ticket: input.ticket, mainRepoPath: input.mainRepoPath, runDir: input.runDir, phase: "interview", round: spawn++ });
+      const iv = await o.planner({
+        task: input.task,
+        ticket: input.ticket,
+        mainRepoPath: input.mainRepoPath,
+        runDir: input.runDir,
+        phase: "interview",
+        round: spawn++,
+        step: "1",
+      });
       const questions: PlanQuestion[] = iv.payload.questions ?? [];
       let answers: PlanAnswer[] = [];
       if (questions.length > 0) {
-        j.append({ event: "gate.asked", step: "1", round: 1, data: { count: questions.length } });
+        j.append({
+          event: "gate.asked",
+          step: "1",
+          round: 1,
+          data: { count: questions.length },
+        });
         answers = await o.gate.interview(questions);
-        j.append({ event: "gate.answered", step: "1", round: 1, data: { count: answers.length } });
+        j.append({
+          event: "gate.answered",
+          step: "1",
+          round: 1,
+          data: { count: answers.length },
+        });
       }
 
       // ── Phase 3+4 — draft, then the consolidated gate; amend re-drafts UNBOUNDED ───────────────
       let amendment: string | undefined;
-      let draft = await o.planner({ task: input.task, ticket: input.ticket, mainRepoPath: input.mainRepoPath, runDir: input.runDir, phase: "plan", questions, answers, amendment, round: spawn++ });
+      let draft = await o.planner({
+        task: input.task,
+        ticket: input.ticket,
+        mainRepoPath: input.mainRepoPath,
+        runDir: input.runDir,
+        phase: "plan",
+        questions,
+        answers,
+        amendment,
+        round: spawn++,
+        step: "1",
+      });
 
       for (;;) {
         // Model-pin enforcement: abort if opencode reports the planner ran on the wrong engine.
@@ -89,33 +130,101 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
         // models (configured in models.json) while still catching a genuine wrong-tier run.
         if (draft.payload.modelPinSatisfied === false) {
           const plannedBy = draft.payload.plannedBy ?? "unknown";
-          j.append({ event: "run.end", step: "1", data: { outcome: "aborted", reason_code: "plan_wrong_tier", planned_by: plannedBy, state: { step: "aborted" } } });
+          j.append({
+            event: "run.end",
+            step: "1",
+            data: {
+              outcome: "aborted",
+              reason_code: "plan_wrong_tier",
+              planned_by: plannedBy,
+              state: { step: "aborted" },
+            },
+          });
           projectAndWrite(input.runDir, j.read().events);
-          return { outcome: "aborted", reasonCode: "plan_wrong_tier", runDir: input.runDir };
+          return {
+            outcome: "aborted",
+            reasonCode: "plan_wrong_tier",
+            runDir: input.runDir,
+          };
         }
 
         writeArtifacts(input, draft.payload, questions, answers);
 
-        const decision = await o.gate.approve(consolidatedAsk(input, draft.payload));
+        const decision = await o.gate.approve(
+          consolidatedAsk(input, draft.payload),
+        );
         if (decision.decision === "approve") break;
         if (decision.decision === "reject") {
-          j.append({ event: "run.end", step: "1", data: { outcome: "aborted", reason_code: "plan_rejected", state: { step: "aborted" } } });
+          j.append({
+            event: "run.end",
+            step: "1",
+            data: {
+              outcome: "aborted",
+              reason_code: "plan_rejected",
+              state: { step: "aborted" },
+            },
+          });
           projectAndWrite(input.runDir, j.read().events);
-          return { outcome: "rejected", reasonCode: "plan_rejected", runDir: input.runDir };
+          return {
+            outcome: "rejected",
+            reasonCode: "plan_rejected",
+            runDir: input.runDir,
+          };
         }
         // amend → fold the free-text into a fresh draft, rewrite the artifacts, ask again
         amendment = decision.amendment;
-        j.append({ event: "decision", step: "1", round: 1, data: { note: "amend" } });
-        draft = await o.planner({ task: input.task, ticket: input.ticket, mainRepoPath: input.mainRepoPath, runDir: input.runDir, phase: "plan", questions, answers, amendment, round: spawn++ });
+        j.append({
+          event: "decision",
+          step: "1",
+          round: 1,
+          data: { note: "amend" },
+        });
+        draft = await o.planner({
+          task: input.task,
+          ticket: input.ticket,
+          mainRepoPath: input.mainRepoPath,
+          runDir: input.runDir,
+          phase: "plan",
+          questions,
+          answers,
+          amendment,
+          round: spawn++,
+          step: "1",
+        });
       }
 
       // ── Approved — record it + authorize push, advance the shared journal to step 2 ────────────
       const tier = (draft.payload.classification ?? "standard") as Tier;
-      j.append({ event: "plan.approved", step: "1", round: 1, data: { planned_by: draft.payload.plannedBy, classification: tier, push_authorized: true, state: { tier } } });
-      j.append({ event: "step.exit", step: "1", round: 1, data: { reason_code: "plan_ready" } });
-      j.append({ event: "decision", step: "1", round: 1, data: { from: "1", to: "2", signal: "advance" } });
+      j.append({
+        event: "plan.approved",
+        step: "1",
+        round: 1,
+        data: {
+          planned_by: draft.payload.plannedBy,
+          classification: tier,
+          push_authorized: true,
+          state: { tier },
+        },
+      });
+      j.append({
+        event: "step.exit",
+        step: "1",
+        round: 1,
+        data: { reason_code: "plan_ready" },
+      });
+      j.append({
+        event: "decision",
+        step: "1",
+        round: 1,
+        data: { from: "1", to: "2", signal: "advance" },
+      });
       projectAndWrite(input.runDir, j.read().events);
-      return { outcome: "approved", reasonCode: "plan_ready", classification: tier, runDir: input.runDir };
+      return {
+        outcome: "approved",
+        reasonCode: "plan_ready",
+        classification: tier,
+        runDir: input.runDir,
+      };
     },
     o.lockOpts,
   );
@@ -128,7 +237,11 @@ function consolidatedAsk(input: PlanInput, p: PlannerPayload) {
     summary: p.scope ?? input.task,
     criteria: p.criteria ?? [],
     classification: p.classification ?? "standard",
-    testPlan: p.testSurface ?? (p.classification === "trivial" ? "skip — trivial change" : "(no test surface stated)"),
+    testPlan:
+      p.testSurface ??
+      (p.classification === "trivial"
+        ? "skip — trivial change"
+        : "(no test surface stated)"),
     pushAuthNote: `Approval authorizes the loop to push commits and open/update a PR on origin (${input.repo}).`,
   };
 }
@@ -136,14 +249,30 @@ function consolidatedAsk(input: PlanInput, p: PlannerPayload) {
 /** Persist the plan artifacts the downstream runners consume (the `care-planner` skill, "Persist to the run
  *  dir"): criteria.md (Step-4b grader + Step-3), baseline.md (Scope Governor + test-surface for the
  *  e2e author), decisions.md (6a triage citation-declines), ui-surfaces.md (Step-4c, only when .tsx). */
-function writeArtifacts(input: PlanInput, p: PlannerPayload, questions: PlanQuestion[], answers: PlanAnswer[]): void {
-  const write = (name: string, body: string) => writeFileSync(join(input.runDir, name), body.endsWith("\n") ? body : body + "\n");
+function writeArtifacts(
+  input: PlanInput,
+  p: PlannerPayload,
+  questions: PlanQuestion[],
+  answers: PlanAnswer[],
+): void {
+  const write = (name: string, body: string) =>
+    writeFileSync(
+      join(input.runDir, name),
+      body.endsWith("\n") ? body : body + "\n",
+    );
 
-  const criteria = (p.criteria ?? []).map((c) => `- ${c}`).join("\n") || "- (none stated)";
-  write("criteria.md", `# Acceptance criteria — ${input.ticket}\n\n${criteria}\n`);
+  const criteria =
+    (p.criteria ?? []).map((c) => `- ${c}`).join("\n") || "- (none stated)";
+  write(
+    "criteria.md",
+    `# Acceptance criteria — ${input.ticket}\n\n${criteria}\n`,
+  );
 
-  const files = (p.files ?? []).map((f) => `- ${f}`).join("\n") || "- (none stated)";
-  const testSurface = p.testSurface ? `\n## Test-surface contract (seams the e2e author needs)\n\n${p.testSurface}\n` : "";
+  const files =
+    (p.files ?? []).map((f) => `- ${f}`).join("\n") || "- (none stated)";
+  const testSurface = p.testSurface
+    ? `\n## Test-surface contract (seams the e2e author needs)\n\n${p.testSurface}\n`
+    : "";
   write(
     "baseline.md",
     `# Scope baseline — ${input.ticket}\n\n` +
@@ -158,10 +287,19 @@ function writeArtifacts(input: PlanInput, p: PlannerPayload, questions: PlanQues
 
   const qa =
     questions.length > 0
-      ? questions.map((q) => `- **${q.prompt}**\n  ${answers.find((a) => a.id === q.id)?.answer ?? "(no answer)"}`).join("\n")
+      ? questions
+          .map(
+            (q) =>
+              `- **${q.prompt}**\n  ${answers.find((a) => a.id === q.id)?.answer ?? "(no answer)"}`,
+          )
+          .join("\n")
       : "- (no interview questions)";
-  const nonGoals = (p.nonGoals ?? []).map((n) => `- ${n}`).join("\n") || "- (none stated)";
-  write("decisions.md", `# Decisions — ${input.ticket}\n\n## Interview\n\n${qa}\n\n## Non-goals\n\n${nonGoals}\n`);
+  const nonGoals =
+    (p.nonGoals ?? []).map((n) => `- ${n}`).join("\n") || "- (none stated)";
+  write(
+    "decisions.md",
+    `# Decisions — ${input.ticket}\n\n## Interview\n\n${qa}\n\n## Non-goals\n\n${nonGoals}\n`,
+  );
 
   if (p.uiSurfaces) write("ui-surfaces.md", p.uiSurfaces);
 }

@@ -96,18 +96,26 @@ function deriveCounts(res: SkillResult): Record<string, number> | undefined {
  * a function of the SAME type, so it's a drop-in in default-wiring. Errors are recorded as a
  * `skill.result{terminal_state:"failed"}` then re-thrown (a crashed skill stays on the record).
  */
-export function withSkillLog<I extends { runDir: string; round: number }, P>(
+export function withSkillLog<
+  I extends { runDir: string; round: number; step?: string },
+  P,
+>(
   name: string,
   fn: (input: I) => Promise<SkillResult<P>>,
   logger: SkillLogger,
 ): (input: I) => Promise<SkillResult<P>> {
   return async (input) => {
     const round = input.round;
+    const step = input.step;
     const inputRef = logger.artifact(
       `${name}-r${round}.input.json`,
       JSON.stringify(input, null, 2),
     );
-    logger.event("skill.invoke", { skill: name, input: inputRef }, { round });
+    logger.event(
+      "skill.invoke",
+      { skill: name, input: inputRef },
+      { step, round },
+    );
 
     const t0 = Date.now();
     try {
@@ -133,7 +141,7 @@ export function withSkillLog<I extends { runDir: string; round: number }, P>(
           counts: deriveCounts(res),
           artifacts,
         },
-        { round, costUsd: res.cost?.usdEst },
+        { step, round, costUsd: res.cost?.usdEst },
       );
       return { ...res, artifacts, durationMs };
     } catch (err) {
@@ -146,7 +154,7 @@ export function withSkillLog<I extends { runDir: string; round: number }, P>(
           error: String((err as Error)?.message ?? err),
           duration_ms: Date.now() - t0,
         },
-        { round },
+        { step, round },
       );
       throw err;
     }

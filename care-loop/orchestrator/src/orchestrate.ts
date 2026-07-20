@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Journal } from "./journal.js";
 import { projectAndWrite, type CareState } from "./state.js";
 import { runHalfPipe, type HelperFn, type SpawnFn } from "./pipeline.js";
+import type { FsmConfig } from "./fsm.js";
 import {
   runCiRounds,
   type ApplyFn,
@@ -28,6 +29,11 @@ import type {
   UxValidator,
   CiFixer,
 } from "./ports.js";
+import type {
+  ReviewPayload,
+  TestGradePayload,
+  UxValidatePayload,
+} from "./skill-result.js";
 
 export interface StartOptions {
   runDir: string;
@@ -59,6 +65,10 @@ export interface StartOptions {
   bots: Bot[];
 
   cfg?: CiRoundsConfig;
+  /** Build-phase FSM config (review steps + retry budgets). Defaults to `["4a","4b"]` — the reviewer
+   *  AND the test-grade gate (BS-2: test-grade blocks on a `Wrong` verdict, HARNESS-COVERAGE.md). Pass
+   *  `["4a"]` for review-only, or add `"4c"` for the full pipe (reviewer + test-grade + ux). */
+  buildCfg?: FsmConfig;
   pollDeps?: { now?: () => number; sleep?: (ms: number) => Promise<void> };
   lockOpts?: { pid?: number; isAlive?: (pid: number) => boolean };
 }
@@ -87,6 +97,10 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
         spawn: o.spawn,
         helper: o.helper,
         finalize: false,
+        cfg: o.buildCfg ?? {
+          reviewSteps: ["4a", "4b"],
+          maxImplementRetries: 2,
+        },
       });
       if (build.outcome !== "complete") {
         return { phase: "build", outcome: build.outcome, state: build.state };
@@ -178,6 +192,35 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
  * This is where "swap a reviewer" takes effect — pass a different Reviewer here. The reviewer needs
  * the diff, computed from the worktree by `diffOf` (default: staged git diff).
  */
+/** Compact, maker-readable digests of a judge's findings — fed back as re-implement context on a
+ *  loopback (see pipeline.ts). Kept terse: the maker needs what to fix + where, not the full envelope. */
+function renderReviewFindings(f: ReviewPayload["findings"]): string {
+  return f
+    .map(
+      (x) =>
+        `- [${x.class}] ${x.file}${x.lineHint ? `:${x.lineHint}` : ""} — ${x.note}`,
+    )
+    .join("\n");
+}
+function renderGradeFindings(g: TestGradePayload["criteriaGrades"]): string {
+  // Only the non-Covered criteria matter to the maker; a Wrong is what blocked (LOOPBACK_VERDICTS).
+  return g
+    .filter((x) => x.verdict !== "Covered")
+    .map(
+      (x) =>
+        `- [${x.verdict}/${x.criticality}] ${x.criterion}${x.finding ? ` — ${x.finding}` : ""}${x.fix ? ` (fix: ${x.fix})` : ""}`,
+    )
+    .join("\n");
+}
+function renderUxFindings(f: UxValidatePayload["findings"]): string {
+  return f
+    .map(
+      (x) =>
+        `- [${x.severity}] ${x.file}${x.lineHint ? `:${x.lineHint}` : ""} — ${x.note}`,
+    )
+    .join("\n");
+}
+
 export function roleSpawn(opts: {
   reviewer: Reviewer;
   implementer: Implementer;
@@ -190,7 +233,7 @@ export function roleSpawn(opts: {
 }): SpawnFn {
   const base = opts.base ?? "develop";
   const diffOf = opts.diffOf ?? defaultDiffOf;
-  return async ({ role, round, runDir, context }) => {
+  return async ({ role, step, round, runDir, context }) => {
     if (role === "implementer") {
       const r = await opts.implementer({
         task: opts.task,
@@ -198,6 +241,7 @@ export function roleSpawn(opts: {
         runDir,
         round,
         findings: context,
+        step,
       });
       return {
         terminal_state: r.terminalState,
@@ -212,12 +256,14 @@ export function roleSpawn(opts: {
         diff: diffOf(opts.worktree, base),
         runDir,
         round,
+        step,
       });
       return {
         terminal_state: r.terminalState,
         verdict: r.verdict,
         reason_code: r.reasonCode,
         model_used: r.modelUsed,
+        findingsDigest: renderReviewFindings(r.payload.findings),
       };
     }
     if (role === "care-test-grader" && opts.testGrader) {
@@ -225,12 +271,14 @@ export function roleSpawn(opts: {
         diff: diffOf(opts.worktree, base),
         runDir,
         round,
+        step,
       });
       return {
         terminal_state: r.terminalState,
         verdict: r.verdict,
         reason_code: r.reasonCode,
         model_used: r.modelUsed,
+        findingsDigest: renderGradeFindings(r.payload.criteriaGrades),
       };
     }
     if (role === "care-ux-validator" && opts.uxValidator) {
@@ -238,12 +286,14 @@ export function roleSpawn(opts: {
         diff: diffOf(opts.worktree, base),
         runDir,
         round,
+        step,
       });
       return {
         terminal_state: r.terminalState,
         verdict: r.verdict,
         reason_code: r.reasonCode,
         model_used: r.modelUsed,
+        findingsDigest: renderUxFindings(r.payload.findings),
       };
     }
     return {
@@ -297,9 +347,7 @@ export function reduceTestGrade(
     );
     const summary = wrongs.length
       ? "Test-grader flagged: " +
-        wrongs
-          .map((c) => `${c.criterion} — ${c.finding ?? "wrong"}`)
-          .join("; ")
+        wrongs.map((c) => `${c.criterion} — ${c.finding ?? "wrong"}`).join("; ")
       : undefined;
     return { blocking: r.verdict === "wrong", summary };
   };

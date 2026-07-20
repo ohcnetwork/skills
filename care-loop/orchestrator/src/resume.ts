@@ -53,16 +53,19 @@ export interface ResumePlan {
  */
 export function planResume(events: JournalEvent[]): ResumePlan {
   const state = projectState(events);
-  // A `run.end` normally means terminal — EXCEPT `deferred`, which is a CHECKPOINT (an external-stuck
-  // state: CI red with no more auto-fixes, or a poll timeout). `deferred` is exactly what resume is
-  // meant to pick up: re-enter the CI stage, re-poll, re-triage, and (with 6c wired) run the ci-fix
-  // track. Every other outcome — converged | capped | gate-blocked | aborted | push-failed — is
-  // genuinely terminal and stays refused. We read the LAST run.end so a resumed-then-re-deferred run
-  // can be resumed again.
+  // A `run.end` normally means terminal — EXCEPT the CHECKPOINT outcomes, which are budget/external-stuck
+  // states with an open PR that resume is meant to pick up by re-entering the CI stage:
+  //   • `deferred` — external-stuck: CI red with no more auto-fixes, or a poll timeout. Resume re-polls,
+  //     re-triages, and (with 6c wired) runs the ci-fix track.
+  //   • `capped`   — the round/implement budget ran out; nothing was actually resolved. Raising
+  //     `--max-rounds` and resuming continues the SAME PR from its head round (the counter carries over).
+  // Every other outcome — converged | gate-blocked | aborted | push-failed — is genuinely terminal and
+  // stays refused. We read the LAST run.end so a resumed-then-re-checkpointed run can be resumed again.
+  const RESUMABLE_OUTCOMES = new Set(["deferred", "capped"]);
   const lastEnd = [...events].reverse().find((e) => e.event === "run.end");
   if (lastEnd) {
     const outcome = (lastEnd.data as { outcome?: string } | undefined)?.outcome;
-    if (outcome !== "deferred") {
+    if (!RESUMABLE_OUTCOMES.has(outcome ?? "")) {
       return {
         resumable: false,
         reason: `run already ended (outcome=${outcome ?? "unknown"}, step=${state.step})`,

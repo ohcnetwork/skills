@@ -301,6 +301,44 @@ export function defaultSeams(cfg: WiringConfig): Seams {
       args: ["-C", cfg.worktree, "push"],
       logPath: log,
     });
+    // A non-fast-forward rejection means the remote advanced since our last push — someone else
+    // pushed (a bot suggestion commit, a human edit, or GitHub's "Update branch" merge). Rebase our
+    // round commit on top of the new remote and retry ONCE. A clean fast-forward case rebases to a
+    // no-op; a genuine content conflict fails the rebase (git aborts) and we surface the push error
+    // for a human — we never force-push over someone else's work.
+    if (
+      r.exit !== 0 &&
+      /non-fast-forward|fetch first|rejected|behind/i.test(r.summary)
+    ) {
+      const rebase = runHelper({
+        cmd: "git",
+        args: ["-C", cfg.worktree, "pull", "--rebase", "origin", cfg.branch],
+        logPath: log,
+      });
+      if (rebase.exit !== 0) {
+        // Rebase hit a conflict — leave the worktree clean for a human (don't ship a half-rebase).
+        runHelper({
+          cmd: "git",
+          args: ["-C", cfg.worktree, "rebase", "--abort"],
+          logPath: log,
+        });
+        return {
+          exit: rebase.exit,
+          summary: `push rejected (remote advanced) and rebase failed — ${rebase.summary}`,
+          headSha: headSha(cfg.worktree),
+        };
+      }
+      const retry = runHelper({
+        cmd: "git",
+        args: ["-C", cfg.worktree, "push"],
+        logPath: log,
+      });
+      return {
+        exit: retry.exit,
+        summary: `${retry.summary} · rebased onto advanced remote before push`,
+        headSha: headSha(cfg.worktree),
+      };
+    }
     return { exit: r.exit, summary: r.summary, headSha: headSha(cfg.worktree) };
   };
   const apply: ApplyFn = async ({

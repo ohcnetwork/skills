@@ -574,33 +574,56 @@
         return hr + "h" + (remMin ? " " + remMin + "m" : "");
       }
 
+      // A step (e.g. "6a") can run in more than one round, so stats are keyed by step+round —
+      // otherwise every round's divider would show the merged total for that step.
+      function stepStatsKey(step, round) {
+        return `${step}#${round ?? ""}`;
+      }
+
+      // Wall-clock time is misleading: a run can sit idle for days between a run.end/suspend and a
+      // run.resume (the process isn't running). We measure ACTIVE time only — the sum of gaps
+      // between consecutive events — and drop the gap that lands ON a run.resume, since that gap is
+      // the idle stretch while the loop was stopped.
+      function totalActiveMs(events) {
+        let ms = 0;
+        for (let i = 1; i < events.length; i++) {
+          if (events[i].event === "run.resume") continue;
+          ms += new Date(events[i].ts).getTime() - new Date(events[i - 1].ts).getTime();
+        }
+        return ms;
+      }
+
       function computeStepStats(events) {
         const stats = {};
         let currentStep = null;
-        let stepEnterTs = null;
+        let currentRound = null;
+        let currentKey = null;
 
         for (let i = 0; i < events.length; i++) {
           const ev = events[i];
+          // Attribute the gap prev→ev to the step active during it (the one entered before ev),
+          // unless it's the idle stretch preceding a run.resume.
+          if (i > 0 && currentKey && ev.event !== "run.resume") {
+            const delta = new Date(ev.ts).getTime() - new Date(events[i - 1].ts).getTime();
+            (stats[currentKey] ??= { durationMs: 0, costUsd: 0 }).durationMs += delta;
+          }
           if (ev.event === "step.enter") {
-            // Close out the previous step's duration when we move on.
-            if (currentStep && stepEnterTs) {
-              const dur = new Date(ev.ts).getTime() - new Date(stepEnterTs).getTime();
-              (stats[currentStep] ??= { durationMs: 0, costUsd: 0 }).durationMs += dur;
-            }
             currentStep = ev.step;
-            stepEnterTs = ev.ts;
-            stats[currentStep] ??= { durationMs: 0, costUsd: 0 };
+            currentRound = ev.round;
+            currentKey = stepStatsKey(currentStep, currentRound);
+            stats[currentKey] ??= { durationMs: 0, costUsd: 0 };
           }
-          // Attribute each skill's spend to the enclosing step. skill.result carries no `step`
-          // field, so we bucket it under the step we most recently entered.
-          if (currentStep && typeof ev.data?.cost_usd === "number") {
-            (stats[currentStep] ??= { durationMs: 0, costUsd: 0 }).costUsd += ev.data.cost_usd;
+          // Attribute each skill's spend to its step. New logs tag the skill event with its own
+          // `step`; older logs don't, so fall back to the step we're currently inside. Either way
+          // we use the loop round from step.enter — a skill event's own `round` is a spawn counter,
+          // not the loop round.
+          if (typeof ev.data?.cost_usd === "number") {
+            const costStep = ev.step ?? currentStep;
+            if (costStep != null) {
+              const key = stepStatsKey(costStep, currentRound);
+              (stats[key] ??= { durationMs: 0, costUsd: 0 }).costUsd += ev.data.cost_usd;
+            }
           }
-        }
-        if (currentStep && stepEnterTs && events.length > 0) {
-          const lastEv = events[events.length - 1];
-          const dur = new Date(lastEv.ts).getTime() - new Date(stepEnterTs).getTime();
-          (stats[currentStep] ??= { durationMs: 0, costUsd: 0 }).durationMs += dur;
         }
         return stats;
       }
@@ -735,7 +758,7 @@
         ${s?.tier ? `<span class="tier-badge">${s.tier}</span>` : ""}
         ${s?.branch ? `<span>branch: ${s.branch}</span>` : ""}
         <span>${detail.events.length} events</span>
-        ${detail.events.length >= 2 ? `<span>${fmtDuration(new Date(detail.events[detail.events.length - 1].ts).getTime() - new Date(detail.events[0].ts).getTime())}</span>` : ""}
+        ${detail.events.length >= 2 ? `<span>${fmtDuration(totalActiveMs(detail.events))}</span>` : ""}
       </div>
       <div class="run-meta" style="margin-top:0.5rem">
         <div class="pipeline" style="gap:3px">${renderPipeline(step)}</div>
@@ -745,19 +768,20 @@
         const stepStats = computeStepStats(detail.events);
 
         let timeline = '<div class="timeline">';
-        let lastStep = null;
+        let lastKey = null;
 
         const HIDE = new Set(["step.enter", "step.exit", "decision"]);
 
         for (const ev of detail.events) {
-          if (ev.event === "step.enter" && ev.step !== lastStep) {
-            const ss = stepStats[ev.step];
+          const evKey = ev.event === "step.enter" ? stepStatsKey(ev.step, ev.round) : null;
+          if (evKey && evKey !== lastKey) {
+            const ss = stepStats[evKey];
             const statParts = [];
             if (ss?.durationMs > 0) statParts.push(fmtDuration(ss.durationMs));
             if (ss?.costUsd != null && ss.costUsd > 0) statParts.push(fmtCost(ss.costUsd));
             const statsHtml = statParts.length ? `<span class="step-stats">${statParts.join(" · ")}</span>` : "";
             timeline += `<div class="step-divider"><span>Step ${ev.step} ${ev.round ? `· Round ${ev.round}` : ""}</span>${statsHtml}</div>`;
-            lastStep = ev.step;
+            lastKey = evKey;
           }
 
           if (HIDE.has(ev.event)) continue;

@@ -93,6 +93,7 @@ export interface ReviewInput {
   diff: string; // the change under review
   runDir: string;
   round: number;
+  step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type Reviewer = (
   input: ReviewInput,
@@ -104,6 +105,7 @@ export interface ImplementInput {
   runDir: string;
   round: number;
   findings?: string; // review/triage findings to address on a re-round
+  step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type Implementer = (
   input: ImplementInput,
@@ -124,6 +126,7 @@ export interface TestGradeInput {
   diff: string; // the change under review (spec paths extracted from this)
   runDir: string;
   round: number;
+  step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type TestGrader = (
   input: TestGradeInput,
@@ -134,6 +137,7 @@ export interface UxValidateInput {
   diff: string;
   runDir: string;
   round: number;
+  step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type UxValidator = (
   input: UxValidateInput,
@@ -165,6 +169,7 @@ export interface PlannerInput {
   questions?: PlanQuestion[]; // plan phase: the interview questions (carry recon context) to reuse
   answers?: PlanAnswer[]; // plan phase: the interview answers to fold in
   amendment?: string; // plan phase: free-text amendment from a gate re-draft
+  step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type Planner = (
   input: PlannerInput,

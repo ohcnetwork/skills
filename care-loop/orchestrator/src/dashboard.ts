@@ -84,11 +84,19 @@ function summarizeRun(runsDir: string, name: string): RunSummary {
       return sum + (typeof c === "number" ? c : 0);
     }, 0);
     const startedAt = events.length > 0 ? events[0].ts : null;
-    const lastTs = events.length > 0 ? events[events.length - 1].ts : null;
-    const durationMs =
-      startedAt && lastTs
-        ? new Date(lastTs).getTime() - new Date(startedAt).getTime()
-        : null;
+    // Active duration only: sum the gaps between consecutive events, dropping the gap that lands on
+    // a run.resume (the idle stretch while the loop was stopped — e.g. resumed a day later).
+    let durationMs: number | null = null;
+    if (events.length >= 2) {
+      let ms = 0;
+      for (let i = 1; i < events.length; i++) {
+        if (events[i].event === "run.resume") continue;
+        ms +=
+          new Date(events[i].ts).getTime() -
+          new Date(events[i - 1].ts).getTime();
+      }
+      durationMs = ms;
+    }
     return {
       name,
       state,

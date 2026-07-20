@@ -86,19 +86,34 @@ function git(dir: string, ...args: string[]): { code: number; out: string } {
   return { code: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
-/** Loud breadcrumb when opencode reports a judgment spawn did NOT run on the pinned engine. The
- *  planner has a hard gate (plan.ts); reviewer/triager run headless with no human gate, so at minimum
- *  surface the tier miss (the ENG-559 silent-downgrade class) rather than trusting a downgraded judge. */
-function warnIfWrongTier(
+/** Error thrown when a judgment spawn ran on the wrong engine. Halts the run loudly rather than
+ *  letting it proceed on an un-pinned tier — the reviewer/triager/test-grader/ux-validator
+ *  counterpart to the planner's `plan_wrong_tier` gate ([plan.ts:90]). BS-1 in HARNESS-COVERAGE.md. */
+export class WrongTierError extends Error {
+  constructor(
+    readonly role: string,
+    readonly pinned: string,
+    readonly reported: string | undefined,
+  ) {
+    super(
+      `[care-loop] ${role} ran on '${reported ?? "unknown"}' but was pinned to '${pinned}' — model tier not satisfied.`,
+    );
+    this.name = "WrongTierError";
+  }
+}
+
+/** Enforce the judgment model pin. `satisfied === false` is intentional (mirrors the planner gate):
+ *  `undefined` means opencode couldn't verify the engine (a local model, or a test fake) — not a
+ *  failure, so the pin only fires on an explicit mismatch. Throws to stop the run; the journal's
+ *  `spawn.result.model` already records which engine actually ran, so the doctor sees the tier. */
+export function assertRightTier(
   role: string,
   pinned: string,
   reported: string | undefined,
   satisfied: boolean | undefined,
 ): void {
   if (satisfied === false) {
-    console.warn(
-      `[care-loop] WARNING: ${role} ran on '${reported ?? "unknown"}' but was pinned to '${pinned}' — model tier not satisfied.`,
-    );
+    throw new WrongTierError(role, pinned, reported);
   }
 }
 
@@ -149,7 +164,7 @@ export function opencodeReviewer(models: SkillModels = {}): Reviewer {
         round,
         timeoutMs,
       });
-    warnIfWrongTier("care-reviewer", model, modelReported, modelPinSatisfied);
+    assertRightTier("care-reviewer", model, modelReported, modelPinSatisfied);
     return {
       schema: "care-loop/skill-result@1",
       skill: "care-reviewer",
@@ -641,7 +656,7 @@ export function opencodeTriager(
       await runSingleSpawn();
     }
 
-    warnIfWrongTier("care-triager", model, modelReported, modelPinSatisfied);
+    assertRightTier("care-triager", model, modelReported, modelPinSatisfied);
     // Tallies are DERIVED from the per-item verdicts (the FSM branches on these counts, ci-round.ts);
     // the items themselves are the dim-8 escape-attribution record persisted to verdicts.md.
     const items = rawItems.map((it: any) => ({
@@ -815,7 +830,7 @@ export function opencodeTestGrader(
     const grades: any[] = Array.isArray(out.data?.criteria_grades)
       ? out.data.criteria_grades
       : [];
-    warnIfWrongTier(
+    assertRightTier(
       "care-test-grader",
       model,
       out.modelReported,
@@ -918,7 +933,7 @@ export function opencodeUxValidator(models: SkillModels = {}): UxValidator {
     const findings: any[] = Array.isArray(out.data?.findings)
       ? out.data.findings
       : [];
-    warnIfWrongTier(
+    assertRightTier(
       "care-ux-validator",
       model,
       out.modelReported,

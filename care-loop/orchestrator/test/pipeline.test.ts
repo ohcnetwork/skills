@@ -91,6 +91,46 @@ test("reviewer loopback re-enters implement: 2→3→4a→3→4a→5", async () 
   assert.equal(res.outcome, "complete");
 });
 
+test("test-grade gate (4b) loops back on 'wrong' and feeds findings to the re-implement", async () => {
+  // BS-2 (HARNESS-COVERAGE.md): with 4b enabled, a `wrong` verdict must (a) loop back to implement
+  // and (b) carry the grader's findings as re-implement context — else the maker re-implements blind.
+  const dir = runDir();
+  let gradeCalls = 0;
+  const implContexts: (string | undefined)[] = [];
+  const spawn: SpawnFn = async ({ role, context }) => {
+    if (role === "implementer") {
+      implContexts.push(context);
+      return { terminal_state: "done", verdict: "implemented", reason_code: "ok" };
+    }
+    if (role === "care-test-grader") {
+      gradeCalls++;
+      return gradeCalls === 1
+        ? {
+            terminal_state: "done",
+            verdict: "wrong",
+            reason_code: "graded",
+            findingsDigest: "- [Wrong/Critical] AC3: spec asserts the wrong total (fix: assert net-of-discount)",
+          }
+        : { terminal_state: "done", verdict: "pass", reason_code: "graded" };
+    }
+    return { terminal_state: "done", verdict: "pass", reason_code: "ok" };
+  };
+
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn,
+    helper: okHelper(),
+    cfg: { reviewSteps: ["4a", "4b"], maxImplementRetries: 2 },
+  });
+
+  assert.deepEqual(res.visited, ["2", "3", "4a", "4b", "3", "4a", "4b", "5"]);
+  assert.equal(res.outcome, "complete");
+  // first implement had no findings; the loopback re-implement received the grader's digest
+  assert.equal(implContexts[0], undefined);
+  assert.match(implContexts[1] ?? "", /care-test-grader/);
+  assert.match(implContexts[1] ?? "", /assert net-of-discount/);
+});
+
 test("inner-gate failure retries implement: 2→3→3→4a→5", async () => {
   const dir = runDir();
   let innerGate = 0;

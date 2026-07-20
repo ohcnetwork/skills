@@ -63,7 +63,14 @@ Produce:
 
 - **Scope, files, approach** — what changes and where (cite real paths from recon).
 - **Acceptance criteria in testable terms** — what the user can _do/see_, stated so a spec can
-  assert it. Make each criterion concrete and self-contained.
+  assert it. Make each criterion concrete and self-contained. **Gradeable against the local
+  fixture:** each criterion must be assertable against the local Playwright DB, so never require
+  asserting a **server-assigned value the local backend doesn't produce** — an invoice/order
+  _number_, a DB-assigned id, a server timestamp. Assert what the fixture _can_ render instead: the
+  value the user entered, a computed/displayed field, a label's presence, a state change. (IMP-10:
+  an "assert the invoice number" criterion had no fixture-produced number, so the e2e author burned
+  several red spec runs before landing a number-independent green that no longer met the criterion
+  as written.)
 - **Non-goals** — from the interview; included in the plan so reviewers and later steps know the
   boundary.
 - **Test-surface contract** — routes, `data-testid`s, key ARIA labels the e2e author needs. Settled

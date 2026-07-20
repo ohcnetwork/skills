@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 import { Journal } from "./journal.js";
@@ -153,6 +154,50 @@ async function cmdResume(
     process.exit(2);
   }
 
+  // Reconcile the worktree with the live remote BEFORE re-entering the loop. While the run sat
+  // capped/deferred (or even mid-run), someone else can advance the PR branch — a bot suggestion
+  // commit, a human edit, or GitHub's "Update branch" merge. `probe.prHead` (from the Octokit SDK,
+  // getPr) is the remote ground truth; the worktree HEAD is local git. If they diverge, our next
+  // plain push is rejected non-fast-forward. Bring the checkout up to the remote (fetch + rebase our
+  // local work, if any, on top) so the loop pushes cleanly. A rebase CONFLICT is a genuine
+  // human-resolve state — abort and refuse rather than clobber or ship a half-rebase.
+  let resumeHead = plan.headSha!;
+  const localHead =
+    spawnSync("git", ["-C", s.worktree, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).stdout?.trim() ?? "";
+  if (probe.prHead && probe.prHead !== localHead) {
+    console.log(
+      `  reconcile: remote advanced (pr-head ${probe.prHead.slice(0, 9)} ≠ local ${localHead.slice(0, 9)}) — syncing worktree`,
+    );
+    const fetch = spawnSync(
+      "git",
+      ["-C", s.worktree, "fetch", "origin", s.branch],
+      { encoding: "utf8" },
+    );
+    const rebase = spawnSync(
+      "git",
+      ["-C", s.worktree, "pull", "--rebase", "origin", s.branch],
+      { encoding: "utf8" },
+    );
+    if (fetch.status !== 0 || rebase.status !== 0) {
+      spawnSync("git", ["-C", s.worktree, "rebase", "--abort"], {
+        encoding: "utf8",
+      });
+      console.error(
+        `  cannot resume: worktree diverged from the remote and could not rebase cleanly ` +
+          `(${(rebase.stderr || fetch.stderr || "").trim().split("\n").pop()}). ` +
+          `Resolve the conflict in ${s.worktree} (git pull --rebase origin ${s.branch}), then resume again.`,
+      );
+      process.exit(2);
+    }
+    resumeHead =
+      spawnSync("git", ["-C", s.worktree, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).stdout?.trim() || probe.prHead;
+    console.log(`  reconcile: worktree now at ${resumeHead.slice(0, 9)}`);
+  }
+
   const cfg: CiRoundsConfig = {};
   if (typeof flags["max-rounds"] === "string")
     cfg.maxRounds = Number(flags["max-rounds"]);
@@ -171,7 +216,7 @@ async function cmdResume(
       event: "run.resume",
       step: s.step,
       round: s.round,
-      data: { pr: plan.pr, head_sha: plan.headSha },
+      data: { pr: plan.pr, head_sha: resumeHead },
     });
     projectAndWrite(runDir, j.read().events);
     return runCiRounds({
@@ -180,7 +225,7 @@ async function cmdResume(
       repo: s.repo,
       branch: s.branch,
       pr: plan.pr!,
-      headSha: plan.headSha!,
+      headSha: resumeHead,
       sinceIso: plan.sinceIso!,
       bots: seams.bots,
       triage: reduceTriage(seams.triage),

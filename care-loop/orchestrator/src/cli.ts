@@ -5,7 +5,7 @@
 // PR → CI rounds) via the default opencode/shell/octokit seams (default-wiring.ts).
 
 import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -26,6 +26,7 @@ import { terminalFront, derivePaths } from "./front-terminal.js";
 import { probePr, planResume } from "./resume.js";
 import type { PlanInput } from "./plan-front.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
+import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
 import { startDashboard } from "./dashboard.js";
 
 function usage(): never {
@@ -39,7 +40,8 @@ Usage:
        for a non-interactive (CI/bot) run. Bare \`care-loopd\` starts the questionnaire.
        flags: --repo owner/name (ohcnetwork/care_fe) · --main <care_fe path> · --worktree <path>
               --run-dir <path> · --base <develop> · --body <pr body> · --models <file>
-              --build-less · --max-rounds <n> · --poll-timeout-ms <ms>
+              --build-less · --max-rounds <n> · --poll-timeout-ms <ms> · --no-doctor
+       (end-of-run self-improvement runs by default; --no-doctor or CARE_DOCTOR=0 to skip)
 
   care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
        flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
@@ -386,6 +388,26 @@ async function startFromInput(
   console.log(
     `\ndone: phase=${res.phase}  outcome=${res.outcome}${res.pr ? `  pr=#${res.pr}` : ""}`,
   );
+
+  // End-of-run self-improvement (default-on; --no-doctor / CARE_DOCTOR=0 to skip). Best-effort — the
+  // doctor swallows its own errors, and a failed loop is exactly when there's most to learn, so this
+  // runs BEFORE the non-converged exit below.
+  const doctorEnabled =
+    flags["no-doctor"] !== true && process.env.CARE_DOCTOR !== "0";
+  if (doctorEnabled) {
+    const r = await runEndOfRunDoctor({
+      runDir,
+      runSlug: `${repo.replace("/", "-")}-${branch}`,
+      modelsFile,
+      enabled: true,
+    });
+    if (r.ran)
+      console.log(
+        `auto-doctor: ${r.pr ? `${r.draft ? "draft " : ""}PR #${r.pr}` : "report-only"}  applied=[${r.applied.join(",")}]  propose-only=${r.proposeOnly}`,
+      );
+    else console.log(`auto-doctor: skipped (${r.skipped})`);
+  }
+
   if (res.phase === "ci" && res.outcome !== "converged") process.exit(1);
 }
 
@@ -418,6 +440,46 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
     `\n── plan approved — starting the autonomous loop ${"─".repeat(28)}\n`,
   );
   await startFromInput(input, flags);
+}
+
+/** `care-loopd doctor <run-dir> [--dry] [--models <file>]` — run the end-of-run doctor against an
+ *  existing completed run, standalone from the loop. `--dry` = diagnose + apply + verify but NO
+ *  branch/commit/PR (the working-tree edits stand for inspection); the Phase-3 smoke path. */
+async function cmdDoctor(
+  runDir: string,
+  flags: Record<string, string | true>,
+): Promise<void> {
+  if (!existsSync(join(runDir, "journal.jsonl"))) {
+    console.error(`no journal at ${runDir} — nothing to diagnose`);
+    process.exit(2);
+  }
+  const dry = flags.dry === true;
+  const modelsFile = typeof flags.models === "string" ? flags.models : undefined;
+  console.log(`care-loopd doctor${dry ? " (dry)" : ""}: ${runDir}\n`);
+  const r = await runEndOfRunDoctor({
+    runDir,
+    runSlug: basename(runDir),
+    modelsFile,
+    enabled: true,
+    dry,
+  });
+  if (!r.ran) {
+    console.log(`\ndoctor: skipped (${r.skipped})`);
+    return;
+  }
+  console.log(
+    `\ndoctor${r.dry ? " (dry)" : ""}: ${r.pr ? `${r.draft ? "draft " : ""}PR #${r.pr}` : r.dry ? `would-be ${r.draft === undefined ? "no-op" : r.draft ? "draft" : "ready"}` : "report-only"}`,
+  );
+  console.log(
+    `  applied=[${r.applied.join(",")}]  demoted=[${r.demoted.join(",")}]  propose-only=${r.proposeOnly}`,
+  );
+  console.log(
+    `  fixtures: committed=[${r.fixtures.committed.join(",")}] proposed=[${r.fixtures.proposed.join(",")}]`,
+  );
+  if (r.verify)
+    console.log(`  verify: tests=${r.verify.tests} evals=${r.verify.evals}  coherence=${r.coherenceOk}`);
+  if (r.dry)
+    console.log(`\n  (dry run — inspect the working-tree edits with \`git status\` / \`git diff\`)`);
 }
 
 async function main(): Promise<void> {
@@ -453,6 +515,10 @@ async function main(): Promise<void> {
       break;
     case "start":
       await cmdStart(parseFlags(rest));
+      break;
+    case "doctor":
+      if (!rest[0]) usage();
+      await cmdDoctor(resolve(rest[0]), parseFlags(rest.slice(1)));
       break;
     default:
       usage();

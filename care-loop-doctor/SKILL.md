@@ -89,6 +89,43 @@ diagnosed).
 (<reason>)`. **No approval → the report + backlog stand; nothing else is touched.** Never edit
    `care_fe` code or `runs/` artifacts.
 
+## Autonomous end-of-run mode (loopd-invoked)
+
+When the orchestrator invokes this skill at the end of a run (`auto-doctor.ts`, PLAN-auto-doctor.md),
+there is **no human at the gate** — the gate is replaced by a **verify-then-PR** flow the orchestrator
+drives. Your job narrows to the **judgment core**; the orchestrator owns every side effect. Contract:
+
+- **You do NOT run git / gh / `npm test` / evals.** You read the run dir and **edit files + write the
+  manifest**; the orchestrator branches, runs the affected evals + `npm test`, opens the PR, and
+  journals. Emitting a shell command for those is a contract violation.
+- **Apply-authority is tiered by EVAL COVERAGE** (the license to auto-apply — a control we can't
+  measure is advisory only):
+  - **Auto-apply** (edit in place): skills with a care-evals task set — `care-review` /
+    `care-diff-review` / `care-technical-review` (cr-\*), `care-test-grade` (tg-\*), `care-ux-review`
+    (ux-\*), `care-triager` (tr-\*), `care-ci-fix` (cf-\*), and `care-loop/models.json`.
+  - **Propose-only** (write the patch as text, do NOT edit): `care-planner` (**not diff-graded** —
+    nothing verifies it offline, BS-3) and anything under `care-loop/orchestrator/src/*.ts` (tested
+    code). The orchestrator will demote-and-revert any in-place edit to a no-coverage skill anyway;
+    don't make it.
+- **Classify every finding** by rubric dimension **+ sensor type** (computational / inferential /
+  none) **+ the IMP / BS row it maps to** — this drives the `HARNESS-COVERAGE.md` update.
+- **Maintain three artifacts, not two:** the diagnosis report, `IMPROVEMENTS.md` (dim-7 memory), **and
+  `care-loop/HARNESS-COVERAGE.md`** (a new row or a status flip 🔴→🟡 / 🟡→🟢, tagged with the sensor
+  type + control added). Report the net coverage delta in the manifest — it becomes the PR scoreboard.
+- **Fixtures — recurrence gate:** a **verbatim MRE** of a real escape (from the run's
+  `skills/care-reviewer-r<N>.input.json` sidecar) is always a trusted, committed guard. A synthesized
+  **class-sibling** (same class, different shape, sourced from `verdicts.md` class×missed_by) is a
+  **hypothesis** — mark it so; the orchestrator only trusts it once the class has **recurred**
+  (`seen: > 1`), else it becomes a proposed (human-review) fixture. Never invent speculative fixtures
+  for a first-time, single escape (bias-toward-shipping).
+- **History carries into the PR:** because dim-7 is read first, the manifest must flag which findings
+  are **new vs. re-observed** (with `seen:`), any **regression** (an `applied` entry that recurred),
+  and the `declined`-and-skipped set — the orchestrator renders these into the PR body.
+
+The manifest you return (`DoctorOutput` in `auto-doctor.ts`): `findings[]`, `skillEdits[]` (per
+covered skill), `proposeOnly[]`, `fixtures[]` (verbatim | class-sibling, `recurred`), `coverageDelta`,
+`reportBody`. Interactive (human-invoked) runs are unchanged — the one-gate flow in step 5 still applies.
+
 ## Escape → care-evals fixture (closed-loop improvement)
 
 When your diagnosis surfaces an escape (bot caught what your reviewer's findings missed), convert it to a **care-evals fixture** so the regression is caught offline forever.
@@ -119,8 +156,8 @@ When your diagnosis surfaces an escape (bot caught what your reviewer's findings
 3. **Run the eval to baseline the current model:**
 
    ```bash
-   cd care-evals
-   npm run eval -- --fixture reviewer-escaped-null-deref-2026-07-15 --model claude-opus-4.8
+   cd care-evals/runner
+   python3 run_eval.py reviewer-escaped-null-deref-2026-07-15 --adapter opencode --model github-copilot/claude-opus-4.8
    ```
 
    Output shows: did the reviewer catch it? What verdict/class did it return?
@@ -138,10 +175,12 @@ When your diagnosis surfaces an escape (bot caught what your reviewer's findings
 
 5. **Fix the skill (if needed) and verify the eval delta:**
 
-   Once you've edited the reviewer's methodology, re-run the eval with the updated skill. The fixture now guards the fix — if the skill regresses, the eval fails.
+   Once you've edited the reviewer's methodology, re-run the eval with the updated skill (the runner
+   inlines the REPO copy of `SKILL.md` — `run_eval.py` reads `SKILLS_ROOT/<skill>/SKILL.md` — so your
+   edit is what's measured). The fixture now guards the fix — if the skill regresses, the eval fails.
 
    ```bash
-   npm run eval -- --fixture reviewer-escaped-null-deref-2026-07-15 --model claude-opus-4.8 --before-after
+   python3 run_eval.py reviewer-escaped-null-deref-2026-07-15 --adapter opencode --model github-copilot/claude-opus-4.8
    ```
 
 ### Why fixtures matter

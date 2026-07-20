@@ -47,7 +47,7 @@ write-state.sh: `pr` as a URL + ad-hoc `pr_number` + placeholder `updated_at:"�
 `head_sha`, and left NO run-dir logs (see IMP-9). **ROUTER-CONDITIONAL, not host-conditional**
 (first-pass "non-VS-Code host" was a gather error — see IMP-11): both runs were in VS Code, concurrent.
 Under the _same_ mid-run crash the divergence tracked the router tier — Opus router (ENG-729):
-write-state ×97, run_gate ×238, compliant state + full trail; Sonnet router (ENG-559): write-state
+write-state ×97, run*gate ×238, compliant state + full trail; Sonnet router (ENG-559): write-state
 ×3, run_gate ×2, hand-managed `pr_number` ×8 → drifted + un-instrumented. The cheap router drops the
 mechanical contract (see reopened IMP-7). Fix HOLDS where the contract is followed (Opus).
 root: two levers — (a) 05-gate-push.md's "open the PR" block ends at `gh pr create` and never routes
@@ -59,7 +59,7 @@ REGRESSION #2 (2026-07-13-eng648-729.md): ENG-648 (Sonnet router) drifted state 
 Step-5 transition the pending edit targets — `repo:"care_fe"` (not owner/name), `pr` a **URL** +
 ad-hoc `pr_number:16547`, `step:"5-waiting-ci"` (not in vocabulary; canonical `5-await`), and NO
 `head_sha`/`last_reviewed_sha`/`updated_at` (write-state ×4 but `pr_number ×6` hand-managed). The
-concurrent ENG-729 on the _same_ Sonnet tier wrote a fully compliant state via write-state ×11 — so
+concurrent ENG-729 on the \_same* Sonnet tier wrote a fully compliant state via write-state ×11 — so
 drift is variable within-tier (see IMP-7), and the pending 05-gate-push edit + a hard post-create
 assertion (integer `pr`, no `pr_number`, in-vocab step, fresh `updated_at`) is now doubly warranted.
 seen: 6.
@@ -205,14 +205,14 @@ doesn't produce (e.g. invoice numbers). Assert structural/rendered content inste
 status: open
 first-seen: 2026-07-13 · seen: 1 · dimension: 8/4 (escape + pipeline)
 evidence: 2026-07-13-eng648-729.md F1 (ENG-648 pushed `gh pr create --title "feat(ENG-648): add
-GenericAutocomplete<T> with radio mode"` → red on care_fe's newly-added Jira PR-title check, which
+GenericAutocomplete<T> with radio mode"` → red on care*fe's newly-added Jira PR-title check, which
 requires a `[ENG-###]`-shaped title). The guide ALREADY specifies the bracket form
 (05-gate-push.md L26 + L34 `[ENG-707] <summary>`), so this is guide-followed-loosely: a strong
 conventional-commit prior overrode one buried line and nothing local asserts the shape, so it only
 failed remotely. Same step also used inline `--body` instead of `--body-file pr-body.md` + native
 PR tool (hosts.md), and left no `pr-body.md` in the run dir.
 proposed edit: 05-gate-push.md — promote the title rule to a loud REQUIRED line with regex
-`^\[ENG-[0-9]+\] ` + a _wrong_ example (`feat(ENG-648): …` ✗), noting care_fe's Jira CI rejects
+`^\[ENG-[0-9]+\] ` + a \_wrong* example (`feat(ENG-648): …` ✗), noting care_fe's Jira CI rejects
 anything else; add a one-line post-create assertion (grep the created title against the regex, fail
 loudly) so the shape is caught locally, not by red CI. Mechanical contract miss — guard by assertion,
 not a care-evals fixture.

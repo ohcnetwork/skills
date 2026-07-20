@@ -80,6 +80,20 @@ const JUDGMENT_PERMISSION = {
   external_directory: "allow",
 } as const;
 
+// Edit-enabled permission for the END-OF-RUN DOCTOR only (auto-doctor.ts). Unlike judgment roles, the
+// doctor's job IS to edit skill prose + write diagnosis/fixture files, so `edit: "allow"`. It still may
+// NOT run bash or fetch — every OTHER side effect (git/gh/tests/evals) stays with the deterministic
+// orchestrator scaffold, off the autonomous agent. `external_directory: "allow"` lets it reach the
+// skills repo by absolute path (the orchestrator process runs from orchestrator/, the skills live in
+// the repo root). NOTE (Phase-3 live smoke): confirm new-file creation (diagnoses/*, new fixtures)
+// isn't gated by a separate opencode `write` permission on the deployed SDK version; widen here if so.
+const DOCTOR_PERMISSION = {
+  edit: "allow",
+  bash: "deny",
+  webfetch: "deny",
+  external_directory: "allow",
+} as const;
+
 // Transport model: `session.prompt` (POST /session/{id}/message) is a BLOCKING request — the server
 // holds the connection open for the entire agentic run and sends response headers only when it's done.
 // Node's global fetch (undici) caps that at a default `headersTimeout` of 300s, so any spawn whose run
@@ -521,6 +535,92 @@ async function promptAgenticThenStructuredImpl(
       modelReported,
       modelPinSatisfied,
       cost: sumCost(reconCost, extractCost(emitInfo)),
+    };
+  } finally {
+    await oc.server?.close?.();
+  }
+}
+
+/**
+ * The END-OF-RUN DOCTOR spawn (auto-doctor.ts): a two-turn, EDIT-ENABLED agentic run. Turn A explores
+ * the run dir and EDITS skill/diagnosis/fixture files in place (DOCTOR_PERMISSION, no `format`); Turn B
+ * — same warm session — emits the structured `DoctorOutput` manifest that the deterministic scaffold
+ * acts on. Mirrors `promptAgenticThenStructured`, but with edit allowed and `task: false` kept (the
+ * doctor explores directly; no subagents). The scaffold owns git/gh/tests/evals — this only edits +
+ * reports. Not covered by unit tests (it needs a live opencode server + a real run dir); it is exercised
+ * by the Phase-3 `--doctor-dry` live smoke.
+ */
+export async function driveDoctorSpawn(
+  spec: {
+    providerID: string;
+    modelID: string;
+    editSystem: string; // Turn A — the inlined doctor SKILL (autonomous-mode) + the run dir path
+    editInstruction: string; // Turn A — "diagnose this run and apply the covered-skill edits"
+    emitSystem: string; // Turn B — "now emit the DoctorOutput manifest as JSON"
+    emitInstruction: string;
+    timeoutMs?: number;
+  },
+  schema: object,
+): Promise<{ data: any; modelReported: string | undefined; cost?: SpawnCost }> {
+  const oc = await startOpencodeOnFreePort({
+    permission: DOCTOR_PERMISSION,
+    tools: { task: false },
+  });
+  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
+  try {
+    const session = unwrap<any>(
+      await oc.client.session.create({ body: { title: "auto-doctor" } }),
+    );
+    const sessionId = session.id ?? session.sessionID;
+    if (!sessionId) throw new Error("opencode: session.create returned no id");
+
+    // Turn A — agentic + EDIT. The model reads the run dir and writes its file changes here.
+    const editInfo = await driveToCompletion(
+      oc.client,
+      sessionId,
+      {
+        model: { providerID: spec.providerID, modelID: spec.modelID },
+        system: spec.editSystem,
+        parts: [{ type: "text", text: spec.editInstruction }],
+      },
+      timeoutMs,
+    );
+    if (editInfo?.error?.name) {
+      throw new Error(
+        `opencode doctor edit turn error: ${editInfo.error.name}: ${editInfo.error.message ?? "unknown"}`,
+      );
+    }
+    const editCost = extractCost(editInfo);
+
+    // Turn B — SAME session, structured emit of the manifest describing what it just did.
+    const emitInfo = await driveToCompletion(
+      oc.client,
+      sessionId,
+      {
+        model: { providerID: spec.providerID, modelID: spec.modelID },
+        system: spec.emitSystem,
+        parts: [{ type: "text", text: spec.emitInstruction }],
+        format: { type: "json_schema", schema },
+      },
+      timeoutMs,
+    );
+    if (emitInfo?.error?.name === "StructuredOutputError") {
+      throw new Error(
+        `opencode StructuredOutputError after retries: ${emitInfo.error.message ?? "unknown"}`,
+      );
+    }
+    const structured = emitInfo?.structured ?? emitInfo?.structured_output;
+    if (structured == null) {
+      throw new Error(
+        `opencode returned no structured output on doctor emit turn. info keys: ${Object.keys(emitInfo ?? {}).join(", ")}`,
+      );
+    }
+    const modelReported: string | undefined =
+      emitInfo?.modelID ?? emitInfo?.model?.modelID ?? emitInfo?.providerModel;
+    return {
+      data: structured,
+      modelReported,
+      cost: sumCost(editCost, extractCost(emitInfo)),
     };
   } finally {
     await oc.server?.close?.();

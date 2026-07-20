@@ -184,3 +184,24 @@ export function uxValidatorMethodology(): string {
     "static",
   );
 }
+
+/**
+ * The FULL care-loop-doctor SKILL.md, injected as the end-of-run doctor's system prompt (auto-doctor.ts).
+ * Unlike the role skills, the whole skill IS the methodology (its "Autonomous end-of-run mode" section
+ * defines the headless contract), so this reads the entire file rather than a carved region. Also
+ * exposes `SKILLS_ROOT` so the wiring can hand the doctor absolute skill/eval paths to edit.
+ */
+export function doctorMethodology(): string {
+  try {
+    return readFileSync(
+      resolve(SKILLS_ROOT, "care-loop-doctor/SKILL.md"),
+      "utf8",
+    );
+  } catch (e) {
+    console.warn(`[skill-source] warning: could not read doctor SKILL.md: ${(e as Error).message}`);
+    return "";
+  }
+}
+
+/** The skills workspace root (sibling of care-loop/) — the doctor edits skill + care-evals files here. */
+export const skillsRoot = SKILLS_ROOT;

@@ -10,7 +10,16 @@
 // tamper/truncation *detection*, no HMAC/signing.
 
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 
 export type EventType =
   | "run.start"
@@ -35,7 +44,14 @@ export type EventType =
   | "ci.done"
   | "budget.tick"
   | "budget.stop"
-  | "checkpoint.written";
+  | "checkpoint.written"
+  | "doctor.skip"
+  | "doctor.start"
+  | "doctor.apply"
+  | "doctor.coherence"
+  | "doctor.verify"
+  | "doctor.pr"
+  | "doctor.error";
 
 export interface JournalEvent {
   seq: number;
@@ -57,11 +73,17 @@ export type NewEvent = Omit<JournalEvent, "seq" | "prev" | "ts" | "run_id"> & {
 
 export const GENESIS = "sha256:genesis";
 
-const sha256 = (s: string): string => "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
+const sha256 = (s: string): string =>
+  "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
 
 /** Canonical serialization: fixed key order, optional keys omitted when absent. */
 export function serializeEvent(e: JournalEvent): string {
-  const o: Record<string, unknown> = { seq: e.seq, ts: e.ts, run_id: e.run_id, event: e.event };
+  const o: Record<string, unknown> = {
+    seq: e.seq,
+    ts: e.ts,
+    run_id: e.run_id,
+    event: e.event,
+  };
   if (e.step !== undefined) o.step = e.step;
   if (e.round !== undefined) o.round = e.round;
   if (e.data !== undefined) o.data = e.data;
@@ -117,7 +139,9 @@ export class Journal {
           truncatedTail = true; // crash-mid-append: drop the torn final line
           break;
         }
-        throw new JournalCorruptionError(`journal ${this.path}: unparseable line ${i} (mid-chain)`);
+        throw new JournalCorruptionError(
+          `journal ${this.path}: unparseable line ${i} (mid-chain)`,
+        );
       }
 
       if (ev.prev !== prevHash) {

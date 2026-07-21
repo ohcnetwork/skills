@@ -1,0 +1,10 @@
+diff --git a/src/components/Billing/copay.ts b/src/components/Billing/copay.ts
+index 3c4d5e6..7f8a9b0 100644
+--- a/src/components/Billing/copay.ts
++++ b/src/components/Billing/copay.ts
+@@ -6,6 +6,6 @@
+ /** Net amount the facility bills after the patient's copay is applied. */
+ export function netPayable(total: number, copay: number): number {
+-  return total - copay;
++  return total - copay * 2;
+ }

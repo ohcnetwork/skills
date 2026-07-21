@@ -1,0 +1,65 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-08-tablet-cards-clean",
+  "skill": "care-ux-review",
+  "expected_outcome": "clean",
+  "pass": {
+    "require_clean_signal": true,
+    "max_false_positives": 0
+  },
+  "clean_signals": [
+    "clean pass",
+    "no broken",
+    "no findings",
+    "nothing to flag",
+    "nothing worth",
+    "no overflow",
+    "no issues",
+    "handled correctly",
+    "properly handled",
+    "renders correctly",
+    "responsive across",
+    "fits at all",
+    "at all breakpoints",
+    "stays single column",
+    "single column through",
+    "sound"
+  ],
+  "must_not_flag": [
+    {
+      "id": "fp-tablet-overflow",
+      "class": "broken-tablet-band",
+      "signals": [
+        "overflows at tablet",
+        "overflow at tablet",
+        "breaks at tablet",
+        "breaks on tablet",
+        "breaks at 768",
+        "broken at tablet",
+        "too narrow at md",
+        "columns are too narrow",
+        "column is too narrow",
+        "squeezed at tablet",
+        "not responsive at tablet",
+        "should be lg",
+        "should use lg",
+        "add truncate",
+        "missing truncate",
+        "missing min-w-0"
+      ]
+    },
+    {
+      "id": "fp-tablet-collision",
+      "class": "broken-tablet-band",
+      "signals": [
+        "sibling collision",
+        "siblings collide",
+        "pushes the title",
+        "clips the title",
+        "buttons push",
+        "collide at tablet",
+        "overlap at tablet"
+      ]
+    }
+  ]
+}

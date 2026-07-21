@@ -1,0 +1,33 @@
+diff --git a/src/Utils/money.ts b/src/Utils/money.ts
+new file mode 100644
+index 000000000..df9ccf2bc
+--- /dev/null
++++ b/src/Utils/money.ts
+@@ -0,0 +1,10 @@
++// Formats a monetary amount for display. Null/undefined amounts render as an em dash.
++export function formatMoney(
++  amount: number | null | undefined,
++  currency: string,
++): string {
++  if (!amount) {
++    return "—";
++  }
++  return `${currency}${amount.toFixed(2)}`;
++}
+diff --git a/src/components/PriceTag.tsx b/src/components/PriceTag.tsx
+new file mode 100644
+index 000000000..0331ba9ab
+--- /dev/null
++++ b/src/components/PriceTag.tsx
+@@ -0,0 +1,11 @@
++import { formatMoney } from "@/Utils/money";
++
++interface PriceTagProps {
++  // amount comes straight from the pricing API; it is 0 for free / fully-discounted items
++  amount: number | null;
++  currency: string;
++}
++
++export function PriceTag({ amount, currency }: PriceTagProps) {
++  return <span className="price">{formatMoney(amount, currency)}</span>;
++}

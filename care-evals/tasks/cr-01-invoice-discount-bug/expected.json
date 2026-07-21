@@ -1,0 +1,73 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-01-invoice-discount-bug",
+  "skill": "care-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 0.66,
+    "max_false_positives": 1,
+    "critical_must_flag": ["discount-pct-math"]
+  },
+  "must_flag": [
+    {
+      "id": "discount-pct-math",
+      "class": "correctness",
+      "file": "src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx",
+      "line_hint": "percentage: (subtotal, rate) => subtotal * rate",
+      "signals": [
+        "/ 100",
+        "/100",
+        "divide by 100",
+        "dividing by 100",
+        "percent/100",
+        "as a fraction",
+        "raw percent",
+        "whole-number percent",
+        "subtotal * rate",
+        "* rate",
+        "10x",
+        "10\u00d7",
+        "over-discount",
+        "over discount"
+      ]
+    },
+    {
+      "id": "discount-strategy-overengineered",
+      "class": "overengineering",
+      "file": "src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx",
+      "line_hint": "class DiscountStrategyFactory",
+      "signals": [
+        "DiscountStrategyFactory",
+        "DISCOUNT_STRATEGIES",
+        "factory",
+        "strategy pattern",
+        "registry",
+        "over-engineer",
+        "overengineer",
+        "unnecessary abstraction",
+        "needless abstraction",
+        "single strategy",
+        "one strategy",
+        "yagni",
+        "inline"
+      ]
+    },
+    {
+      "id": "validate-totals-misnamed",
+      "class": "legibility",
+      "file": "src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx",
+      "line_hint": "function validateTotals",
+      "signals": [
+        "validateTotals",
+        "misleading name",
+        "misnamed",
+        "does not validate",
+        "doesn't validate",
+        "no validation",
+        "name suggests",
+        "naming"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

@@ -1,0 +1,64 @@
+diff --git a/src/pages/Facility/patient/components/PatientDetailSheet.tsx b/src/pages/Facility/patient/components/PatientDetailSheet.tsx
+new file mode 100644
+index 000000000..373304fa5
+--- /dev/null
++++ b/src/pages/Facility/patient/components/PatientDetailSheet.tsx
+@@ -0,0 +1,58 @@
++import type { ReactNode } from "react";
++
++import {
++  Sheet,
++  SheetContent,
++  SheetHeader,
++  SheetTitle,
++} from "@/components/ui/sheet";
++
++interface Observation {
++  id: string;
++  recordedAt: string;
++  note: string;
++}
++
++interface PatientDetailSheetProps {
++  open: boolean;
++  onOpenChange: (open: boolean) => void;
++  summary: ReactNode;
++  observations: Observation[];
++}
++
++// Slide-over patient detail. The body scrolls when tall, and the observations
++// log (which can be long) gets its own scroll area so the summary above stays
++// reachable — a scroller inside the body's scroller.
++export default function PatientDetailSheet({
++  open,
++  onOpenChange,
++  summary,
++  observations,
++}: PatientDetailSheetProps) {
++  return (
++    <Sheet open={open} onOpenChange={onOpenChange}>
++      <SheetContent className="flex h-full w-full max-w-xl flex-col">
++        <SheetHeader>
++          <SheetTitle>Patient detail</SheetTitle>
++        </SheetHeader>
++
++        {/* body — should scroll when the content is taller than the sheet */}
++        <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
++          {summary}
++
++          <section className="flex flex-1 flex-col">
++            <h3 className="mb-2 text-sm font-semibold">Observations</h3>
++            {/* nested scroll area for the long observations log */}
++            <ul className="flex-1 space-y-2 overflow-y-auto rounded border p-2">
++              {observations.map((o) => (
++                <li key={o.id} className="text-sm">
++                  <span className="text-muted-foreground">{o.recordedAt}</span> — {o.note}
++                </li>
++              ))}
++            </ul>
++          </section>
++        </div>
++      </SheetContent>
++    </Sheet>
++  );
++}

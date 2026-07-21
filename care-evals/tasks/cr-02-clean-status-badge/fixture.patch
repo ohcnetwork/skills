@@ -1,0 +1,52 @@
+diff --git a/src/pages/Facility/billing/invoice/components/InvoiceStatusBadge.tsx b/src/pages/Facility/billing/invoice/components/InvoiceStatusBadge.tsx
+new file mode 100644
+index 000000000..479261d88
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/InvoiceStatusBadge.tsx
+@@ -0,0 +1,46 @@
++import { cn } from "@/lib/utils";
++
++type InvoiceStatus =
++  | "draft"
++  | "issued"
++  | "balanced"
++  | "cancelled"
++  | "entered_in_error";
++
++interface InvoiceStatusBadgeProps {
++  status: InvoiceStatus;
++  className?: string;
++}
++
++const STATUS_LABEL: Record<InvoiceStatus, string> = {
++  draft: "Draft",
++  issued: "Issued",
++  balanced: "Balanced",
++  cancelled: "Cancelled",
++  entered_in_error: "Entered in error",
++};
++
++const STATUS_TONE: Record<InvoiceStatus, string> = {
++  draft: "bg-gray-100 text-gray-700",
++  issued: "bg-blue-100 text-blue-700",
++  balanced: "bg-green-100 text-green-700",
++  cancelled: "bg-amber-100 text-amber-700",
++  entered_in_error: "bg-red-100 text-red-700",
++};
++
++export default function InvoiceStatusBadge({
++  status,
++  className,
++}: InvoiceStatusBadgeProps) {
++  return (
++    <span
++      className={cn(
++        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
++        STATUS_TONE[status],
++        className,
++      )}
++    >
++      {STATUS_LABEL[status]}
++    </span>
++  );
++}

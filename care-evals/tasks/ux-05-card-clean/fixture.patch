@@ -1,0 +1,23 @@
+diff --git a/src/pages/Facility/billing/invoice/components/ResponsiveInvoiceCard.tsx b/src/pages/Facility/billing/invoice/components/ResponsiveInvoiceCard.tsx
+new file mode 100644
+index 0000000..310f7bc
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/ResponsiveInvoiceCard.tsx
+@@ -0,0 +1,17 @@
++interface ResponsiveInvoiceCardProps {
++  patientName: string;
++  amountLabel: string;
++}
++
++export default function ResponsiveInvoiceCard({ patientName, amountLabel }: ResponsiveInvoiceCardProps) {
++  return (
++    <div className="w-full max-w-md rounded-lg border p-3">
++      <div className="flex min-w-0 items-center justify-between gap-2">
++        <span className="truncate font-medium" title={patientName}>
++          {patientName}
++        </span>
++        <span className="shrink-0 font-semibold">{amountLabel}</span>
++      </div>
++    </div>
++  );
++}

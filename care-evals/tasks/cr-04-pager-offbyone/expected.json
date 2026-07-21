@@ -1,0 +1,40 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-04-pager-offbyone",
+  "skill": "care-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["offset-off-by-one"]
+  },
+  "must_flag": [
+    {
+      "id": "offset-off-by-one",
+      "class": "correctness",
+      "file": "src/components/Facility/billing/invoicePageParams.ts",
+      "line_hint": "offset: page * pageSize",
+      "signals": [
+        "(page - 1)",
+        "page - 1",
+        "page-1",
+        "off-by-one",
+        "off by one",
+        "1-based",
+        "one-based",
+        "skips the first",
+        "skip the first",
+        "first page is skipped",
+        "starts at page 2",
+        "starts on page 2",
+        "page 1 would skip",
+        "offset should be",
+        "zero-based",
+        "should subtract 1",
+        "minus 1",
+        "page * pagesize"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

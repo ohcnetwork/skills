@@ -1,0 +1,21 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tr-02-category-totals-allclean",
+  "skill": "care-triager",
+  "expected_verdicts": {
+    "F1": "decline",
+    "F2": "decline",
+    "F3": "decline",
+    "F4": "defer"
+  },
+  "expected_missed_by": {
+    "F1": "none",
+    "F2": "none",
+    "F3": "none",
+    "F4": "none"
+  },
+  "pass": {
+    "min_verdict_accuracy": 0.75,
+    "critical_verdicts": ["F1", "F2", "F3"]
+  }
+}

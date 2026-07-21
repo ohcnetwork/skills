@@ -1,0 +1,58 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-06-shared-unit-mismatch",
+  "skill": "care-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["summary-card-unit-mismatch"]
+  },
+  "must_flag": [
+    {
+      "id": "summary-card-unit-mismatch",
+      "class": "correctness",
+      "file": "src/pages/Facility/billing/invoice/components/InvoiceSummaryCard.tsx",
+      "line_hint": "formatCurrency(totals.total, currency)",
+      "signals": [
+        "100x",
+        "100×",
+        "100 times",
+        "100-fold",
+        "100 too large",
+        "100 too big",
+        "over by 100",
+        "not divided by 100",
+        "doesn't divide by 100",
+        "does not divide by 100",
+        "isn't divided by 100",
+        "without dividing by 100",
+        "missing the division",
+        "missing the /100",
+        "missing the / 100",
+        "fails to divide",
+        "omits the",
+        "treats minor units as",
+        "minor units as major",
+        "paise as rupees",
+        "as rupees instead",
+        "inconsistent with printinvoicetotals",
+        "unlike printinvoicetotals",
+        "one caller divides",
+        "other caller",
+        "the other does not"
+      ]
+    }
+  ],
+  "must_not_flag": [
+    {
+      "id": "fp-blame-correct-caller",
+      "class": "correctness",
+      "signals": [
+        "printinvoicetotals is wrong",
+        "printinvoicetotals incorrectly",
+        "printinvoicetotals should not divide"
+      ]
+    }
+  ]
+}

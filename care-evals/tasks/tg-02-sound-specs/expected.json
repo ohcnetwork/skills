@@ -1,0 +1,17 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tg-02-sound-specs",
+  "skill": "care-test-grade",
+  "expected_outcome": "clean",
+  "pass": {
+    "min_verdict_accuracy": 0.66,
+    "require_block": false,
+    "critical_verdicts": []
+  },
+  "expected_verdicts": {
+    "AC1": "Covered",
+    "AC2": "Weak",
+    "AC3": "Covered"
+  },
+  "notes": "Mixed control (re-grounded 2026-07-17). AC1 (row count) and AC3 (page indicator) are genuinely sound → the grader must NOT over-flag them (precision). AC2 ('advances to a distinct batch') is intrinsically hard to assert strongly — the spec checks only that the first row's text changed, not that the whole batch differs, so a coincidental first-row match could pass → a legitimate Weak (two independent models, Haiku+Sonnet, grade it Weak). AC2 is advisory: nothing here blocks, so require_block=false. This is the 'genuine Weak that must be caught but must not block' case (recovered after tg-04 flipped to a blocking Wrong). A grader that manufactures a Wrong/block here, or over-flags AC1/AC3, fails. Note: AC3's criterion says 'e.g. Page 2 of N' — the 'of N' is illustrative, not required; asserting 'Page 2' is Covered."
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tr-03-pricetag-cross-file",
+  "skill": "care-triager",
+  "expected_verdicts": {
+    "F1": "decline",
+    "F2": "address",
+    "F3": "defer"
+  },
+  "expected_missed_by": {
+    "F1": "none",
+    "F2": "care-reviewer",
+    "F3": "none"
+  },
+  "pass": {
+    "min_verdict_accuracy": 0.66,
+    "critical_verdicts": ["F1", "F2"]
+  }
+}

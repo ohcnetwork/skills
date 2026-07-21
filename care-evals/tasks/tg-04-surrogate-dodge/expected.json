@@ -1,0 +1,17 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tg-04-surrogate-dodge",
+  "skill": "care-test-grade",
+  "expected_outcome": "block",
+  "pass": {
+    "min_verdict_accuracy": 0.66,
+    "require_block": true,
+    "critical_verdicts": ["AC2"]
+  },
+  "expected_verdicts": {
+    "AC1": "Covered",
+    "AC2": "Wrong",
+    "AC3": "Covered"
+  },
+  "notes": "IMP-10 escape guard, re-grounded 2026-07-17 (skill decision: presence-instead-of-value is Wrong, not Weak). AC2's spec asserts only that the invoice-number element is visible, never its value — it does not verify the criterion's claim, so it is Wrong and blocks (the spec must be rewritten). The fixture backend produces no number, so the real fix routes back to the plan to restate the criterion against a value the fixture yields (BS-3/IMP-10). A grader that calls AC2 Covered was fooled by the green presence check; one that calls it Weak under-rated a spec that verifies nothing the criterion claims."
+}

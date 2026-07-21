@@ -337,3 +337,32 @@ contradict it — `skip`/`decline` both keep `addressCount` at 0). **VERIFIED li
 rule ("already chased across rounds 4/6/7"), declined F6, emitted no `address` item, and routed
 straight to the Step 7 exit. Opus-tier before/after delta not run (the production triager tier); the
 free-rung after-state is a positive control that the edited skill is exercised.
+
+## IMP-18 · Gate hard-fails on auto-fixable formatting → gate-blocked run, no auto-recovery
+
+status: applied (2026-07-21)
+first-seen: 2026-07-21 · seen: 1 · dimension: 5 (gate mechanics) / 6 (build-round)
+evidence: care_fe-user-dept-pagination (PR #16586), round 4. The implementer fixed a real `tsc` error
+on reapply (journal seq 122–125) but its output carried a `prettier/prettier` nit (a `useEffect` deps
+array prettier wants multi-line). The gate's lint stage runs **plain `npx eslint` (no `--fix`)** on the
+implementer's UNCOMMITTED edits, and `prettier/prettier` is error-severity → hard FAIL (seq 126); the
+1-retry gate-loopback was already spent → `run.end{outcome:"gate-blocked"}` (seq 129). Root cause is
+**ordering**: care_fe's own `lint-staged` pre-commit hook (`prettier --write` + `eslint --fix`) would
+have rewritten the file, but that hook only fires at commit, and the re-round order is gate → *then*
+`pushRound` commits (ci-round.ts:815) — so the auto-fix never runs before the blocking check. Every
+PR is exposed: LLM implementers routinely emit prettier-deviating code (line wrap, multi-line
+arrays, import / tailwind-class order), and each becomes a hard gate-block plus a wasted LLM loopback
+to hand-fix what a formatter does deterministically. Compounded by the fact that gate-blocked is a
+terminal outcome `planResume` refuses, so recovery needed a manual commit + push + journal edit.
+Attribution: `missed_by: gate` (run_gate.sh mechanics, not a judgment skill).
+applied edit: run_gate.sh lint stage — an **auto-fix pass before the blocking check**: run
+`npx eslint --fix` on the changed src files first (best-effort; it exits non-zero only on *unfixable*
+errors, which the subsequent blocking `eslint` still reports), then gate on the clean re-check. The
+fixes stay in the working tree and ride into the round's `git add -A` commit, so the pushed code
+matches what the pre-commit hook would have produced. Kills both the false gate-block AND the wasted
+gate-loopback on formatting nits.
+fixture: none (deterministic shell, not an LLM-judgment skill — a care-eval is the wrong tool).
+**VERIFIED live 2026-07-21** by exact repro against the real care_fe worktree: reintroduced the round-4
+`prettier/prettier` nit → plain `eslint` FAILs (matches the live gate-block); ran the patched
+`run_gate.sh -n` → `lint --fix… clean` → blocking `lint… PASS` → `ALL PASSED` (exit 0), and the file
+was auto-restored byte-identical to the correct multi-line form.

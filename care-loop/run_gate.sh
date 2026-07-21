@@ -118,6 +118,19 @@ mapfile -t LINT_FILES < <(lint_targets) 2>/dev/null || {
 if [ "${#LINT_FILES[@]}" -eq 0 ]; then
   printf 'run_gate: %-18s %s\n' "lint…" "SKIP (no changed src files)"
 else
+  # Auto-fix pass FIRST, then block. care_fe's own pre-commit hook (lint-staged) runs prettier --write
+  # + eslint --fix, so a human dev never sees a formatting failure — the hook rewrites the file at
+  # commit time. The loop's edit-only implementer leaves its changes UNCOMMITTED, and this gate runs
+  # BEFORE the commit that would trigger that hook (re-round order: gate → then pushRound commits). So
+  # without this pass, an auto-fixable prettier/prettier nit (multi-line arrays, import/tailwind-class
+  # order) HARD-FAILS the gate and burns a gate-loopback re-invoking the LLM to hand-fix what
+  # `eslint --fix` does deterministically in ms. Run --fix best-effort (it exits non-zero when
+  # unfixable errors remain — that's fine, the blocking `eslint` below reports them), then gate on a
+  # clean re-check. The fixes stay in the working tree and ride into the round's `git add -A` commit,
+  # so the pushed code matches what the pre-commit hook would have produced.
+  printf 'run_gate: %-18s ' "lint --fix…"
+  npx eslint --fix "${LINT_FILES[@]}" >"$LOGDIR/lint-fix.log" 2>&1 \
+    && echo "clean" || echo "applied fixes / residual errors (see blocking lint)"
   stage "lint" "$LOGDIR/lint.log"  npx eslint "${LINT_FILES[@]}"
 fi
 

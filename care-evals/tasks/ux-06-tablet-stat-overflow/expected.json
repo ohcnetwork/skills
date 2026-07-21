@@ -1,0 +1,60 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-06-tablet-stat-overflow",
+  "skill": "care-ux-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["tablet-stat-overflow"]
+  },
+  "must_flag": [
+    {
+      "id": "tablet-stat-overflow",
+      "class": "broken-tablet-band",
+      "file": "src/pages/Facility/patient/components/LabResultsSummary.tsx",
+      "line_hint": "grid grid-cols-1 md:grid-cols-3 with w-44 + w-20 shrink-0 children",
+      "signals": [
+        "tablet",
+        "md:grid-cols-3",
+        "md breakpoint",
+        "at md",
+        "the md band",
+        "medium breakpoint",
+        "middle breakpoint",
+        "768",
+        "769",
+        "between 768",
+        "768 and 1024",
+        "768-1023",
+        "768–1023",
+        "1024",
+        "three columns",
+        "three-column",
+        "3 columns",
+        "3-up",
+        "three-up",
+        "each column",
+        "column is too narrow",
+        "columns are too narrow",
+        "narrow column",
+        "too narrow at",
+        "lg:grid-cols-3",
+        "should be lg",
+        "lg: instead",
+        "lg breakpoint",
+        "only at desktop",
+        "fine on desktop",
+        "fits on desktop",
+        "fine on mobile",
+        "fits on mobile",
+        "fine on phone",
+        "not on tablet",
+        "breaks on tablet",
+        "breaks at tablet",
+        "ipad"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

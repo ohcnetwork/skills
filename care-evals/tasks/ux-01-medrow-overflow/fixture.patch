@@ -1,0 +1,25 @@
+diff --git a/src/pages/Facility/billing/invoice/components/MedicationOrderRow.tsx b/src/pages/Facility/billing/invoice/components/MedicationOrderRow.tsx
+new file mode 100644
+index 0000000..6248558
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/MedicationOrderRow.tsx
+@@ -0,0 +1,19 @@
++import { formatCurrency } from "@/Utils/utils";
++
++interface MedicationOrderRowProps {
++  // free-text order name; can be long, e.g. "Tab. Paracetamol + Caffeine 500/65mg (BID x5d)"
++  name: string;
++  dose: string;
++  amount: number;
++  currency: string;
++}
++
++export default function MedicationOrderRow({ name, dose, amount, currency }: MedicationOrderRowProps) {
++  return (
++    <div className="flex w-64 items-center justify-between gap-2 rounded border px-3 py-2 text-sm">
++      <span className="font-medium">{name}</span>
++      <span className="text-muted-foreground">{dose}</span>
++      <span className="text-right font-semibold">{formatCurrency(amount, currency)}</span>
++    </div>
++  );
++}

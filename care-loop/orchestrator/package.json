@@ -1,0 +1,34 @@
+{
+  "name": "care-loopd",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless deterministic orchestrator for care-loop (opencode + GitHub Copilot runner). Phase-2 spike seed.",
+  "bin": {
+    "care-loopd": "bin/care-loopd.mjs"
+  },
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "dashboard": "tsx src/cli.ts dashboard",
+    "spike:reviewer": "tsx src/spike-reviewer.ts",
+    "smoke:reviewer": "tsx src/smoke-reviewer.ts",
+    "smoke:triager": "tsx src/smoke-triager.ts",
+    "smoke:plan": "tsx src/smoke-plan.ts",
+    "probe:format": "tsx src/probe-format.ts",
+    "live:halfpipe": "tsx src/half-pipe-live.ts",
+    "smoke:github": "tsx src/github-smoke.ts",
+    "test": "node --import tsx --test --test-force-exit test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.0.0",
+    "ajv": "^8.17.1",
+    "dotenv": "^17.4.2",
+    "octokit": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

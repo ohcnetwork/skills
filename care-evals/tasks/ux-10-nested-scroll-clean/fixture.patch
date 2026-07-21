@@ -1,0 +1,64 @@
+diff --git a/src/pages/Facility/patient/components/EncounterNotesSheet.tsx b/src/pages/Facility/patient/components/EncounterNotesSheet.tsx
+new file mode 100644
+index 000000000..3836a6074
+--- /dev/null
++++ b/src/pages/Facility/patient/components/EncounterNotesSheet.tsx
+@@ -0,0 +1,58 @@
++import type { ReactNode } from "react";
++
++import {
++  Sheet,
++  SheetContent,
++  SheetHeader,
++  SheetTitle,
++} from "@/components/ui/sheet";
++
++interface Note {
++  id: string;
++  author: string;
++  body: string;
++}
++
++interface EncounterNotesSheetProps {
++  open: boolean;
++  onOpenChange: (open: boolean) => void;
++  summary: ReactNode;
++  notes: Note[];
++}
++
++// Slide-over encounter notes. Body scrolls; the notes log inside it gets its own
++// scroll area. Both flex chains carry min-h-0 so each overflow-y-auto can bound
++// its height and actually scroll (flex children default to min-height:auto).
++export default function EncounterNotesSheet({
++  open,
++  onOpenChange,
++  summary,
++  notes,
++}: EncounterNotesSheetProps) {
++  return (
++    <Sheet open={open} onOpenChange={onOpenChange}>
++      <SheetContent className="flex h-full w-full max-w-xl flex-col">
++        <SheetHeader>
++          <SheetTitle>Encounter notes</SheetTitle>
++        </SheetHeader>
++
++        {/* body — min-h-0 lets this flex child shrink so overflow-y-auto engages */}
++        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
++          {summary}
++
++          <section className="flex min-h-0 flex-1 flex-col">
++            <h3 className="mb-2 text-sm font-semibold">Notes</h3>
++            {/* nested scroll area — min-h-0 so it bounds and scrolls on its own */}
++            <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded border p-2">
++              {notes.map((n) => (
++                <li key={n.id} className="text-sm">
++                  <span className="font-medium">{n.author}</span> — {n.body}
++                </li>
++              ))}
++            </ul>
++          </section>
++        </div>
++      </SheetContent>
++    </Sheet>
++  );
++}

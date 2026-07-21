@@ -1,0 +1,64 @@
+diff --git a/src/pages/Facility/patient/components/RecordBpWizard.tsx b/src/pages/Facility/patient/components/RecordBpWizard.tsx
+new file mode 100644
+index 0000000..b408133
+--- /dev/null
++++ b/src/pages/Facility/patient/components/RecordBpWizard.tsx
+@@ -0,0 +1,58 @@
++import { useState } from "react";
++
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++
++type Step = "systolic" | "diastolic" | "pulse" | "review";
++
++// Records a single blood-pressure reading, one field per screen so each value gets full attention.
++export default function RecordBpWizard() {
++  const [step, setStep] = useState<Step>("systolic");
++  const [systolic, setSystolic] = useState("");
++  const [diastolic, setDiastolic] = useState("");
++  const [pulse, setPulse] = useState("");
++
++  if (step === "systolic")
++    return (
++      <StepShell title="Step 1 of 4 — Systolic" onNext={() => setStep("diastolic")}>
++        <Input value={systolic} onChange={(e) => setSystolic(e.target.value)} aria-label="Systolic (mmHg)" />
++      </StepShell>
++    );
++  if (step === "diastolic")
++    return (
++      <StepShell title="Step 2 of 4 — Diastolic" onNext={() => setStep("pulse")}>
++        <Input value={diastolic} onChange={(e) => setDiastolic(e.target.value)} aria-label="Diastolic (mmHg)" />
++      </StepShell>
++    );
++  if (step === "pulse")
++    return (
++      <StepShell title="Step 3 of 4 — Pulse" onNext={() => setStep("review")}>
++        <Input value={pulse} onChange={(e) => setPulse(e.target.value)} aria-label="Pulse (bpm)" />
++      </StepShell>
++    );
++  return (
++    <StepShell title="Step 4 of 4 — Review" onNext={() => { /* submit */ }}>
++      <p className="text-sm">{systolic}/{diastolic} mmHg · pulse {pulse} bpm</p>
++    </StepShell>
++  );
++}
++
++function StepShell({
++  title,
++  onNext,
++  children,
++}: {
++  title: string;
++  onNext: () => void;
++  children: React.ReactNode;
++}) {
++  return (
++    <div className="mx-auto max-w-sm space-y-4 p-4">
++      <h2 className="text-lg font-semibold">{title}</h2>
++      {children}
++      <Button className="h-11 w-full" onClick={onNext}>
++        Next
++      </Button>
++    </div>
++  );
++}

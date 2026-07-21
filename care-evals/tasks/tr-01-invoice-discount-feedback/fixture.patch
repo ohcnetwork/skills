@@ -1,0 +1,85 @@
+diff --git a/src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx b/src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx
+new file mode 100644
+index 000000000..a2a27a4ce
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/InvoiceDiscountSummary.tsx
+@@ -0,0 +1,79 @@
++import { useMemo } from "react";
++
++import { formatCurrency } from "@/Utils/utils";
++
++interface InvoiceLine {
++  id: string;
++  description: string;
++  baseAmount: number;
++  taxAmount: number;
++}
++
++interface DiscountSummaryProps {
++  lines: InvoiceLine[];
++  discountPercent: number;
++  currency: string;
++}
++
++// A registry-backed strategy layer so future discount kinds can be plugged in.
++type DiscountStrategy = (subtotal: number, rate: number) => number;
++
++const DISCOUNT_STRATEGIES: Record<string, DiscountStrategy> = {
++  percentage: (subtotal, rate) => subtotal * rate,
++};
++
++class DiscountStrategyFactory {
++  private strategies: Record<string, DiscountStrategy>;
++
++  constructor(strategies: Record<string, DiscountStrategy>) {
++    this.strategies = strategies;
++  }
++
++  resolve(kind: string): DiscountStrategy {
++    const strategy = this.strategies[kind];
++    if (!strategy) {
++      throw new Error(`Unknown discount strategy: ${kind}`);
++    }
++    return strategy;
++  }
++}
++
++const factory = new DiscountStrategyFactory(DISCOUNT_STRATEGIES);
++
++// Sums the lines and returns the net payable after discount and tax.
++function validateTotals(lines: InvoiceLine[], discountPercent: number) {
++  const base = lines.reduce((sum, line) => sum + line.baseAmount, 0);
++  const tax = lines.reduce((sum, line) => sum + line.taxAmount, 0);
++
++  const discountStrategy = factory.resolve("percentage");
++  const discount = discountStrategy(base, discountPercent);
++
++  const net = base - discount + tax;
++  return { base, tax, discount, net };
++}
++
++export default function InvoiceDiscountSummary({
++  lines,
++  discountPercent,
++  currency,
++}: DiscountSummaryProps) {
++  const { base, tax, discount, net } = useMemo(
++    () => validateTotals(lines, discountPercent),
++    [lines, discountPercent],
++  );
++
++  return (
++    <dl className="grid grid-cols-2 gap-1 text-sm">
++      <dt>Subtotal</dt>
++      <dd className="text-right">{formatCurrency(base, currency)}</dd>
++      <dt>Discount</dt>
++      <dd className="text-right">-{formatCurrency(discount, currency)}</dd>
++      <dt>Tax</dt>
++      <dd className="text-right">{formatCurrency(tax, currency)}</dd>
++      <dt className="font-semibold">Net payable</dt>
++      <dd className="text-right font-semibold">
++        {formatCurrency(net, currency)}
++      </dd>
++    </dl>
++  );
++}

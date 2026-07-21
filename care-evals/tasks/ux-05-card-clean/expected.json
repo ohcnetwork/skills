@@ -1,0 +1,54 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-05-card-clean",
+  "skill": "care-ux-review",
+  "expected_outcome": "clean",
+  "pass": {
+    "require_clean_signal": true,
+    "max_false_positives": 0
+  },
+  "clean_signals": [
+    "no broken",
+    "no convention",
+    "no findings",
+    "nothing to flag",
+    "nothing worth",
+    "clean pass",
+    "no issues",
+    "renders correctly",
+    "looks correct",
+    "handled correctly",
+    "properly handled",
+    "sound",
+    "no overflow"
+  ],
+  "must_not_flag": [
+    {
+      "id": "fp-overflow",
+      "class": "broken-overflow",
+      "signals": [
+        "will overflow",
+        "overflows the container",
+        "overflows its container",
+        "missing truncate",
+        "add truncate",
+        "no min-w-0",
+        "missing min-w-0"
+      ]
+    },
+    {
+      "id": "fp-responsive",
+      "class": "broken-responsive",
+      "signals": [
+        "is not responsive",
+        "isn't responsive",
+        "breaks on mobile",
+        "won't fit on mobile",
+        "should be responsive",
+        "add responsive",
+        "hardcoded width is a problem",
+        "overflows on small"
+      ]
+    }
+  ]
+}

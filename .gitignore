@@ -1,0 +1,5 @@
+.DS_Store
+care-loop/runs/
+__pycache__/
+.env
+care-evals/results/

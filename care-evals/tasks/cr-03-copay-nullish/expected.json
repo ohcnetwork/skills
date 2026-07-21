@@ -1,0 +1,41 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-03-copay-nullish",
+  "skill": "care-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["copay-nullish-falsy"]
+  },
+  "must_flag": [
+    {
+      "id": "copay-nullish-falsy",
+      "class": "correctness",
+      "file": "src/pages/Facility/billing/invoice/components/CopayNotice.tsx",
+      "line_hint": "const copay = patient.copay || defaultCopay",
+      "signals": [
+        "??",
+        "nullish",
+        "falsy",
+        "zero copay",
+        "copay of 0",
+        "copay is 0",
+        "copay === 0",
+        "copay of zero",
+        "0 is a valid",
+        "0 is valid",
+        "zero is a valid",
+        "fully covered",
+        "treats 0",
+        "treats a 0",
+        "falls back to the default",
+        "falls through to",
+        "nullish coalescing",
+        "logical or",
+        "|| default"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

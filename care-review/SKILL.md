@@ -1,20 +1,24 @@
 ---
 name: care-review
-description: Full review of a CARE frontend (care_fe) diff via two parallel lens agents — (1) what problem the change solves + whether the code makes it legible, and (2) whether the approach is the simplest one or overengineered — condensed into one report. Use for "review/critique my changes", "review the diff", "full review", "review against develop / the last commit". Add "thorough" for a heavier cross-model ensemble. Defaults to diffing against develop; suggests rather than edits.
+description: Full review of a CARE frontend (care_fe) diff via two parallel lens agents (intent/legibility + approach/simplicity), condensed into one report. Use for "review/critique my changes", "review the diff", "full review", "review against develop / the last commit". Add "thorough" for a heavier cross-model ensemble. Defaults to diffing against develop; suggests rather than edits.
 user-invocable: true
 argument-hint: "[develop | commit | working | <file>] [thorough]"
+model: opus  # declared judgment tier for the orchestrator/reconcile pass — honored by the invoker, not auto-enforced
 ---
 
 # CARE Review (orchestrator)
 
-Two lenses, run as **parallel subagents** and condensed into one report. Each agent reconstructs
-intent independently — you can't judge a solution until you know the problem — and the orchestrator
-reconciles their readings:
+Two lenses (three when the diff touches `src/**/*.tsx`), run as **parallel subagents** and
+condensed into one report. Each agent reconstructs intent independently — you can't judge a
+solution until you know the problem — and the orchestrator reconciles their readings:
 
 1. **Intent & legibility** — what does the change do, what requirement does it fulfill, does the
    code convey that on its own? → `care-diff-review`
 2. **Approach** — given that problem, is this the simplest solution or overengineered; what can be
    simplified or reused? → `care-technical-review`
+3. **UX / layout** *(when `src/**/*.tsx` files are in the diff)* — overflow, layout integrity,
+   a11y, and Tailwind/component conventions → `care-ux-review` (static mode only; review stays
+   browserless — live browser is care-loop Step 4.8's job)
 
 ## Flow
 
@@ -39,8 +43,11 @@ reconciles their readings:
    reconstruct intent **independently** from the code (no commit message), apply its lens, and
    **return its findings to you — it must not confirm with the user** (you own the single confirm).
    - **Default:** Agent A → `care-diff-review`; Agent B → `care-technical-review`. Both on Opus.
+     If the diff touches `src/**/*.tsx`: also dispatch Agent C → `care-ux-review` (static mode;
+     pass the diff path and note "static mode only — do not attempt live browser" in the prompt).
    - **Thorough:** run that A+B pair **twice** — once on Opus, once on GPT-5.5 (up to 4 agents in
-     parallel).
+     parallel). The UX lens (Agent C) runs once on Opus regardless of `thorough` mode — static
+     analysis doesn't benefit from a second-model pass.
 
 4. **Condense into ONE report** — reconcile, don't concatenate:
    - **Bottom line** — one or two sentences: is it sound / mergeable? For a refactor-only diff, the
@@ -49,10 +56,14 @@ reconciles their readings:
      agents' independent intent readings: they agree → high confidence; they diverge → flag the
      ambiguity (the code isn't conveying its intent).
    - **Worth deciding** — only the **1–2 findings that actually matter**: correctness, a regression
-     in the *other usages* of a shared component/hook/util the diff touched, or real
-     overengineering. This is the signal; keep it short.
-   - **Optional / FYI** — everything else (nits, style, micro-simplifications), clearly demoted so
-     it doesn't dilute the decision.
+     in the *other usages* of a shared component/hook/util the diff touched, real overengineering,
+     or any **`Broken`** UX finding from the third lens. This is the signal; keep it short.
+   - **Security lens** — include a security perspective, but report only **concrete, actionable**
+     risk (a real injection/auth/exposure path in *this* diff), never speculative, and never at the
+     cost of legitimate functionality. A concrete risk is a "worth deciding" finding; no finding is
+     the correct result when there's nothing concrete.
+   - **Optional / FYI** — everything else (nits, style, micro-simplifications, UX `Polish`
+     findings), clearly demoted so it doesn't dilute the decision.
    - **Out of scope** — one line for anything deliberately left untouched.
 
    In **thorough** mode, note where the two models **agreed vs. diverged** — agreement across
@@ -65,21 +76,39 @@ reconciles their readings:
 
 ## Models
 
-Concrete picks — overridable at invocation; update this block when availability changes.
+Each judgment skill **declares its tier in its own frontmatter `model:`** (currently `opus` for the
+orchestrator and every lens) — that declaration is the single source of truth; this table just
+reflects it. Spawn each lens on its declared model. `thorough` overrides the *shape* (adds an
+ensemble), not the tier.
 
 | Mode | Agents |
 |---|---|
-| Default (lens-split) | both lenses on **Claude Opus** |
-| Thorough (ensemble) | full lens-split on **Claude Opus** *and* on **GPT-5.5**, reconciled |
+| Default (lens-split) | each lens on its frontmatter `model:` (**Opus**) |
+| Thorough (ensemble) | the lens-split on its frontmatter model **and** on **GPT-5.5**, reconciled |
+
+### How model selection actually works (read this before reusing these skills elsewhere)
+
+`model:` in a **skill's** frontmatter is a **declaration of the intended judgment tier that the
+invoker honors — it is NOT auto-enforced by the skill loader** (unlike an *agent* definition's
+`model:`, which the Agent SDK does enforce). Three invokers honor the declaration three ways:
+
+- **`/care-review` (this skill):** reads each lens's frontmatter and spawns that lens sub-agent on
+  the model it declares.
+- **care-loop (loopd):** the headless orchestrator pins each role's model via `care-loop/models.json`
+  (per-role/tier → engine) and cross-checks it against opencode's reported model at the plan gate — so
+  the lens runs on the configured judgment engine without relying on per-agent frontmatter.
+- **care-evals:** deliberately **overrides** the tier with `--model` — the whole point is to ladder a
+  skill across models (including free ones) and find the cheapest that still passes. Frontmatter is
+  the *default*; the ladder is the *experiment*.
 
 **Dispatch caveats (verify in your host):**
 - Claude Code's Agent tool spawns **Claude models only** — the GPT side of the ensemble needs a
   host that exposes GPT (e.g. VS Code Copilot).
 - If the host **can't set a subagent's model**, run `/care-review thorough` as two passes — once
   with the session on Opus, once on GPT-5.5 — then do the reconcile pass yourself.
-- If the host **won't spawn subagents at all**, fall back to a single combined pass: read both lens
-  rubrics and do one review on the current model. Still valid — you just lose parallelism and
-  cross-model diversity.
+- If the host **won't spawn subagents at all** (or a single-model run, e.g. a care-evals ladder
+  rung), fall back to a single combined pass: read both lens rubrics and do one review on the
+  current model. Still valid — you just lose parallelism and cross-model diversity.
 
 ## Working agreement (inherited by every agent)
 

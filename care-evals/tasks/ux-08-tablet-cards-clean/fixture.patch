@@ -1,0 +1,32 @@
+diff --git a/src/pages/Facility/patient/components/PatientSummaryCards.tsx b/src/pages/Facility/patient/components/PatientSummaryCards.tsx
+new file mode 100644
+index 000000000..b7ec1fb9a
+--- /dev/null
++++ b/src/pages/Facility/patient/components/PatientSummaryCards.tsx
+@@ -0,0 +1,26 @@
++interface SummaryCard {
++  label: string;
++  value: string;
++}
++
++// Patient summary KPI cards. Three-up only when there is room (lg); fluid single
++// column below that so the middle (tablet) band never squeezes the content.
++export default function PatientSummaryCards({ cards }: { cards: SummaryCard[] }) {
++  return (
++    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
++      {cards.map((c) => (
++        <div key={c.label} className="flex min-w-0 items-center gap-3 rounded-lg border p-4">
++          <div className="h-10 w-16 shrink-0 rounded bg-muted" aria-hidden />
++          <div className="flex min-w-0 flex-col">
++            <span className="truncate text-sm font-medium" title={c.label}>
++              {c.label}
++            </span>
++            <span className="truncate text-lg font-semibold" title={c.value}>
++              {c.value}
++            </span>
++          </div>
++        </div>
++      ))}
++    </div>
++  );
++}

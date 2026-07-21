@@ -1,0 +1,18 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tg-01-rubber-stamp-specs",
+  "skill": "care-test-grade",
+  "expected_outcome": "block",
+  "pass": {
+    "min_verdict_accuracy": 0.75,
+    "require_block": true,
+    "critical_verdicts": ["AC3"]
+  },
+  "expected_verdicts": {
+    "AC1": "Covered",
+    "AC2": "Weak",
+    "AC3": "Wrong",
+    "AC4": "Missing"
+  },
+  "notes": "AC3 is the anti-circularity trap: the spec rubber-stamps a buggy 'apply over-100 discount' implementation instead of asserting the criterion's reject-and-leave-unchanged behavior. A grader that calls AC3 Covered/Weak has failed the core check."
+}

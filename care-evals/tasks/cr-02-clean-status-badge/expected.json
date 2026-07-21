@@ -1,0 +1,60 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-02-clean-status-badge",
+  "skill": "care-review",
+  "expected_outcome": "clean",
+  "pass": {
+    "require_clean_signal": true,
+    "max_false_positives": 0
+  },
+  "clean_signals": [
+    "nothing to change",
+    "no findings",
+    "no worth-deciding",
+    "nothing worth deciding",
+    "sound",
+    "mergeable",
+    "proportionate",
+    "looks good",
+    "straightforward",
+    "clean",
+    "no changes needed",
+    "intent is clear"
+  ],
+  "must_flag": [],
+  "must_not_flag": [
+    {
+      "id": "split-maps-overengineering",
+      "class": "overengineering",
+      "signals": [
+        "merge the two maps",
+        "combine the maps",
+        "single map",
+        "one record",
+        "collapse STATUS_LABEL",
+        "STATUS_TONE and STATUS_LABEL should",
+        "duplicate keys"
+      ]
+    },
+    {
+      "id": "cn-nit",
+      "class": "style",
+      "signals": [
+        "avoid cn",
+        "don't use cn",
+        "cn is unnecessary",
+        "classnames instead"
+      ]
+    },
+    {
+      "id": "invented-correctness",
+      "class": "correctness",
+      "signals": [
+        "missing default case",
+        "unhandled status",
+        "no fallback",
+        "exhaustiveness"
+      ]
+    }
+  ]
+}

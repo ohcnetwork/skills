@@ -69,6 +69,10 @@ export interface StartOptions {
    *  AND the test-grade gate (BS-2: test-grade blocks on a `Wrong` verdict, HARNESS-COVERAGE.md). Pass
    *  `["4a"]` for review-only, or add `"4c"` for the full pipe (reviewer + test-grade + ux). */
   buildCfg?: FsmConfig;
+  /** Build-stage RESUME: re-enter the build half-pipe at this step instead of a fresh run from "2"
+   *  (a crash after plan approval but before the PR was opened). The push → open-PR → CI tail then
+   *  runs exactly as a fresh start would. Undefined = normal fresh build. */
+  resumeFrom?: import("./state.js").Step;
   pollDeps?: { now?: () => number; sleep?: (ms: number) => Promise<void> };
   lockOpts?: { pid?: number; isAlive?: (pid: number) => boolean };
 }
@@ -97,6 +101,7 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
         spawn: o.spawn,
         helper: o.helper,
         finalize: false,
+        resumeFrom: o.resumeFrom,
         cfg: o.buildCfg ?? {
           reviewSteps: ["4a", "4b"],
           maxImplementRetries: 2,

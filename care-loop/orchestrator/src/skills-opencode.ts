@@ -11,6 +11,7 @@ import {
   promptStructured,
   promptAgenticThenStructured,
   forkedFanOut,
+  NO_EXPLORE_TOOLS,
   type SpawnCost,
 } from "./opencode-runner.js";
 import { runHelper } from "./shell.js";
@@ -163,6 +164,11 @@ export function opencodeReviewer(models: SkillModels = {}): Reviewer {
         runId: "review",
         round,
         timeoutMs,
+        // The reviewer reasons from the INLINE diff only (buildReviewerSystem forbids exploration).
+        // Enforce that as a capability, not just a prompt: with no read/grep/glob tools, the
+        // structured-output turn can't collapse into the non-converging serial-tool spiral that
+        // burned the full wall-clock (ENG-613 @240s, ENG-747 @360s) — it emits directly.
+        tools: NO_EXPLORE_TOOLS,
       });
     assertRightTier("care-reviewer", model, modelReported, modelPinSatisfied);
     return {
@@ -615,6 +621,12 @@ export function opencodeTriager(
           reduce: {
             model,
             schema: TRIAGE_SCHEMA,
+            // The reduce runs on the judgment tier and COLD vs the warm base prefix (reduce.model !=
+            // map.model), so a large diff + many file-clusters can push the synthesis past the fan-out
+            // default 90s cap — degrading to an un-deduped flatten. Give it dedicated headroom (still
+            // bounded by the run-scoped `timeoutMs`, which closes the server). Override via env.
+            timeoutMs:
+              Number(process.env.OC_TRIAGER_REDUCE_TIMEOUT_MS) || 180_000,
             prompt: (r) =>
               "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup " +
               "overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings " +

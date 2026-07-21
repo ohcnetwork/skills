@@ -138,6 +138,21 @@ test("missingBots: a present bot (status set) that hasn't posted is still waited
   );
 });
 
+test("missingBots: a bot with a RESOLVED status (success) that never posted is dropped past grace", () => {
+  const bots = [bot("a", "a[bot]"), bot("coderabbit", "coderabbitai[bot]")];
+  // coderabbit stamped a `success` status on a follow-up commit but posted no fresh review → it is
+  // DONE, not actively reviewing. Blocking on it would wait forever (the e07960f5 stall).
+  const c = checks(0, 0, 1, [{ context: "CodeRabbit", state: "success" }]);
+  assert.deepEqual(
+    missingBots(bots, [review("a[bot]", AFTER)], [], [], c, SINCE, true),
+    [],
+  ); // past grace → dropped, poll can converge
+  assert.deepEqual(
+    missingBots(bots, [review("a[bot]", AFTER)], [], [], c, SINCE, false),
+    ["coderabbit"],
+  ); // before grace → brief chance for a late review to land
+});
+
 test("evaluateRound reports the missing bots", () => {
   const bots = [bot("a", "a[bot]"), bot("b", "b[bot]")];
   const r = evaluateRound(

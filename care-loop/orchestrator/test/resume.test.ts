@@ -160,6 +160,65 @@ test("planResume: no PR opened yet → NOT resumable (CI-stage only), with a cle
   assert.equal(plan.pr, undefined);
 });
 
+test("planResume: a build-stage crash AFTER plan approval (no PR) IS resumable at the interrupted step", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "plan.approved",
+      step: "1",
+      round: 1,
+      data: {
+        classification: "standard",
+        ticket: "ENG-747",
+        summary: "Enhance patient age display",
+        state: { tier: "standard" },
+      },
+    });
+    j.append({ event: "step.enter", step: "2", round: 1 });
+    j.append({ event: "step.enter", step: "3", round: 1 });
+    j.append({ event: "step.enter", step: "4a", round: 1 }); // crashed mid-review (no step.exit)
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, true);
+  assert.equal(plan.mode, "build");
+  assert.equal(plan.resumeStep, "4a"); // last step entered but not exited
+  assert.equal(plan.ticket, "ENG-747"); // read from plan.approved
+  assert.equal(plan.summary, "Enhance patient age display");
+  assert.equal(plan.pr, undefined); // no CI-stage fields
+});
+
+test("planResume: a build-stage crash WITHOUT plan approval is NOT resumable (interview isn't re-entrant)", () => {
+  const j = journalWith((j) => {
+    j.append({ event: "step.enter", step: "1", round: 1 }); // died during the plan interview
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, false);
+  assert.equal(plan.mode, "build");
+  assert.match(plan.reason, /never approved|re-run from the start/);
+});
+
+test("planResume: an ABORTED build (terminal run.end, no PR) is NOT resumable", () => {
+  const j = journalWith((j) => {
+    j.append({
+      event: "plan.approved",
+      step: "1",
+      round: 1,
+      data: { classification: "standard", state: { tier: "standard" } },
+    });
+    j.append({ event: "step.enter", step: "3", round: 1 });
+    j.append({
+      event: "run.end",
+      data: {
+        outcome: "aborted",
+        reason_code: "implement_exhausted",
+        state: { step: "aborted" },
+      },
+    });
+  });
+  const plan = planResume(j.read().events);
+  assert.equal(plan.resumable, false);
+  assert.match(plan.reason, /ended before opening a PR/);
+});
+
 test("planResume: an already-ended run is NOT resumable (nothing to converge)", () => {
   const j = journalWith((j) => {
     j.append({

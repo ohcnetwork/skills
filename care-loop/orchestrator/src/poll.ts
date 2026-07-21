@@ -102,11 +102,14 @@ export function ciTerminal(
   return realPending === 0;
 }
 
-/** Which configured bots are we still legitimately waiting on? A bot is waited for ONLY if it has a
- *  PRESENCE (a matching commit-status context = it's actively reviewing) and hasn't posted yet. A bot
- *  with no presence is treated as not-participating and skipped ONCE the grace window elapses (so a
- *  bot that isn't installed / is down — e.g. codex on a repo without it — never blocks convergence).
- *  Before grace, a not-yet-seen bot is still waited for (it may just be slow to register). */
+/** Which configured bots are we still legitimately waiting on? A bot is waited for ONLY while it is
+ *  ACTIVELY reviewing — i.e. it has a matching commit-status that is still `pending`. A bot whose
+ *  status has already resolved (success/failure) is DONE: it will post no further review, so if it
+ *  hasn't produced a countable review/comment we must not block on it (that is a wait-forever bug —
+ *  e.g. CodeRabbit stamps a `success` status on a trivial follow-up commit without a fresh review).
+ *  A bot with no pending status is treated like the absent case: waited for only until the grace
+ *  window elapses (so a slow-to-register bot gets a brief chance), then skipped. Mirrors ciTerminal,
+ *  which likewise keys bot liveness on `state === "pending"`, not mere presence. */
 export function missingBots(
   bots: Bot[],
   reviews: PrReview[],
@@ -121,11 +124,11 @@ export function missingBots(
     .filter((b) => {
       if (botArrived(b, reviews, reviewComments, issueComments, sinceIso, sha))
         return false; // done
-      const present = (checks.statuses ?? []).some((s) =>
-        botMatchesContext(b, s.context),
+      const activelyReviewing = (checks.statuses ?? []).some(
+        (s) => botMatchesContext(b, s.context) && s.state === "pending",
       );
-      if (present) return true; // actively reviewing (status set) but hasn't posted yet → wait
-      return !graceElapsed; // absent: wait only until grace elapses, then treat as not-participating
+      if (activelyReviewing) return true; // status still pending → genuinely working → wait
+      return !graceElapsed; // done (terminal status) or absent → wait only until grace, then skip
     })
     .map((b) => b.name);
 }

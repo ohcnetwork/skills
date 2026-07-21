@@ -65,6 +65,12 @@ export interface HalfPipeOptions {
   cfg?: FsmConfig;
   /** Stop once this step completes successfully (half-pipe target). Default "5". */
   stopAfter?: Step;
+  /** Re-enter the pipeline at this build step instead of "2" — the crash-only build-stage RESUME path
+   *  (a run that died after plan approval but before opening a PR). The journal is already non-empty
+   *  (so run.start is NOT re-seeded), the worktree already exists (setup-worktree is idempotent), and
+   *  the interrupted step is re-run from its start (the maker/review steps are safe to repeat). The
+   *  implement/timeout budgets reset to a fresh allowance for the resumed leg. Default: fresh from "2". */
+  resumeFrom?: Step;
   /** When false, skip the run.end on success so a composing orchestrator can continue the same
    *  journal into later phases (CI rounds). Default true (standalone half-pipe finalizes). */
   finalize?: boolean;
@@ -77,6 +83,9 @@ export interface HalfPipeResult {
 }
 
 const MAX_STEPS = 50; // hard loop guard — an unbounded pipe is a bug, not a wait.
+
+/** Steps the build half-pipe drives — the only valid `resumeFrom` targets. */
+const BUILD_STEPS = new Set<Step>(["2", "3", "4a", "4b", "4c", "5"]);
 
 export async function runHalfPipe(o: HalfPipeOptions): Promise<HalfPipeResult> {
   const cfg = o.cfg ?? { reviewSteps: ["4a"], maxImplementRetries: 2 };
@@ -112,6 +121,20 @@ export async function runHalfPipe(o: HalfPipeOptions): Promise<HalfPipeResult> {
 
   let step: Step = "2";
   const round = 1;
+  // Build-stage resume re-enters at the interrupted step (default is a fresh run from "2").
+  if (o.resumeFrom) {
+    if (!BUILD_STEPS.has(o.resumeFrom))
+      throw new Error(
+        `resumeFrom must be a build step (2|3|4a|4b|4c|5); got ${o.resumeFrom}`,
+      );
+    step = o.resumeFrom;
+    j.append({
+      event: "run.resume",
+      step,
+      round,
+      data: { note: "build-stage resume", state: { step } },
+    });
+  }
   const visited: Step[] = [];
   let implementAttempt = 0; // genuine implement attempts (a broken change); NOT bumped by timeouts
   let timeoutRetries = 0; // maker wall-clock timeouts — their own budget

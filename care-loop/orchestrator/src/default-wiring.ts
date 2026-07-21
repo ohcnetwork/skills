@@ -4,7 +4,7 @@
 // line here (or by calling runStart with your own seam).
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OctokitGitHub } from "./github.js";
@@ -146,6 +146,18 @@ export function defaultSeams(cfg: WiringConfig): Seams {
       case "setup-worktree": {
         // 1) create the worktree off the base branch, 2) provision it (symlink node_modules /
         // generated sources / env) so the gate can actually run.
+        // IDEMPOTENT for a build-stage RESUME: a crashed pre-PR run left this worktree (and its
+        // branch) in place, so `git worktree add -b` would collide ("already exists"). When the
+        // checkout is already present, skip creation and only (re)provision — the maker's edits in it
+        // are exactly what we resume onto.
+        if (existsSync(worktree)) {
+          const prov = provision({ worktree, mainRepoPath: cfg.mainRepoPath });
+          return {
+            exit: prov.exit,
+            summary: `worktree exists (resume) · ${prov.summary}`,
+            logPath: log,
+          };
+        }
         const add = runHelper({
           cmd: "git",
           args: [

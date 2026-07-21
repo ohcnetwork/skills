@@ -65,6 +65,110 @@ test("happy path drives 2→3→4a→5 and completes", async () => {
   assert.match(log, /care-reviewer → pass/);
 });
 
+test("resumeFrom re-enters the build at the interrupted step (no setup/implement re-run), completing 4a→5", async () => {
+  const dir = runDir();
+  // Seed a journal as if plan + steps 2/3 already ran and the run crashed entering 4a.
+  const seedJ = new Journal(
+    join(dir, "journal.jsonl"),
+    "ohcnetwork-care_fe-scratch/phase3",
+  );
+  seedJ.append({
+    event: "run.start",
+    step: "1",
+    round: 1,
+    data: {
+      state: {
+        task: "half-pipe scratch run",
+        repo: "ohcnetwork/care_fe",
+        branch: "scratch/phase3",
+        worktree: "/tmp/wt-scratch",
+        tier: "standard",
+        pr: null,
+        round: 1,
+        step: "1",
+        head_sha: "scratch",
+        last_reviewed_sha: "",
+        updated_at: new Date().toISOString(),
+      },
+    },
+  });
+  seedJ.append({
+    event: "plan.approved",
+    step: "1",
+    round: 1,
+    data: { classification: "standard", state: { tier: "standard" } },
+  });
+
+  const visitedSetup: string[] = [];
+  const helper: HelperFn = ({ name, runDir: d }) => {
+    visitedSetup.push(name);
+    return {
+      exit: 0,
+      summary: `${name} PASS`,
+      logPath: join(d, `${name}.log`),
+    };
+  };
+  let implementCalls = 0;
+  const spawn: SpawnFn = async ({ role }) => {
+    if (role === "implementer") implementCalls++;
+    return {
+      terminal_state: "done",
+      verdict: role === "implementer" ? "implemented" : "pass",
+      reason_code: "ok",
+    };
+  };
+
+  const res = await runHalfPipe({
+    ...base(dir),
+    spawn,
+    helper,
+    resumeFrom: "4a",
+  });
+
+  assert.equal(res.outcome, "complete");
+  // Re-entered at 4a — setup-worktree and implement did NOT run again; only the review + gate did.
+  assert.deepEqual(res.visited, ["4a", "5"]);
+  assert.equal(implementCalls, 0);
+  assert.ok(!visitedSetup.includes("setup-worktree"));
+  // A run.resume event marks the re-entry.
+  const { events } = new Journal(join(dir, "journal.jsonl"), "x").read();
+  assert.ok(events.some((e) => e.event === "run.resume"));
+});
+
+test("resumeFrom rejects a non-build step", async () => {
+  const dir = runDir();
+  new Journal(join(dir, "journal.jsonl"), "x").append({
+    event: "run.start",
+    step: "1",
+    round: 1,
+    data: {
+      state: {
+        task: "t",
+        repo: "ohcnetwork/care_fe",
+        branch: "b",
+        worktree: "/tmp/wt",
+        tier: "standard",
+        pr: null,
+        round: 1,
+        step: "1",
+        head_sha: "scratch",
+        last_reviewed_sha: "",
+        updated_at: new Date().toISOString(),
+      },
+    },
+  });
+  await assert.rejects(
+    () =>
+      runHalfPipe({
+        ...base(dir),
+        spawn: okSpawn(),
+        helper: okHelper(),
+        resumeFrom: "6a" as never,
+      }),
+    /resumeFrom must be a build step/,
+  );
+});
+
 test("reviewer loopback re-enters implement: 2→3→4a→3→4a→5", async () => {
   const dir = runDir();
   let reviewCalls = 0;
@@ -100,7 +204,11 @@ test("test-grade gate (4b) loops back on 'wrong' and feeds findings to the re-im
   const spawn: SpawnFn = async ({ role, context }) => {
     if (role === "implementer") {
       implContexts.push(context);
-      return { terminal_state: "done", verdict: "implemented", reason_code: "ok" };
+      return {
+        terminal_state: "done",
+        verdict: "implemented",
+        reason_code: "ok",
+      };
     }
     if (role === "care-test-grader") {
       gradeCalls++;
@@ -109,7 +217,8 @@ test("test-grade gate (4b) loops back on 'wrong' and feeds findings to the re-im
             terminal_state: "done",
             verdict: "wrong",
             reason_code: "graded",
-            findingsDigest: "- [Wrong/Critical] AC3: spec asserts the wrong total (fix: assert net-of-discount)",
+            findingsDigest:
+              "- [Wrong/Critical] AC3: spec asserts the wrong total (fix: assert net-of-discount)",
           }
         : { terminal_state: "done", verdict: "pass", reason_code: "graded" };
     }

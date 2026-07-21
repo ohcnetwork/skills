@@ -23,7 +23,7 @@ import {
 import { runCiRounds, type CiRoundsConfig } from "./ci-round.js";
 import { runPlan, hasApprovedPlan } from "./plan.js";
 import { terminalFront, derivePaths } from "./front-terminal.js";
-import { probePr, planResume } from "./resume.js";
+import { probePr, planResume, type ResumePlan } from "./resume.js";
 import type { PlanInput } from "./plan-front.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
@@ -47,10 +47,13 @@ Usage:
        flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
-  care-loopd resume <run-dir>    Reconcile the PR (probePr: head · CI · bots-at-head) and RE-ENTER the
-       CI-round loop at the journal-head round against the existing PR — no re-push, no duplicate PR.
-       Resumes the CI stage only (a PR must be open); pass --main if the checkout isn't the default.
-       Runs the end-of-run self-improvement doctor when the loop terminates (--no-doctor to skip).
+  care-loopd resume <run-dir>    Resume a crashed run. If a PR is open, reconcile it (probePr: head ·
+       CI · bots-at-head) and RE-ENTER the CI-round loop at the journal-head round — no re-push, no
+       duplicate PR. If the crash was AFTER plan approval but BEFORE the PR was opened, re-enter the
+       BUILD pipeline at the interrupted step and drive through push → open-PR → CI (worktree reused,
+       review re-run read-only). Refuses a pre-plan crash (interview isn't re-entrant — re-run fresh).
+       flags: --main <care_fe path> · --ticket ENG-### / --summary <text> (only if the run predates
+              ticket persistence) · --max-rounds <n> · --no-doctor
 
 Advanced (the two phases of \`run\`, split for scripting/debugging):
   care-loopd plan  [flags]       Just the interactive plan stage — writes criteria.md / baseline.md /
@@ -124,6 +127,13 @@ async function cmdResume(
   if (!plan.resumable) {
     console.error(`  cannot resume: ${plan.reason}`);
     process.exit(2);
+  }
+
+  // A crash AFTER plan approval but BEFORE the PR was opened re-enters the BUILD pipeline (idempotent
+  // worktree + read-only review) and flows through push → open-PR → CI as a fresh start would.
+  if (plan.mode === "build") {
+    await resumeBuild(runDir, plan, flags);
+    return;
   }
 
   // Reconstruct the same real seams `start` uses (mainRepoPath from --main; worktree/repo/branch/task
@@ -255,6 +265,112 @@ async function cmdResume(
   );
 
   if (res.outcome !== "converged") process.exit(1);
+}
+
+/** Ticket derived from a branch slug like `eng-747-patient-age-format` → `ENG-747` (older runs predate
+ *  the plan.approved ticket/summary persistence — this is the last-resort fallback after the flag). */
+function ticketFromBranch(branch: string): string | undefined {
+  const m = branch.match(/^([A-Za-z]+)-(\d+)/);
+  return m ? `${m[1].toUpperCase()}-${m[2]}` : undefined;
+}
+
+/** A human-ish PR summary derived from the branch slug after the ticket prefix — used only when neither
+ *  the journal nor a --summary flag supplies one on a build-stage resume of an older run. */
+function summaryFromBranch(branch: string): string {
+  const words = branch
+    .replace(/^[A-Za-z]+-\d+-?/, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
+  if (!words) return branch;
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** Build-stage resume: re-enter the build pipeline at the interrupted step and drive it through push →
+ *  open-PR → CI, exactly as a fresh `start` would. ticket/summary come from the journal (persisted in
+ *  plan.approved) with --ticket/--summary and branch-derivation as fallbacks for runs that predate it. */
+async function resumeBuild(
+  runDir: string,
+  plan: ResumePlan,
+  flags: Record<string, string | true>,
+): Promise<void> {
+  const s = plan.state;
+  const { mainRepoPath } = derivePaths(s.branch, flags);
+  const base = typeof flags.base === "string" ? flags.base : "develop";
+  const buildLess = flags["build-less"] === true;
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+
+  const ticket =
+    plan.ticket ??
+    (typeof flags.ticket === "string" ? flags.ticket : undefined) ??
+    ticketFromBranch(s.branch);
+  if (!ticket || !/^ENG-\d+$/i.test(ticket)) {
+    console.error(
+      `  cannot resume: no ticket to reopen the PR with — pass --ticket ENG-### ` +
+        `(the plan stage of this run predates ticket persistence).`,
+    );
+    process.exit(2);
+  }
+  const summary =
+    plan.summary ??
+    (typeof flags.summary === "string" ? flags.summary : undefined) ??
+    summaryFromBranch(s.branch);
+
+  let prBody =
+    typeof flags.body === "string" ? flags.body : `## Changes\n\n${summary}`;
+  if (s.tier === "trivial") prBody += `\n\n_Tests skipped — trivial change._`;
+
+  const cfg: CiRoundsConfig = {};
+  if (typeof flags["max-rounds"] === "string")
+    cfg.maxRounds = Number(flags["max-rounds"]);
+  if (typeof flags["poll-timeout-ms"] === "string")
+    cfg.pollTimeoutMs = Number(flags["poll-timeout-ms"]);
+
+  const seams = defaultSeams({
+    repo: s.repo,
+    mainRepoPath,
+    worktree: s.worktree,
+    branch: s.branch,
+    base,
+    task: s.task,
+    runDir,
+    buildLess,
+    modelsFile,
+  });
+
+  console.log(
+    `\n── resuming build at step ${plan.resumeStep} (no PR yet; branch ${s.branch}) ${"─".repeat(12)}\n`,
+  );
+  console.log(`  PR title will be: [${ticket.toUpperCase()}] ${summary}\n`);
+
+  // runStart re-enters the build half-pipe at plan.resumeStep, then pushes + opens the PR + runs CI.
+  // It holds the run lock itself (stealing the crashed run's stale lock — its holder pid is dead).
+  const res = await runStart({
+    runDir,
+    worktree: s.worktree,
+    repo: s.repo,
+    branch: s.branch,
+    base,
+    task: s.task,
+    ticket: ticket.toUpperCase(),
+    summary,
+    prBody,
+    resumeFrom: plan.resumeStep,
+    cfg,
+    ...seams,
+  });
+  console.log(
+    `\ndone: phase=${res.phase}  outcome=${res.outcome}${res.pr ? `  pr=#${res.pr}` : ""}`,
+  );
+
+  await maybeRunDoctor(
+    runDir,
+    `${s.repo.replace("/", "-")}-${s.branch}`,
+    flags,
+  );
+
+  if (res.phase === "ci" && res.outcome !== "converged") process.exit(1);
+  if (res.phase !== "ci") process.exit(1);
 }
 
 async function cmdPlan(flags: Record<string, string | true>): Promise<void> {

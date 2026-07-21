@@ -203,6 +203,10 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           planned_by: draft.payload.plannedBy,
           classification: tier,
           push_authorized: true,
+          // ticket/summary are persisted here so a build-stage RESUME (a crash after approval but
+          // before the PR is opened) can reopen the PR from the journal alone — no re-supplied flags.
+          ticket: input.ticket,
+          summary: input.summary,
           state: { tier },
         },
       });

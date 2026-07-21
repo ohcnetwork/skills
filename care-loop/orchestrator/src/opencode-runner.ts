@@ -24,7 +24,28 @@ export interface SpawnSpec {
   runId: string;
   round: number;
   timeoutMs?: number; // per-spawn wall-clock cap override (default JUDGMENT_TIMEOUT_MS)
+  tools?: Record<string, boolean>; // per-spawn tool gate (default { task: false }). A structured-
+  // output spawn that also has exploration tools (read/grep/glob) collapses into non-converging
+  // serial single-tool turns under `format` (see promptStructured); an inline-only role passes
+  // NO_EXPLORE_TOOLS to make that impossible rather than only forbidding it in the prompt.
 }
+
+// Disable every exploration / side-effect tool for a spawn that must reason from its INLINE inputs
+// only (the reviewer). Structured emit needs no tools, so an empty toolset lets `format` emit directly
+// instead of fighting an agentic loop — the hard-capability version of the reviewer's "review the
+// inline diff only" prompt bound.
+export const NO_EXPLORE_TOOLS: Record<string, boolean> = {
+  task: false,
+  read: false,
+  grep: false,
+  glob: false,
+  list: false,
+  write: false,
+  edit: false,
+  bash: false,
+  patch: false,
+  webfetch: false,
+};
 
 /** Per-spawn usage/cost, extracted best-effort from opencode's message info (IMP-14 → rubric dim 3). */
 export interface SpawnCost {
@@ -354,6 +375,7 @@ export async function promptStructured(
     task: string;
     round: number;
     timeoutMs?: number;
+    tools?: Record<string, boolean>;
   },
   schema: object,
 ): Promise<{
@@ -374,6 +396,7 @@ async function promptStructuredImpl(
     task: string;
     round: number;
     timeoutMs?: number;
+    tools?: Record<string, boolean>;
   },
   schema: object,
 ): Promise<{
@@ -387,9 +410,11 @@ async function promptStructuredImpl(
   // loop) — pure latency the planner doesn't need (direct batched grep/glob/read is faster). Harmless for
   // the reviewer/triager, which don't spawn subagents anyway. Combined with the batch directive in the
   // planner prompt, this is the "explore in parallel like Claude Code" fix (no index, no accuracy loss).
+  // A caller may pass its own `spec.tools` to gate further — the reviewer passes NO_EXPLORE_TOOLS so a
+  // structured-output spawn can't enter the format+tools serial-tool death-spiral (see NO_EXPLORE_TOOLS).
   const oc = await startOpencodeOnFreePort({
     permission: JUDGMENT_PERMISSION,
-    tools: { task: false },
+    tools: spec.tools ?? { task: false },
   });
   const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
   try {
@@ -728,6 +753,9 @@ export interface ForkedFanOutSpec {
     model: string;
     schema: object;
     prompt: (results: FanOutMapResult[]) => string;
+    timeoutMs?: number; // hard cap for the reduce spawn (default 90_000); the reduce runs cold vs the
+    // warm base prefix when reduce.model differs from map.model, so a large diff + judgment-tier model
+    // can legitimately exceed 90s — give it headroom rather than degrade-and-flatten.
   };
   concurrency?: number; // fork cap (default 5)
   timeoutMs?: number; // run-scoped wall-clock deadline
@@ -936,7 +964,7 @@ export async function forkedFanOut(
             parts: [{ type: "text", text: spec.reduce.prompt(results) }],
             format: { type: "json_schema", schema: spec.reduce.schema },
           },
-          90_000,
+          spec.reduce.timeoutMs ?? 90_000,
         );
         reduce = {
           data: rinfo?.structured ?? rinfo?.structured_output,

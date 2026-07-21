@@ -322,6 +322,11 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
       activeBotTrack = false;
       j.append({ event: "step.enter", step, round });
       const fb = await collectFeedback(o.gh, { pr: o.pr, runDir: o.runDir });
+      // Archive the round's feedback snapshot. collectFeedback overwrites the canonical feedback.md
+      // (the triager reads it live and must see CURRENT thread state, not an accumulation) — so keep a
+      // round-suffixed copy for forensics, mirroring how skills/*-r{N} preserve per-round I/O. Without
+      // it only the final round's bot set survives on disk and the doctor can't diff round-over-round.
+      writeFileSync(join(o.runDir, `feedback-r${round}.md`), fb.markdown);
       j.append({
         event: "helper.exec",
         step,
@@ -349,10 +354,11 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
       if (t.items && t.items.length) {
         // Persist the verdict list: 6b applies from it, and the doctor mines it across runs for the
         // class × missed_by escape pattern (rubric dim 8).
-        writeFileSync(
-          join(o.runDir, "verdicts.md"),
-          renderVerdicts({ pr: o.pr, round, items: t.items }),
-        );
+        const verdictsMd = renderVerdicts({ pr: o.pr, round, items: t.items });
+        writeFileSync(join(o.runDir, "verdicts.md"), verdictsMd);
+        // Round-suffixed archive (see the feedback-r{N} note above): verdicts.md is overwritten each
+        // round because 6b applies from the CURRENT round only; the copy preserves per-round history.
+        writeFileSync(join(o.runDir, `verdicts-r${round}.md`), verdictsMd);
         j.append({
           event: "helper.exec",
           step,

@@ -22,11 +22,15 @@ const AFTER = "2026-07-13T10:05:00Z";
 const BEFORE = "2026-07-13T09:55:00Z";
 const bot = (name: string, ...aliases: string[]): Bot => ({ name, aliases });
 
-const review = (user: string, submittedAt: string): PrReview => ({
+const review = (
+  user: string,
+  submittedAt: string,
+  commitId = "",
+): PrReview => ({
   user,
   submittedAt,
   state: "COMMENTED",
-  commitId: "",
+  commitId,
 });
 const comment = (user: string, createdAt: string, body = ""): PrComment => ({
   user,
@@ -64,6 +68,17 @@ test("botArrived: a post-baseline review counts; a pre-baseline one does not", (
     botArrived(b, [review("greptile-apps[bot]", BEFORE)], [], [], SINCE),
     false,
   );
+});
+
+test("botArrived: a pre-baseline review against the polled head counts (late/hand-written push baseline)", () => {
+  const b = bot("coderabbit", "coderabbitai[bot]");
+  const head = "e80a869f66915176c31388b1d6d389c85872a992";
+  // Review submitted BEFORE the (wrong, too-late) baseline, but against the exact head SHA.
+  const r = review("coderabbitai[bot]", BEFORE, head);
+  assert.equal(botArrived(b, [r], [], [], SINCE, head), true);
+  // No sha / a different sha must not spuriously count it as arrived.
+  assert.equal(botArrived(b, [r], [], [], SINCE), false);
+  assert.equal(botArrived(b, [r], [], [], SINCE, "deadbeef"), false);
 });
 
 test("botArrived: SHA in an issue comment body counts (Greptile edits in place)", () => {

@@ -50,7 +50,10 @@ export interface PollResult {
   rounds: number;
 }
 
-/** One bot has arrived if ANY alias produced a post-baseline review/comment, or referenced the SHA. */
+/** One bot has arrived if ANY alias produced a post-baseline review/comment, or referenced the SHA.
+ *  A review whose `commitId` IS the polled head counts regardless of `submittedAt` — it is literally a
+ *  review of THIS commit, and is the one signal immune to a wrong baseline (e.g. a late/hand-written
+ *  `push` journal entry that sets `sinceIso` after the bot already reviewed the head). */
 export function botArrived(
   bot: Bot,
   reviews: PrReview[],
@@ -63,7 +66,11 @@ export function botArrived(
   const after = (iso: string) => iso !== "" && Date.parse(iso) > since;
   return bot.aliases.some(
     (a) =>
-      reviews.some((r) => r.user === a && after(r.submittedAt)) ||
+      reviews.some(
+        (r) =>
+          r.user === a &&
+          (after(r.submittedAt) || (!!sha && r.commitId === sha)),
+      ) ||
       reviewComments.some(
         (c) => c.user === a && (after(c.createdAt) || after(c.updatedAt)),
       ) ||

@@ -592,6 +592,27 @@ import { closeAnyOpenPopovers } from "tests/helper/ui";
 await closeAnyOpenPopovers(page);
 ```
 
+### Wait for a Closing Overlay Before Opening the Next
+
+Radix `Dialog`/`Sheet`/`Popover` stay mounted during their close animation. If you open a
+second overlay that shares controls with the first (e.g. an Add sheet and an Edit sheet that
+both render a "Service Date" picker), a shared locator matches **both** → strict-mode
+"resolved to 2 elements". Wait for the first to fully unmount before touching the next:
+
+```typescript
+// After saving in the "Add" sheet, wait for it to close before opening "Edit".
+await page.getByRole("button", { name: "Save" }).click();
+await expect(page.getByRole("button", { name: "Save" })).toBeHidden();
+
+await page.getByRole("button", { name: "Edit" }).click();
+
+// Now the edit sheet is the only dialog mounted, so this scopes unambiguously
+// (and avoids a hard-coded, locale-dependent dialog title).
+const editSheet = page.getByRole("dialog");
+await expect(editSheet).toBeVisible();
+await editSheet.getByRole("textbox", { name: "Notes" }).fill(notes);
+```
+
 ### File Upload & Camera
 
 ```typescript
@@ -924,8 +945,13 @@ component tests with no single route may live in a `facility/components/` dir.
    polling/websockets and never resolves on pages with background activity. Use it
    only as a documented last resort. (This is Critical Rule #10 in `SKILL.md`.)
 8. **Non-camelCase directory names** — see naming conventions above.
-
-# Available Constants
+9. **Overlapping Radix overlays during close animations** — Radix `Dialog`/`Sheet`/`Popover`
+   keep their content mounted while they animate closed. Opening a second overlay (or
+   clicking a control) right after closing the first makes a shared locator match **both**
+   → strict-mode "resolved to 2 elements". Assert a control unique to the closing overlay is
+   `toBeHidden()` before interacting with the next one. `getByRole("dialog")` is a good way
+   to drop a hard-coded (locale-dependent) title, but it is only unambiguous once exactly
+   one dialog is mounted — so wait for the previous one to unmount first.
 
 ```typescript
 import { BODY_SITES, KNOWN_USERNAMES } from "tests/helper/commonConstants";

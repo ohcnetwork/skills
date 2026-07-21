@@ -130,6 +130,13 @@ While reading, if the code plainly can't fulfill the intent it implies, flag it:
 error, or a regression in the **other usages** of a shared component/hook/util/route the diff
 touched (always check those). Only concrete, evidenced issues — no speculation.
 
+**Spec-boundary check (don't hedge a boundary you can derive).** When a change implements tiers,
+ranges, or thresholds and the criteria state exact boundary outputs, take each boundary value and
+trace it through the guard — confirm the branch that fires there produces the required output. A
+boundary that contradicts a stated criterion is a `Broken` correctness finding; you have the spec, so
+derive the answer rather than downgrading to "low risk, confirm the boundary." (Watch for a gate
+computed in one unit but displayed in another — the two can disagree only at the edge.)
+
 ### Refactor-safety mode
 
 If the diff is described as "just readability / renaming / nothing should change", the headline is

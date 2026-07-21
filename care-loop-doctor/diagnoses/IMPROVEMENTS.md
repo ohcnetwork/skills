@@ -281,3 +281,59 @@ applied edit (2026-07-14): the triage schema now returns `items[]` (each `{class
 reason, source}`); tallies are derived from it; `ci-round.ts` writes `<run-dir>/verdicts.md` via
 `renderVerdicts` (new `verdicts.ts`); `orchestrate.ts` threads `items` through `reduceTriage`; 6b's
 implementer now reads `verdicts.md` (the dangling read is fixed). Dim 8 promoted to exact.
+
+## IMP-16 · Reviewer hedges a spec-contradicting tier-boundary off-by-one instead of flagging it
+
+status: applied (2026-07-20)
+first-seen: 2026-07-20 · seen: 1 · dimension: 8 (escape attribution) / 13-behaviour
+evidence: 2026-07-20-care_fe-format-patient-age.md F1 — care-reviewer-r1 inspected the
+`totalDays >= 364` years+months branch but downgraded it to _"Low risk but confirm the … boundary is
+the product spec"_; Greptile/Copilot caught the off-by-one (triager-r1 `missed_by: care-reviewer`,
+severity high). The branch gated on a raw day count but displayed `years = diff('years')` (still 0 at
+364d) → rendered `0Y 11mo` where criteria required `1Y`. The reviewer HAD the acceptance criterion
+(`364d → 1Y`, criteria.md L8) and still hedged.
+applied edit: care-diff-review/SKILL.md "Secondary — correctness" (loaded `methodology name="default"`
+region) — added a **Spec-boundary check**: derive each stated boundary value and trace it through the
+actual guard; hunt the gate-unit-≠-displayed-unit trap and `>=`/floor off-by-ones; a boundary that
+contradicts a stated criterion is a `Broken` correctness finding, never "low risk, confirm the spec."
+fixture: care-evals/tasks/cr-07-age-tier-boundary — **verbatim MRE** of this escape (committed;
+`must_flag: age-tier-boundary-offbyone`). First-observation escape with a committed verbatim guard.
+NOTE: this run's evals.log is 0/13 (opencode serve unreachable) — the skill edit is **unverified
+in-run**; the orchestrator should draft the PR until the cr-07 delta can be measured against a
+reachable `opencode serve`.
+
+## IMP-17 · Triager routes cosmetic comment/whitespace nits to `address` → rounds of churn
+
+status: applied (2026-07-21)
+first-seen: 2026-07-21 · seen: 1 · dimension: 4 (pipeline / convergence waste) / 6 (bot-round)
+evidence: 2026-07-20-care_fe-format-patient-age.md — the same run's rounds 3–9. The only real logic
+fix (`totalDays >= 364` → `years >= 1`, IMP-16) landed in round 1; **every round after was cosmetic**
+yet the loop ran to round 9. Per the triager sidecars: the "Above 16 years" comment (Copilot thread
+3602360177) was verdicted `address` and reworded in rounds 4/6/7/8 — the round-8 rationale literally
+reads _"Equivalent for integers but the comment should mirror the code"_ (cosmetically equivalent,
+addressed anyway). A second thrash: Copilot ("remove the space `" Y"`→`"Y"`") vs CodeRabbit ("add the
+space") gave **contradictory** advice on the year suffix; the triager addressed both across rounds
+4→5→6/7 (add-space then remove-space then ternary) instead of picking one and declining the other.
+Cost: cumulative `usd_est` `$0.28` after round 2 → `$1.90` at round 9 (~85% of spend on rounds that
+moved no behavior); the loop even blew `max_rounds=6` (`budget.stop` seq 206) and was manually
+resumed. Attribution: `missed_by: triager` — the reviewer may surface Polish, but 6a triage is the
+gate that must decline it.
+applied edit: care-triager/SKILL.md (loaded `methodology name="default"` region, after the severity
+table) — two rules: (1) **comment-and-whitespace nits are Polish → `decline`, never a loop-back**,
+with a **recurrence guard** (same file:line/thread already touched for a wording nit in a prior round
+→ `decline: comment already reworded round N — bikeshedding`); `address` a comment only when it is
+actively wrong about behavior. (2) **contradictory or resolved threads — pick once, then hold**:
+opposing bot advice on one line → address at most once (the side matching criteria/decisions), decline
+the other (`resolved by thread N`); a `[resolved]`/withdrawn thread is never re-opened; if addressing X
+would re-trigger a resolved thread, that IS the churn signal — stop.
+fixture: care-evals/tasks/tr-04-age-comment-churn — **verbatim** from the round-8 triager sidecar
+(`care-triager-r8.result.json` + real `ccc4b25` code, relocated intact into a standalone file for a
+self-contained new-file patch). Ground truth: a converged round is **all-decline** (`address=0` →
+loop exits at Step 7). Graded verdicts are **F1** (comment-churn/recurrence rule) and **F6**
+(verify-before-accept), both `decline`, both critical; F2–F5 are `[resolved]`-thread distractors left
+ungraded because the skill calls resolved threads "skippable" (an exact-token `decline` would
+contradict it — `skip`/`decline` both keep `addressCount` at 0). **VERIFIED live 2026-07-21** on
+`opencode/deepseek-v4-flash-free` (free, $0): PASS score 1.0 — the triager declined F1 quoting the new
+rule ("already chased across rounds 4/6/7"), declined F6, emitted no `address` item, and routed
+straight to the Step 7 exit. Opus-tier before/after delta not run (the production triager tier); the
+free-rung after-state is a positive control that the edited skill is exercised.

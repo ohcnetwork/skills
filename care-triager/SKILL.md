@@ -88,6 +88,27 @@ a human:**
 | 🧹 Nitpick                  | `low`      |
 | Copilot, Greptile, untagged | `none`     |
 
+**Comment-and-whitespace nits are Polish — `decline`, don't loop back.** A finding whose only fix
+is rewording a code comment, nudging a string's internal spacing (`"Y"` vs `" Y"`), or an equivalent
+legibility rephrasing is **Polish**: `decline` it (reason: `polish — not a loop-back`), even when the
+fix is trivially correct. `address` a comment **only** when it is actively wrong about behavior (says
+"release" but does "reserve") and would mislead a future editor — a comment that is merely imprecise,
+or "equivalent but should mirror the code," is a decline, not an address. **Recurrence guard:** if the
+same `file:line` (or bot thread) was already touched for a comment/whitespace nit in a prior round
+(check `addressed.md` / `declined.md`), any further wording nit on it is `decline`
+(reason: `comment already reworded round N — bikeshedding`). Bots will re-nitpick a comment they
+themselves just prompted you to change; each such round is a wasted build/CI/review cycle that moves
+no behavior. Do not chase the wording in circles.
+
+**Contradictory or resolved threads — pick once, then hold.** When two bot threads give **opposing**
+advice on the same line (e.g. "add the space" vs "remove the space"), do not oscillate: pick the side
+that matches `criteria.md` / `decisions.md`, `address` it **at most once**, and `decline` the other
+thread with the reason (`contradicts thread N — spec says <X>`). Once a line has been changed to
+satisfy one side, a later opposing nit on it is `decline` (reason: `resolved by thread N`), never a
+fresh `address`. A `[resolved]` or bot-withdrawn thread is never re-opened. If addressing finding X
+would re-trigger a thread you already resolved, that is the signal you are in a churn loop — stop and
+decline.
+
 **Scope Governor check:** compare the current diff against `baseline.md`; if it's past the ~2×
 tripwire without approval, **decline** the accreting items (reason: `scope governor — past 2× tripwire`)
 rather than adding more `address` items — keep the round in-scope instead of stopping the run.

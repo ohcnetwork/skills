@@ -1,0 +1,79 @@
+diff --git a/src/Utils/formatPatientAge.ts b/src/Utils/formatPatientAge.ts
+new file mode 100644
+index 0000000..b4d5e6f
+--- /dev/null
++++ b/src/Utils/formatPatientAge.ts
+@@ -0,0 +1,73 @@
++import dayjs from "dayjs";
++import { PatientModel } from "@/types/emr/patient";
++
++const getRelativeDateSuffix = (abbreviated: boolean) => {
++  return {
++    day: abbreviated ? "d" : " days",
++    week: abbreviated ? "wk" : " weeks",
++    month: abbreviated ? "mo" : " months",
++    year: abbreviated ? "Y" : " years",
++  };
++};
++
++// Enhanced patient-age formatter (tiered). See criteria.md.
++export const formatPatientAge = (obj: PatientModel, abbreviated = false) => {
++  const suffixes = getRelativeDateSuffix(abbreviated);
++  const start = dayjs(
++    obj.date_of_birth
++      ? new Date(obj.date_of_birth)
++      : new Date(obj.year_of_birth!, 0, 1),
++  );
++
++  const end =
++    "deceased_datetime" in obj && obj.deceased_datetime
++      ? dayjs(new Date(obj.deceased_datetime))
++      : dayjs(new Date());
++
++  const totalDays = end.diff(start, "day");
++
++  // On or after the 17th birthday (diff('years') >= 17): years only
++  const years = end.diff(start, "years");
++  if (years > 16) {
++    return abbreviated
++      ? `${years} ${suffixes.year}`
++      : `${years}${suffixes.year}`;
++  }
++
++  // Skip representing as no. of months/days if we don't know the date of birth
++  // since it would anyways be inaccurate.
++  if (!obj.date_of_birth) {
++    return abbreviated
++      ? `Born ${obj.year_of_birth}`
++      : `Born on ${obj.year_of_birth}`;
++  }
++
++  // 12 months to 16 years: years and months (suppress 0 months)
++  // Gated on calendar-aware diff('years') >= 1 (i.e. on or after the first birthday)
++  if (years >= 1) {
++    const months = end.diff(start, "month");
++    const leftoverMonths = months % 12;
++    if (leftoverMonths === 0) {
++      return `${years}${suffixes.year}`;
++    }
++    return `${years}${suffixes.year} ${leftoverMonths}${suffixes.month}`;
++  }
++
++  // 15 weeks to 11 months 29 days: months and days (include 0 days)
++  // 15 weeks = 105 days
++  if (totalDays >= 105) {
++    const months = end.diff(start, "month");
++    const day = end.diff(start.add(months, "month"), "day");
++    return `${months}${suffixes.month} ${day}${suffixes.day}`;
++  }
++
++  // 29 days to 14 weeks: weeks and leftover days (include 0 days)
++  if (totalDays >= 29) {
++    const weeks = Math.floor(totalDays / 7);
++    const day = totalDays % 7;
++    return `${weeks}${suffixes.week} ${day}${suffixes.day}`;
++  }
++
++  // 0 to 28 days: days only
++  return `${totalDays}${suffixes.day}`;
++};

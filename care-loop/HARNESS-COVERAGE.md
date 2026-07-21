@@ -45,7 +45,7 @@ control is inert / remote-only / after-the-fact).
 | 10 | Illegal step order / skipped gate | dim 4 | FSM throws `FsmError` on illegal transitions; `push` requires a preceding `gate-*` exit-0 | Computational | every transition | 🟢 |
 | 11 | Skill returns schema-invalid output | dim 5 | `JOBRESULT_SCHEMA` validation → `spawn.invalid` + retry | Computational | every spawn | 🟢 |
 | 12 | Bot rounds never converge / cap out | dim 6 | `ci.wait`/`ci.done`, `budget.stop{max_rounds}`, `checkpoint.written` | Computational | Step 6 | 🟢 |
-| 13 | **Behaviour: change doesn't do the right thing** | dim 8, care-review | `care-review` lenses + `care-test-grade` **hard gate (4b on by default; `Wrong`→loopback, findings fed back to re-implement)** + escape attribution (bots, after merge) | Inferential (feedback) | Step 4 / 4b / post-push | 🟡 **weakest domain, now gated** (BS-2 closed 2026-07-17) |
+| 13 | **Behaviour: change doesn't do the right thing** | dim 8, care-review | `care-review` lenses (+ **spec-boundary check**, IMP-16 2026-07-20) + `care-test-grade` **hard gate (4b on by default; `Wrong`→loopback, findings fed back to re-implement)** + escape attribution (bots, after merge) | Inferential (feedback) | Step 4 / 4b / post-push | 🟡 **weakest domain, now gated** (BS-2 closed 2026-07-17; reviewer lens sharpened IMP-16) |
 | 14 | Escape: a bot caught what our lens missed | dim 8, IMP-15 | `care-triager` → `verdicts.md`; doctor aggregates `class × missed_by` | Inferential (feedback) | Step 6, post-hoc | 🟡 (probabilistic; the steering signal, not prevention) |
 | 15 | e2e criteria assert data the fixture can't produce | IMP-10 | **plan-time:** care-planner fixture-realizability rule (feedforward); **backstop:** care-test-grade `Weak` on the un-faithful assert | Inferential (feedforward + feedback) | Step 1 / Step 4b | 🟡 (BS-3 addressed 2026-07-17) |
 | 16 | PR title fails the `[ENG-###]` Jira check | IMP-12 | local assertion in `orchestrate.ts` `start()` — regex-guards the title and throws **before** `createPr` ([orchestrate.ts:141]) | Computational (local) | before PR open | 🟢 (BS-4 already closed) |
@@ -191,3 +191,11 @@ actionable red blind spots remain.** Read as: the **maintainability + process** 
 regulated and computational; the **behaviour** domain now has real gating back-pressure (still
 inferential underneath — the deliberate weak point); **architecture fitness** is unregulated by
 choice, not oversight.
+
+**2026-07-20 maintenance (care_fe-format-patient-age run).** Row-14 escape mining fired as designed:
+`care-triager` attributed a real off-by-one to `missed_by: care-reviewer` (severity high), the doctor
+converted it to a **verbatim** committed fixture (`care-evals/tasks/cr-07-age-tier-boundary`), and
+sharpened the reviewer lens (IMP-16 — row 13 "Regulated by" now names a spec-boundary check). Status
+counts unchanged (no row flipped color — an inferential-lens improvement stays 🟡). Caveat: the
+in-run eval verify was **inconclusive** (evals.log 0/13, `opencode serve` unreachable), so the IMP-16
+edit is committed-but-unverified until the cr-07 delta can be measured against a reachable server.

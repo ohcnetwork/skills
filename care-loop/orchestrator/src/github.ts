@@ -17,6 +17,7 @@ import { Octokit } from "octokit";
 import { config as loadDotenv } from "dotenv";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getFailingSpecs as readFailingSpecs } from "./ci-artifact.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // care-loop/orchestrator/src
 // Load the orchestrator env first, then the repo-root skills/.env as a fallback (dotenv never
@@ -115,6 +116,14 @@ export interface GitHubApi {
   getCheckFailureContext(
     ref: string,
   ): Promise<import("./skill-result.js").CiFailure[]>;
+  /** The specs that genuinely failed on `ref`, read from Playwright's JSON artifact (not check
+   *  annotations — care_fe emits no `github` reporter, so annotations are shard-level noise). Tells
+   *  the CI-fix track WHICH specs drifted so the fixer can update them; e2e verification is on cloud
+   *  CI (the loop no longer runs specs locally). `shardOnlyFailure` = red CI with no real
+   *  spec failure (infra/shard death) → re-trigger, don't fix. Best-effort (never throws). */
+  getFailingSpecs(
+    ref: string,
+  ): Promise<import("./ci-artifact.js").FailingSpecs>;
 }
 
 export function resolveToken(explicit?: string): string {
@@ -426,6 +435,14 @@ export class OctokitGitHub implements GitHubApi {
     } catch {
       return [];
     }
+  }
+
+  async getFailingSpecs(ref: string) {
+    // Delegates to the artifact reader (gh run download + Playwright-JSON parse). Its own best-effort
+    // guard turns any failure into { specPaths: [], shardOnlyFailure: true }, so this never throws.
+    // Pass the pinned repo slug: the orchestrator process never chdir's to the worktree, so the gh
+    // CLI calls need an explicit --repo or they resolve the wrong repo from process.cwd().
+    return readFailingSpecs(ref, `${this.repo.owner}/${this.repo.name}`);
   }
 
   /** Failing Actions job logs at `ref`, keyed by job name, with only the failure detail extracted

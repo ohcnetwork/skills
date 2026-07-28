@@ -1039,6 +1039,7 @@ export function opencodeCiFixer(
     runDir,
     round,
     findings: gateFindingsOverride,
+    failingSpecs,
   }) => {
     const startedAt = new Date().toISOString();
     const methodology = ciFixerMethodology();
@@ -1107,8 +1108,22 @@ export function opencodeCiFixer(
         ? `\n\n=== CARE PLAYWRIGHT MECHANICS (a failing check is an e2e/Playwright spec — follow these conventions for any spec edit; do NOT author new tests) ===\n${pwMechanics}\n=== END PLAYWRIGHT MECHANICS ===`
         : "";
 
+    // CI's authoritative failing-spec set (from the Playwright artifact, not the shard-noise
+    // annotations). The fix must make ALL of these green — a single changed value referenced as a
+    // locator / accessible name across several of them must be updated in every one.
+    const specsBlock =
+      failingSpecs && failingSpecs.length
+        ? `\n\n=== CI-REPORTED FAILING SPECS (make ALL of these pass) ===\n` +
+          `If one value your change altered is referenced as a locator / accessible name / label across several of these specs, update it in EVERY one — do not stop at the first:\n` +
+          `${failingSpecs.map((s) => `- ${s}`).join("\n")}\n=== END FAILING SPECS ===`
+        : "";
+
     const prompt =
-      IMPLEMENTER_PREAMBLE + body + methodologyBlock + playwrightBlock;
+      IMPLEMENTER_PREAMBLE +
+      body +
+      specsBlock +
+      methodologyBlock +
+      playwrightBlock;
 
     const r = runHelper({
       cmd: "opencode",
@@ -1122,7 +1137,11 @@ export function opencodeCiFixer(
       ],
       env: { ...process.env, OPENCODE_PERMISSION: IMPLEMENTER_PERMISSION },
       logPath: join(runDir, "agents", `ci-fixer-r${round}.log`),
-      timeoutMs: 300_000,
+      // The ci-fixer reads more than a bot maker (diff + criteria + decisions + playwright mechanics
+      // + failure logs) AND may edit a single locator/label across several specs, so 300s (the bot
+      // maker's budget) is too tight — a multi-file locator-drift fix hit exit 124 mid-run and its
+      // completed edits were discarded. Default 10m; override via env for slower models.
+      timeoutMs: Number(process.env.OC_CI_FIXER_TIMEOUT_MS) || 600_000,
     });
 
     const after = worktree ? git(worktree, "rev-parse", "HEAD").out.trim() : "";
@@ -1159,7 +1178,7 @@ export function opencodeCiFixer(
           : outcome === "noop"
             ? "ci_fix_no_change"
             : `ci_fix_exit_${r.exit}`,
-      payload: { outcome, filesChanged },
+      payload: { outcome, filesChanged, timedOut: r.exit === 124 },
       modelUsed: model,
       startedAt,
       endedAt: new Date().toISOString(),

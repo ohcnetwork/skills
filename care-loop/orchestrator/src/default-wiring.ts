@@ -245,25 +245,9 @@ export function defaultSeams(cfg: WiringConfig): Seams {
     return { exit: r.exit, summary: r.summary, headSha: headSha(worktree) };
   };
 
-  const gate: GateFn = ({ runDir, specPaths }) => {
-    if (specPaths?.length) {
-      return runHelper({
-        cmd: RUN_GATE,
-        args: [
-          ...buildArgs,
-          "-s",
-          specPaths.join(" "),
-          "-d",
-          join(runDir, "gate"),
-        ],
-        cwd: cfg.worktree,
-        logPath: join(runDir, "gate", "gate-round.log"),
-        summaryMatch: /ALL PASSED|FAIL/,
-        timeoutMs: GATE_TIMEOUT,
-      });
-    }
-    return gateOf(runDir, cfg.worktree, "gate-round");
-  };
+  // Static gate only (tsc/lint/build/vitest). Playwright specs are verified by CI, not locally
+  // (PLAN-remove-local-e2e), so the gate never takes spec paths.
+  const gate: GateFn = ({ runDir }) => gateOf(runDir, cfg.worktree, "gate-round");
   const pushRound: PushFn = ({ round, runDir }) => {
     const log = join(runDir, "gate", "push-round.log");
     // The edit-only 6b implementer leaves its changes UNSTAGED (it owns no version control), so the

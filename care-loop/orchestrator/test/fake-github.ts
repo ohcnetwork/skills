@@ -37,6 +37,7 @@ export function makeFakeGitHub(o: Partial<GitHubApi> = {}): GitHubApi {
       { name: string; summary?: string }[]
     > => [],
     getCheckFailureContext: async () => [],
+    getFailingSpecs: async () => ({ specPaths: [], shardOnlyFailure: false }),
     ...o,
   };
 }

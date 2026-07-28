@@ -1,7 +1,7 @@
 // lock.ts — the per-run orchestrator lock (PLAN-orchestrator-architecture §1). Guarantees exactly
 // ONE writer of a run's journal: a double `start`/`resume` on the same run dir can't corrupt it.
-// Atomic `mkdir` is the mutex (same technique as pw-lock.sh); the holder's pid is recorded so a
-// STALE lock (holder process dead) is safely stolen, while a live holder is refused.
+// Atomic `mkdir` is the mutex; the holder's pid is recorded so a STALE lock (holder process dead)
+// is safely stolen, while a live holder is refused.
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

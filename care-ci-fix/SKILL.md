@@ -22,6 +22,15 @@ criteria confirm the new behaviour is correct.
 **Action:** update the **spec file** to assert the new expected value. Change ONLY the assertion(s)
 that fail — do not rewrite surrounding test structure, add new tests, or refactor the spec.
 
+**Locator / label drift (multi-file).** When the value your change altered is used not just in an
+assertion but as a **locator or accessible name** — `getByRole(..., { name: /…/ })`, `getByText`, a
+label/aria regex, a `waitForURL` fragment — a single output change can break that locator in *several*
+specs at once (often as a navigation `.click()` that then times out, not an obvious assertion). When
+CI reports multiple failing specs that all key off the same changed value, update that **one value in
+every spec that references it** — a mechanical find-replace of the old token for the new. This is the
+one case where you may touch more than two files (see §3): the edit is still a single-value swap, never
+a change to test logic or structure. Use the CI-reported failing-spec list to find every consumer.
+
 ### B. Code is wrong
 The test is correct — the change actually broke intended behaviour. The assertion failure reveals a
 real bug in the source code.
@@ -58,8 +67,11 @@ making a spurious edit.
 - **Plan authority**: if updating the test would contradict the acceptance criteria or decisions
   (the plan says the value SHOULD be X but the test expects X and the code produces Y), do NOT
   change the test — the code is wrong (category B). If you cannot reconcile, return `handoff`.
-- **One or two files max.** If the fix requires touching more than two files, return `handoff` —
-  the failure is too complex for a bounded automated fix.
+- **One or two files max — with ONE exception.** If the fix requires touching more than two files,
+  return `handoff` — the failure is too complex for a bounded automated fix. The **only** exception is
+  locator/label drift (§1.A): a single changed value referenced across N specs may be updated in all N,
+  because each edit is the same mechanical token swap, not independent logic. Divergent fixes across
+  multiple files are still a `handoff`.
 
 ## 4. Output contract
 

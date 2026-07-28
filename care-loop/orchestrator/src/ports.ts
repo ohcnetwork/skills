@@ -153,6 +153,10 @@ export interface CiFixInput {
   runDir: string;
   round: number;
   findings?: string; // gate-error feedback on a re-apply (MED-B gate loopback)
+  // CI's authoritative failing-spec paths (read from the Playwright artifact, not check annotations).
+  // The fixer must make ALL of these green — when one changed value drives locators across several of
+  // them, update it in every one. Empty/absent in the batched path and fake-driven tests.
+  failingSpecs?: string[];
 }
 export type CiFixer = (input: CiFixInput) => Promise<SkillResult<CiFixPayload>>;
 

@@ -15,7 +15,7 @@ import { transition, type FsmConfig } from "./fsm.js";
 import { renderLoopLog } from "./render.js";
 import { collectFeedback } from "./feedback.js";
 import { renderVerdicts } from "./verdicts.js";
-import type { TriageItem, CiFailure } from "./skill-result.js";
+import type { TriageItem, CiFailure, CiFixPayload } from "./skill-result.js";
 import { pollPr, type Bot } from "./poll.js";
 import type { CiConclusion, GitHubApi } from "./github.js";
 
@@ -47,7 +47,13 @@ export type CiFixFn = (input: {
   runDir: string;
   ciFailures: CiFailure[];
   findings?: string;
-}) => Promise<{ outcome: "fixed" | "handoff" | "noop"; filesChanged?: string[] }>;
+  failingSpecs?: string[]; // CI's authoritative failing-spec list (Playwright artifact) — the whole
+  // red set the fixer must clear; also seeds the step-5 full-set re-gate.
+}) => Promise<{
+  outcome: "fixed" | "handoff" | "noop";
+  filesChanged?: string[];
+  timedOut?: boolean; // hit the wall-clock cap — a dirty spec-only timeout is salvaged, not discarded
+}>;
 
 /** Step-7 reply/resolve seam: post verdict replies into the triaged bot threads and resolve the ones
  *  policy says to. Optional — fake-driven tests and the no-reply legacy path leave it unset. Returns
@@ -69,12 +75,10 @@ export type TestGradeFn = (input: {
   runDir: string;
 }) => Promise<{ blocking: boolean; summary?: string }>;
 
-/** Step-5 helpers for a re-round: re-gate (+commit) and push; push reports the new head SHA. */
-export type GateFn = (input: {
-  round: number;
-  runDir: string;
-  specPaths?: string[];
-}) => {
+/** Step-5 helpers for a re-round: re-gate (+commit) and push; push reports the new head SHA.
+ *  The gate is static-only (tsc/lint/build/vitest) — Playwright specs are verified by CI, not
+ *  locally (see PLAN-remove-local-e2e). */
+export type GateFn = (input: { round: number; runDir: string }) => {
   exit: number;
   summary: string;
 };
@@ -118,8 +122,13 @@ export interface CiRoundsOptions {
 // `gate-blocked` — local gate (tsc/lint/build) failed after exhausting retries.
 // `deferred`   — external stuck state the loop provably cannot resolve:
 //   (a) poll_timeout: CI/bots never reached head within the budget;
-//   (b) ci_red_human: bots are clean but CI is still red and no CiFixer could fix it
-//       (default = human-handoff). Human or `resume` picks it up.
+//   (b) ci_red_human: CI is still red and the CiFixer couldn't fix it AND nothing is pending to push
+//       (default = human-handoff). NOTE: in a batched round a ci-fix noop/handoff does NOT hand off —
+//       a pending bot-fix is pushed first (re-triggering CI), and the handoff only fires a later
+//       round once bots are clean and nothing is pending. Human or `resume` picks it up.
+//   (c) ci_shard_infra: standalone residual round where CI is red but the Playwright artifact reports
+//       ZERO genuine failed specs (shard/infra death). Nothing actionable for the fixer and nothing
+//       pending to re-trigger with → defer. (An empty-commit re-trigger is a deferred enhancement.)
 export type CiOutcome = "converged" | "capped" | "deferred" | "gate-blocked";
 export interface CiRoundsResult {
   outcome: CiOutcome;
@@ -249,10 +258,15 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
   let gateAttempt = 0;
   // Gate-error findings to feed back to the re-apply on a gate-loopback.
   let gateFindingsForReapply: string | undefined;
-  // Spec paths from the CI-fixer's changed files — passed to the gate via `-s` so affected e2e
-  // specs run locally, closing the "local passes, CI fails" gap for files the fixer just touched.
-  // TS can't track this across loop iterations (assigned in 6b, read in 5), so reads use `as`.
-  let ciFixSpecPaths: string[] | undefined;
+  // ── Batched-round state (bot-fix + CI-fix in ONE round, single push). ──
+  // batchedRound: this round has BOTH bot comments to address AND red CI, so after the bot-fix we run
+  //   the CI-fix track before the single step-5 push (instead of pushing bots-only and burning a
+  //   separate CI-fix round). Set in 6a, reset each 6a + step-5.
+  // pendingBotFix: a real bot-track edit is in the tree, not yet pushed. The CI-fix track's terminal
+  //   branches read it: a noop/handoff must still PUSH the pending bot-fix (and let CI re-trigger)
+  //   rather than stranding it via an immediate human-handoff (only correct when nothing is pending).
+  let batchedRound = false;
+  let pendingBotFix = false;
 
   const GUARD = cfg.maxRounds * 6 + 6;
   for (let i = 0; i < GUARD; i++) {
@@ -320,6 +334,8 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
       // Reset the active-track flag here (a fresh 6a starts a new prioritized-serial decision).
       // NOT at step-5 entry — the gate-loopback inside step-5 still needs the current round's track.
       activeBotTrack = false;
+      batchedRound = false;
+      pendingBotFix = false;
       j.append({ event: "step.enter", step, round });
       const fb = await collectFeedback(o.gh, { pr: o.pr, runDir: o.runDir });
       // Archive the round's feedback snapshot. collectFeedback overwrites the canonical feedback.md
@@ -400,10 +416,12 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         }
       }
 
-      // ── Prioritized-serial resolve decision ──────────────────────────────────────────────────
-      // ONE track per round: bot-comment track has PRIORITY; CI-fix is the residual.
-      // Rationale: bot fixes often clear CI as a side effect — run bots first so the next
-      // round's re-check can confirm CI without burning a separate CI-fix round.
+      // ── Resolve decision ───────────────────────────────────────────────────────────────────────
+      // Bot-comment track has PRIORITY. When CI is ALSO red, this is a BATCHED round: the bot-fix
+      // runs first, then (unless it already cleared CI — checked by a local mid-run) the CI-fix track
+      // runs too, and BOTH ride out on a single step-5 push. Bots-first within the round preserves the
+      // "a bot fix often clears CI" bet without burning a separate CI-fix round. When bots are clean
+      // and only CI is red, the CI-fix track runs standalone (no pending bot-fix).
       const botAddress = t.addressCount > 0;
       const ciRed = lastCi === "fail";
 
@@ -428,10 +446,12 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
 
       if (botAddress) {
         // ── Bot-comment track (priority) ──
-        // Stash verdicts; 6b will apply them. CI-fix (if still needed) runs next round once we
-        // know whether the bot fix also cleared CI.
+        // Stash verdicts; 6b applies them. If CI is ALSO red this is a batched round: 6b chains the
+        // CI-fix track after the bot-fix (the fixer re-verifies against the bot-fixed tree and no-ops
+        // if already clear) so both push together.
         pendingItems = t.items;
         activeBotTrack = true;
+        batchedRound = ciRed;
         const tr = transition("6a", "advance", { cfg: FSM });
         j.append({
           event: "step.exit",
@@ -489,7 +509,22 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
 
         if (a.terminalState === "noop") {
           // Maker ran clean but produced no diff: the flagged items are already fixed.
-          // This is NOT a failure — don't burn a retry. Re-check CI status to decide terminal.
+          // This is NOT a failure — don't burn a retry.
+          if (batchedRound) {
+            // Bot items already fixed but CI is still red → fall through to the CI-fix track. No bot
+            // edit was produced, so nothing is pending to push (pendingBotFix stays false); the
+            // CI-fix track behaves as the standalone residual. pendingItems carried for the reply.
+            activeBotTrack = false;
+            j.append({
+              event: "step.exit",
+              step,
+              round,
+              data: { reason_code: "bot_noop_to_cifix" },
+            });
+            projectAndWrite(o.runDir, j.read().events);
+            continue;
+          }
+          // Re-check CI status to decide terminal.
           j.append({
             event: "step.exit",
             step,
@@ -519,6 +554,20 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         }
 
         if (a.terminalState === "done") {
+          if (batchedRound) {
+            // Batched round: the bot-fix is in the tree — DON'T push yet. Switch to the CI-fix track
+            // (same 6b step), which runs the mid-run first and pushes both fixes together at step 5.
+            pendingBotFix = true;
+            activeBotTrack = false;
+            j.append({
+              event: "step.exit",
+              step,
+              round,
+              data: { reason_code: "bot_fixed_batched" },
+            });
+            projectAndWrite(o.runDir, j.read().events);
+            continue;
+          }
           const tr = transition("6b", "advance", {
             attempt: applyAttempt,
             cfg: FSM,
@@ -563,7 +612,53 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         continue;
       }
 
-      // ── CI-fix residual track ──
+      // ── CI-fix track (standalone residual, OR batched after a bot-fix) ──
+      // No local spec pre-check. In a batched round we always run the ci-fixer with the bot-fix
+      // context (below): it re-verifies each CI failure against the current tree and no-ops when the
+      // bot-fix already cleared them, so the bot-fix pushes alone. CI — not a local spec run — is the
+      // arbiter of "still red" (PLAN-remove-local-e2e §2A).
+
+      // Standalone residual (no pending bot-fix): read CI's authoritative failing-spec list from the
+      // Playwright artifact and hand the fixer the WHOLE red set (C1), so it can spot one changed value
+      // driving locators across many specs. The fix is verified by CI after push, not a local re-gate.
+      let failingSpecs: string[] = [];
+      if (!pendingBotFix) {
+        try {
+          const failing = await o.gh.getFailingSpecs(headSha);
+          failingSpecs = failing.specPaths;
+          j.append({
+            event: "helper.exec",
+            step,
+            data: {
+              cmd: "getFailingSpecs",
+              exit: 0,
+              summary: `${failingSpecs.length} failing spec(s)${failing.shardOnlyFailure ? " (shard-only)" : ""}`,
+            },
+          });
+          if (failing.shardOnlyFailure && failingSpecs.length === 0) {
+            // Red CI with zero genuine failed specs = infra/shard death. Nothing actionable for the
+            // fixer and (standalone) nothing pending to re-trigger with → defer for a human. An
+            // empty-commit re-trigger is a deferred enhancement (see PLAN-ci-fix-standalone-verify).
+            j.append({
+              event: "step.exit",
+              step,
+              round,
+              data: { reason_code: "ci_shard_infra" },
+            });
+            await doReply(pendingItems);
+            pendingItems = undefined;
+            j.append({
+              event: "checkpoint.written",
+              data: { reason_code: "ci_shard_infra", ci: lastCi },
+            });
+            end("deferred", "6b", "ci_shard_infra");
+            break;
+          }
+        } catch {
+          /* best-effort — no artifact / read failed → fall through with annotations only */
+        }
+      }
+
       // Fetch failing checks WITH annotations (file:line:message) upfront — the CiFixer needs them
       // to read the exact failing assertion; the human PR comment ignores the extra field. Superset
       // of listFailingChecks, so one call feeds both. Best-effort ([] on error).
@@ -575,6 +670,24 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
       }
 
       if (!o.ciFix) {
+        if (pendingBotFix) {
+          // No CI-fixer, but a bot-fix is pending — push it (it addresses real bot comments) and let
+          // CI re-run. The residual red is re-evaluated next round (bots now clean → the standalone
+          // no-ciFix handoff below fires with nothing stranded).
+          j.append({
+            event: "step.exit",
+            step,
+            round,
+            data: { reason_code: "cifix_none_push_botfix" },
+          });
+          j.append({
+            event: "decision",
+            data: { from: step, to: "5", signal: "advance" },
+          });
+          step = "5";
+          projectAndWrite(o.runDir, j.read().events);
+          continue;
+        }
         // No CiFixer injected — treat as immediate handoff.
         j.append({
           event: "spawn.result",
@@ -602,7 +715,20 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         break;
       }
 
-      const cf = await o.ciFix({ round, runDir: o.runDir, ciFailures });
+      // In a batched round the tree already carries the bot-fix; tell the fixer so it re-verifies the
+      // (pre-bot-fix) CI failures against the CURRENT tree rather than a stale snapshot.
+      const botFixContext = pendingBotFix
+        ? "A bot-comment fix was just applied to this worktree (uncommitted). The CI failures below " +
+          "were reported on the commit BEFORE it — re-verify each against the CURRENT tree before " +
+          "changing anything; some may already be resolved."
+        : undefined;
+      const cf = await o.ciFix({
+        round,
+        runDir: o.runDir,
+        ciFailures,
+        failingSpecs,
+        findings: botFixContext,
+      });
       j.append({
         event: "spawn.result",
         step,
@@ -613,14 +739,36 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         },
       });
 
-      // Stash spec paths from the fixer's changed files for the step-5 gate.
-      if (cf.filesChanged?.length) {
-        ciFixSpecPaths = cf.filesChanged.filter((f) =>
-          /\.spec\.tsx?$|\.test\.tsx?$/.test(f),
-        );
+      // ── Salvage a clean timeout ──
+      // A `handoff` caused purely by the wall-clock cap (exit 124) that left a dirty, spec-ONLY tree
+      // is a completed-but-unverified fix, not a failure: opencode edits are atomic per-hunk, so the
+      // applied edits are whole — the fixer just didn't get to self-check. Rather than discard that
+      // work (the eng-747 defer), promote it to the `fixed` path so the static gate (tsc/lint/build)
+      // green-lights the push and CI becomes the arbiter of the spec itself: CI-green → converged;
+      // CI-red → next round re-enters 6b. The 4b test-grader still guards green-but-wrong pre-push.
+      // Narrow by design: only a timeout (not a crash), only a dirty tree, only spec/test files (a
+      // half-timed-out source edit stays a handoff — we don't want to auto-commit source on a timeout).
+      const salvageable =
+        cf.outcome === "handoff" &&
+        cf.timedOut === true &&
+        (cf.filesChanged?.length ?? 0) > 0 &&
+        cf.filesChanged!.every((f) => /\.spec\.tsx?$|\.test\.tsx?$/.test(f));
+      if (salvageable) {
+        j.append({
+          event: "helper.exec",
+          step,
+          data: {
+            cmd: "ci-fix salvage-timeout",
+            exit: 0,
+            summary: `fixer timed out (exit 124) with ${cf.filesChanged!.length} spec edit(s) — gating instead of discarding`,
+          },
+        });
       }
+      const effectiveOutcome: CiFixPayload["outcome"] = salvageable
+        ? "fixed"
+        : cf.outcome;
 
-      if (cf.outcome === "fixed") {
+      if (effectiveOutcome === "fixed") {
         // ── §3 guard: 4b over the fixer's SPEC edit before it's pushed ──
         // A test-stale fix edits a spec's assertion. That's exactly the "green but wrong" risk the
         // test-grader guards: the fixer could match the assertion to the (wrong) current output or
@@ -702,7 +850,28 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         continue;
       }
 
-      // handoff or noop — can't fix CI; hand to a human.
+      // handoff or noop — the ci-fixer couldn't fix CI this round.
+      if (pendingBotFix) {
+        // A bot-fix is pending. Don't strand it in a human-handoff: PUSH it (it addresses real bot
+        // comments) and let CI re-run — a flaky red often clears on the fresh run. The residual red is
+        // re-evaluated next round with bots now clean, which takes the standalone CI-fix path below
+        // and hands off then if it's a genuine, unfixable failure. So the flake gets exactly one
+        // re-trigger (this push) before handoff — the round cap bounds it either way.
+        j.append({
+          event: "step.exit",
+          step,
+          round,
+          data: { reason_code: "cifix_noop_push_botfix" },
+        });
+        j.append({
+          event: "decision",
+          data: { from: step, to: "5", signal: "advance" },
+        });
+        step = "5";
+        projectAndWrite(o.runDir, j.read().events);
+        continue;
+      }
+      // Nothing pending — can't fix CI; hand to a human.
       j.append({
         event: "step.exit",
         step,
@@ -725,7 +894,6 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
       applyAttempt = 1; // fresh round → reset the resolve-track retry budget
       gateAttempt = 0; // fresh round → reset the gate-loopback budget
       gateFindingsForReapply = undefined;
-      ciFixSpecPaths = undefined;
       if (round > cfg.maxRounds) {
         j.append({
           event: "budget.stop",
@@ -735,10 +903,9 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
         break;
       }
       j.append({ event: "step.enter", step, round });
-      const specs = ciFixSpecPaths as string[] | undefined;
-      const specPathsForGate =
-        !activeBotTrack && specs && specs.length > 0 ? specs : undefined;
-      const g = o.gate({ round, runDir: o.runDir, specPaths: specPathsForGate });
+      // Static gate only (tsc/lint/build/vitest) — Playwright specs are verified by CI post-push
+      // (PLAN-remove-local-e2e). So gate-red here means a genuine code/type/lint/build failure.
+      const g = o.gate({ round, runDir: o.runDir });
       j.append({
         event: "helper.exec",
         step,
@@ -796,7 +963,7 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
           });
           if (reapplyResult.terminalState === "done") {
             // Re-try the gate with the new changes.
-            const g2 = o.gate({ round, runDir: o.runDir, specPaths: specPathsForGate });
+            const g2 = o.gate({ round, runDir: o.runDir });
             j.append({
               event: "helper.exec",
               step,

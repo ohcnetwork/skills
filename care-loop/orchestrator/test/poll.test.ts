@@ -219,6 +219,9 @@ class FakeGitHub implements GitHubApi {
   async getCheckFailureContext() {
     return [];
   }
+  async getFailingSpecs() {
+    return { specPaths: [], shardOnlyFailure: false };
+  }
 }
 
 test("pollPr converges with ZERO nudges once all bots + CI arrive (IMP-5 kill-shot)", async () => {

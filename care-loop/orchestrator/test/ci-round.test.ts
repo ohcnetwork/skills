@@ -317,8 +317,10 @@ test("re-surfaced thread tagged [addressed round N] causes triager to receive th
 
 // ── Bot-track / CI-track full loop ───────────────────────────────────────────────────────────────
 
-test("bot-track priority: CI red + bot comments → bot fix first, CI re-checked next round", async () => {
-  // Round 1: CI fail + 1 address item → bot track runs (NOT ci-fix), fix commits, round 2 CI passes.
+test("batched round: CI red + bot comments → bot fix AND ci-fixer in one round, single push, CI green next check", async () => {
+  // Round 1: CI fail + 1 address item → batched round: apply the bot-fix, then consult the ci-fixer
+  // (no local mid-run pre-check — PLAN-remove-local-e2e §2A). Here there's no actionable CI artifact,
+  // so the fixer no-ops and the bot-fix ships alone; round 2 CI passes.
   let triageCall = 0;
   let ciFixCalled = false;
   let applyCall = 0;
@@ -335,7 +337,7 @@ test("bot-track priority: CI red + bot comments → bot fix first, CI re-checked
   };
   const ciFix: CiFixFn = async () => {
     ciFixCalled = true;
-    return { outcome: "fixed" };
+    return { outcome: "noop" };
   };
   // Make CI depend on push count: before first push → fail; after → pass.
   const gh = makeFakeGitHub({
@@ -380,8 +382,8 @@ test("bot-track priority: CI red + bot comments → bot fix first, CI re-checked
   assert.equal(applyCall, 1, "bot apply ran once");
   assert.equal(
     ciFixCalled,
-    false,
-    "CI-fixer was NOT invoked (bot track had priority)",
+    true,
+    "CI-fixer is consulted in the batched round (it no-ops here → bot-fix ships alone)",
   );
 });
 
@@ -610,7 +612,7 @@ test("CI-fix handoff (no ciFix injected) + bots clean → deferred ci_red_human 
 });
 
 test("step 7 is reached once BOTH bots clean + CI green (multi-round scenario)", async () => {
-  // Round 1: bots have 1 address + CI red → bot track.
+  // Round 1: bots have 1 address + CI red → batched round: bot-fix AND ci-fixer consulted, one push.
   // Round 2: bots clean + CI still red → ci-fix track → ci-fixer commits → push.
   // Round 3: bots clean + CI green → converged at step 7.
   let triageCall = 0;
@@ -667,7 +669,7 @@ test("step 7 is reached once BOTH bots clean + CI green (multi-round scenario)",
   );
   assert.equal(res.outcome, "converged");
   assert.equal(res.state.step, "7");
-  assert.equal(ciFixCall, 1, "ci-fixer ran once (round 2 residual)");
+  assert.equal(ciFixCall, 2, "ci-fixer ran batched (R1) then standalone (R2 residual)");
 });
 
 // ── Not-fixable paths → step 7 + marked ─────────────────────────────────────────────────────────
@@ -883,6 +885,381 @@ test("ci-fix track: the mocked CI failure (with extracted job-log detail) reache
   // The extracted job-log detail — the assertion the fixer actually reasons over — survives the hop.
   assert.match(gotFailures![0].log ?? "", /patientRegistration\.spec\.ts:352/);
   assert.match(gotFailures![0].log ?? "", /Received string: "25y"/);
+});
+
+// ── Standalone CI-fix: read CI's failing specs, verify the full set (PLAN-ci-fix-standalone-verify) ──
+
+// A red-until-first-push GitHub fake for standalone CI-fix tests, with a configurable failing-spec
+// artifact. Bots clean (no reviews that matter), CI fail until push #1, then pass.
+const standaloneCiRedGh = (o: {
+  pushCall: { n: number };
+  failingSpecs?: string[];
+  shardOnlyFailure?: boolean;
+}) =>
+  makeFakeGitHub({
+    getPr: async () => ({
+      number: 1,
+      state: "open",
+      headSha: "h",
+      headRef: "b",
+      title: "[ENG-1] x",
+    }),
+    listReviews: async () => [
+      {
+        user: "a[bot]",
+        submittedAt: "2099-01-01T00:00:00Z",
+        state: "COMMENTED",
+        commitId: "h",
+      },
+    ],
+    getChecks: async () => {
+      const failing = o.pushCall.n < 1 ? 1 : 0;
+      return { total: 1, pending: 0, failing, conclusion: failing ? "fail" : "pass" };
+    },
+    getFailingSpecs: async () => ({
+      specPaths: o.failingSpecs ?? [],
+      shardOnlyFailure: o.shardOnlyFailure ?? false,
+    }),
+  });
+
+test("standalone ci-fix: CI's whole failing-spec set reaches the fixer (C1)", async () => {
+  const specs = [
+    "tests/facility/patient/patientRegistration.spec.ts",
+    "tests/facility/patient/patientDetails/users/assignUser.spec.ts",
+    "tests/facility/patient/patientDetails/request/requestCreate.spec.ts",
+  ];
+  const pushCall = { n: 0 };
+  let fixerSpecs: string[] | undefined;
+  const res = await runCiRounds(
+    opts({
+      gh: standaloneCiRedGh({ pushCall, failingSpecs: specs }),
+      triage: async () => ({ addressCount: 0, declineCount: 0 }),
+      ciFix: async ({ failingSpecs }) => {
+        fixerSpecs = failingSpecs;
+        return { outcome: "fixed" };
+      },
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      push: () => {
+        pushCall.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "converged");
+  // C1: the fixer saw the WHOLE red set, not just the annotations. (The fix itself is verified by
+  // CI post-push — the static gate no longer re-runs specs; PLAN-remove-local-e2e.)
+  assert.deepEqual(fixerSpecs, specs);
+});
+
+test("standalone ci-fix: fixer's edit breaks the static gate (tsc/lint/build) → gate-loopback then gate-blocked, no blind push", async () => {
+  const pushCall = { n: 0 };
+  let ciFixCall = 0;
+  const res = await runCiRounds(
+    opts({
+      gh: standaloneCiRedGh({
+        pushCall,
+        failingSpecs: ["tests/facility/foo.spec.ts"],
+      }),
+      triage: async () => ({ addressCount: 0, declineCount: 0 }),
+      ciFix: async () => {
+        ciFixCall++;
+        return { outcome: "fixed" };
+      },
+      // The static gate stays red — the fixer's edit introduced a type/lint/build error.
+      gate: () => ({ exit: 1, summary: "FAIL: type error" }),
+      push: () => {
+        pushCall.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "gate-blocked");
+  assert.equal(pushCall.n, 0, "a fix that breaks the static gate is NEVER pushed");
+  assert.ok(ciFixCall >= 1, "the ci-fixer ran (and was re-invoked via gate-loopback)");
+});
+
+test("standalone ci-fix: shard-only infra red (no real failing spec) → deferred ci_shard_infra, fixer NOT invoked", async () => {
+  const pushCall = { n: 0 };
+  let ciFixCall = 0;
+  const o = opts({
+    gh: standaloneCiRedGh({
+      pushCall,
+      failingSpecs: [],
+      shardOnlyFailure: true,
+    }),
+    triage: async () => ({ addressCount: 0, declineCount: 0 }),
+    ciFix: async () => {
+      ciFixCall++;
+      return { outcome: "fixed" };
+    },
+  });
+  const res = await runCiRounds(o);
+  assert.equal(res.outcome, "deferred");
+  assert.equal(ciFixCall, 0, "no genuine failing spec → the fixer is never spawned");
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  assert.ok(
+    events.some((e) => (e.data as any)?.reason_code === "ci_shard_infra"),
+    "the run defers with the ci_shard_infra reason code",
+  );
+});
+
+// ── Salvage a clean timeout: a timed-out fixer's completed spec edits are gated, not discarded ──
+
+test("standalone ci-fix: handoff via timeout (exit 124) with dirty spec-only tree → salvaged through the static gate → pushed (CI arbitrates the spec)", async () => {
+  const pushCall = { n: 0 };
+  const res = await runCiRounds(
+    opts({
+      gh: standaloneCiRedGh({
+        pushCall,
+        failingSpecs: ["tests/facility/foo.spec.ts"],
+      }),
+      triage: async () => ({ addressCount: 0, declineCount: 0 }),
+      // The fixer edited a spec but got killed by the wall-clock before it could self-verify.
+      ciFix: async () => ({
+        outcome: "handoff",
+        timedOut: true,
+        filesChanged: ["tests/facility/foo.spec.ts"],
+      }),
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      push: () => {
+        pushCall.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "converged");
+  // Salvaged edits pass the static gate then push; CI (not a local run) verifies the spec itself.
+  assert.equal(pushCall.n, 1, "the salvaged edits were statically gated then pushed");
+});
+
+test("salvage is narrow: a timed-out fixer that touched a SOURCE file stays a handoff → ci_red_human", async () => {
+  const pushCall = { n: 0 };
+  const o = opts({
+    gh: standaloneCiRedGh({
+      pushCall,
+      failingSpecs: ["tests/facility/foo.spec.ts"],
+    }),
+    triage: async () => ({ addressCount: 0, declineCount: 0 }),
+    // Timed out, but with a source edit in the tree — NOT auto-committed on a timeout.
+    ciFix: async () => ({
+      outcome: "handoff",
+      timedOut: true,
+      filesChanged: ["src/components/PatientAge.tsx"],
+    }),
+  });
+  const res = await runCiRounds(o);
+  assert.equal(res.outcome, "deferred");
+  assert.equal(pushCall.n, 0, "a source-file timeout is never auto-pushed");
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  assert.ok(
+    events.some((e) => (e.data as any)?.reason_code === "ci_red_human"),
+    "a non-spec timeout defers to a human as before",
+  );
+});
+
+test("salvage is narrow: a genuine handoff (not a timeout) with a dirty spec tree is NOT salvaged → ci_red_human", async () => {
+  const pushCall = { n: 0 };
+  const o = opts({
+    gh: standaloneCiRedGh({
+      pushCall,
+      failingSpecs: ["tests/facility/foo.spec.ts"],
+    }),
+    triage: async () => ({ addressCount: 0, declineCount: 0 }),
+    // The fixer deliberately handed off (e.g. plan-authority conflict) — timedOut is false.
+    ciFix: async () => ({
+      outcome: "handoff",
+      timedOut: false,
+      filesChanged: ["tests/facility/foo.spec.ts"],
+    }),
+  });
+  const res = await runCiRounds(o);
+  assert.equal(res.outcome, "deferred");
+  assert.equal(pushCall.n, 0, "a deliberate handoff is not salvaged");
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  assert.ok(
+    events.some((e) => (e.data as any)?.reason_code === "ci_red_human"),
+    "a non-timeout handoff defers to a human",
+  );
+});
+
+// ── Batched round: bot-fix + CI-fix in ONE push ──────────────────────────────────────────────────
+
+
+// A GitHub fake for batched-round tests: one bot (arrived), CI red until the Nth push, and a
+// failing-spec list for the standalone (R2) path's fixer context.
+const batchedGh = (opts: {
+  greenAfterPush: number;
+  failingSpecs?: string[];
+  pushCounter: { n: number };
+}) =>
+  makeFakeGitHub({
+    getPr: async () => ({
+      number: 1,
+      state: "open",
+      headSha: "h",
+      headRef: "b",
+      title: "[ENG-1] x",
+    }),
+    listReviews: async () => [
+      {
+        user: "a[bot]",
+        submittedAt: "2099-01-01T00:00:00Z",
+        state: "COMMENTED",
+        commitId: "h",
+      },
+    ],
+    getChecks: async () => {
+      const failing = opts.pushCounter.n < opts.greenAfterPush ? 1 : 0;
+      return {
+        total: 1,
+        pending: 0,
+        failing,
+        conclusion: failing ? "fail" : "pass",
+      };
+    },
+    getFailingSpecs: async () => ({
+      specPaths: opts.failingSpecs ?? ["tests/facility/foo.spec.ts"],
+      shardOnlyFailure: (opts.failingSpecs ?? ["x"]).length === 0,
+    }),
+  });
+
+test("batched round: bots + CI red → ci-fixer runs unconditionally, bot-fix AND ci-fix ride out on ONE push", async () => {
+  const pushCounter = { n: 0 };
+  let applyCall = 0;
+  let ciFixCall = 0;
+  let pushCall = 0;
+  const triage = async (): Promise<TriageResult> =>
+    applyCall === 0
+      ? { addressCount: 1, declineCount: 0 }
+      : { addressCount: 0, declineCount: 0 };
+  const res = await runCiRounds(
+    opts({
+      gh: batchedGh({ greenAfterPush: 1, pushCounter }),
+      triage,
+      apply: async () => {
+        applyCall++;
+        return { terminalState: "done" as const };
+      },
+      // No local mid-run pre-check any more — the ci-fixer always runs; the static gate passes.
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      ciFix: async () => {
+        ciFixCall++;
+        return { outcome: "fixed" as const };
+      },
+      push: () => {
+        pushCall++;
+        pushCounter.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "converged");
+  assert.equal(applyCall, 1, "bot-fix applied once");
+  assert.equal(ciFixCall, 1, "ci-fixer ran in the SAME round (batched)");
+  assert.equal(pushCall, 1, "both fixes shipped in a SINGLE push (not two rounds)");
+  assert.equal(res.rounds, 2, "one batched round + the converged re-check");
+});
+
+test("batched round: bot-fix already cleared CI → ci-fixer runs, no-ops, bot-fix pushed once", async () => {
+  const pushCounter = { n: 0 };
+  let ciFixCall = 0;
+  let pushCall = 0;
+  const triage = async (): Promise<TriageResult> =>
+    pushCounter.n === 0
+      ? { addressCount: 1, declineCount: 0 }
+      : { addressCount: 0, declineCount: 0 };
+  const res = await runCiRounds(
+    opts({
+      gh: batchedGh({ greenAfterPush: 1, pushCounter }),
+      triage,
+      apply: async () => ({ terminalState: "done" as const }),
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      // The bot-fix already cleared CI. Without a local pre-check the fixer still runs, but seeing
+      // the failures resolved in the current tree (via botFixContext) it no-ops → the bot-fix pushes
+      // alone (PLAN-remove-local-e2e §2A).
+      ciFix: async () => {
+        ciFixCall++;
+        return { outcome: "noop" as const };
+      },
+      push: () => {
+        pushCall++;
+        pushCounter.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "converged");
+  assert.equal(ciFixCall, 1, "ci-fixer consulted once (no local pre-check to skip it)");
+  assert.equal(pushCall, 1, "bot-fix pushed once");
+});
+
+test("batched round: ci-fixer noop (flake) → the pending bot-fix is PUSHED, not stranded in handoff", async () => {
+  const pushCounter = { n: 0 };
+  let ciFixCall = 0;
+  let pushCall = 0;
+  const triage = async (): Promise<TriageResult> =>
+    pushCounter.n === 0
+      ? { addressCount: 1, declineCount: 0 }
+      : { addressCount: 0, declineCount: 0 };
+  const res = await runCiRounds(
+    opts({
+      // CI clears after the push — the "red" was a flake that the re-run resolves.
+      gh: batchedGh({ greenAfterPush: 1, pushCounter }),
+      triage,
+      apply: async () => ({ terminalState: "done" as const }),
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      ciFix: async () => {
+        ciFixCall++;
+        return { outcome: "noop" as const }; // fixer finds nothing to change (flake)
+      },
+      push: () => {
+        pushCall++;
+        pushCounter.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "converged", "the bot-fix pushed; the flake cleared on the re-run");
+  assert.equal(ciFixCall, 1, "ci-fixer consulted once");
+  assert.equal(pushCall, 1, "the bot-fix was shipped despite the ci-fix noop");
+});
+
+test("batched round: ci-fix noop on a PERSISTENT red → bot-fix pushed once, then handoff next round", async () => {
+  const pushCounter = { n: 0 };
+  let ciFixCall = 0;
+  let pushCall = 0;
+  let commentPosted = false;
+  const triage = async (): Promise<TriageResult> =>
+    pushCounter.n === 0
+      ? { addressCount: 1, declineCount: 0 }
+      : { addressCount: 0, declineCount: 0 };
+  const gh = makeFakeGitHub({
+    ...batchedGh({ greenAfterPush: 99, pushCounter }), // never goes green — a real failure
+    createComment: async () => {
+      commentPosted = true;
+    },
+  });
+  const res = await runCiRounds(
+    opts({
+      gh,
+      triage,
+      apply: async () => ({ terminalState: "done" as const }),
+      gate: () => ({ exit: 0, summary: "run_gate: ALL PASSED" }),
+      ciFix: async () => {
+        ciFixCall++;
+        return { outcome: "noop" as const };
+      },
+      push: () => {
+        pushCall++;
+        pushCounter.n++;
+        return { exit: 0, summary: "pushed", headSha: "h2" };
+      },
+    }),
+  );
+  assert.equal(res.outcome, "deferred", "unfixable red hands off after the bot-fix ships");
+  assert.equal(pushCall, 1, "the bot-fix got exactly one push / re-trigger");
+  assert.equal(ciFixCall, 2, "ci-fixer ran batched (R1) then standalone (R2) before handoff");
+  assert.equal(commentPosted, true, "human-facing ci_red_human comment posted");
 });
 
 test("ci-fix track: getCheckFailureContext throwing degrades to an empty context, not a crash", async () => {

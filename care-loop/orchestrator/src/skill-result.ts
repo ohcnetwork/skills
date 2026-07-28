@@ -114,6 +114,12 @@ export interface CiFixPayload {
   /** fixed = committed a change; handoff = can't fix (human checkpoint); noop = nothing to do */
   outcome: "fixed" | "handoff" | "noop";
   filesChanged: string[];
+  /**
+   * Hit the wall-clock cap (exit 124) mid-run. A `handoff` with `timedOut` + a dirty spec-only
+   * tree is a completed-but-unverified fix, not a failure — ci-round salvages it through the gate
+   * rather than discarding the edits.
+   */
+  timedOut?: boolean;
 }
 
 /** A single failing CI check as reported by listFailingChecks. */

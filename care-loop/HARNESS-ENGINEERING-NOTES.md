@@ -59,7 +59,7 @@ Open questions the article leaves: keeping a growing harness *coherent* (non-con
 | Computational sensors | 161 orchestrator tests; CI re-gate in `care-ci-fix`; Playwright affected-spec gate | Strong |
 | Inferential sensors | care-review lens agents, care-test-grade, care-triager, care-ux-review, LLM-judge (layer 2 in evals) | Present |
 | Context isolation / sub-agents | `forkedFanOut` (session.fork, cache-inheriting), triager fan-out, lens sub-agents | Present |
-| Deterministic back-pressure | `preflight.sh`, `run_gate.sh`, `pw-lock.sh`, typecheck | Present |
+| Deterministic back-pressure | `run_gate.sh` (static: tsc/lint/build/vitest), typecheck | Present |
 | The steering loop | **doctor (discovery) → evals (control arm) → SKILL.md harden → re-run** | This *is* our loop |
 | "no edit without a delta" | care-evals standing rule (before/after benchmark.md, same model-id) | Codified |
 | Model ladder | free → Haiku → Sonnet → Opus per-skill; models.json gate | Built |

@@ -1,0 +1,23 @@
+diff --git a/src/Utils/utils.ts b/src/Utils/utils.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/Utils/utils.ts
++++ b/src/Utils/utils.ts
+@@ -118,7 +118,7 @@ export function formatPatientAge(years: number): string {
+   if (years < 0) {
+     return "";
+   }
+-  return `${years}Y`;
++  return `${years} years`;
+ }
+diff --git a/src/components/Patient/PatientInfoCard.tsx b/src/components/Patient/PatientInfoCard.tsx
+index aa11bb2..cc33dd4 100644
+--- a/src/components/Patient/PatientInfoCard.tsx
++++ b/src/components/Patient/PatientInfoCard.tsx
+@@ -40,7 +40,7 @@ export function PatientInfoCard({ patient }: Props) {
+   return (
+     <button className="patient-card" aria-label={cardLabel}>
+-      {`${formatPatientAge(patient.age)}, ${patient.gender}`}
++      <PatientAge patient={patient} />, {patient.gender}
+     </button>
+   );
+ }

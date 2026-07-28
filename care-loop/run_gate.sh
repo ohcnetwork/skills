@@ -6,15 +6,16 @@
 # full build/test output (see "Token discipline" in SKILL.md). Full output for each stage
 # is written to $LOGDIR/<stage>.log; on failure only a short grepped signal is printed.
 #
-#   tsc --noEmit  →  lint  →  build  →  [vitest, if present]  →  [affected Playwright specs]
+#   tsc --noEmit  →  lint  →  build  →  [vitest, if present]
 #
 # Stops at the first failing stage (fail fast). Exits 0 only if every run stage passed.
 #
-# Usage: run_gate.sh [-s "spec1 spec2 ..."] [-d LOGDIR] [-n] [-P] [-b BASE]
-#   -s  space-separated Playwright spec paths to run (default: none — Playwright skipped)
+# Playwright specs are NOT run here — CI is the authoritative e2e verifier (see PLAN-remove-local-e2e).
+# The gate is purely static, so it needs no backend on :9000 and no Playwright DB snapshot.
+#
+# Usage: run_gate.sh [-d LOGDIR] [-n] [-b BASE]
 #   -d  log dir for per-stage output   (default: <run-dir>/gate — see below)
 #   -n  no-build — skip `npm run build` (e.g. quick inner-loop type/lint check)
-#   -P  skip the backend-readiness probe before Playwright (assume BE already checked)
 #   -b  base ref for the lint diff scope (default: develop) — lint runs ONLY on files the
 #       branch changed vs BASE, so pre-existing repo-wide lint (deprecations, new hook rules,
 #       etc. — bypassed at commit with --no-verify) never fails the gate. tsc/build stay whole-repo.
@@ -47,20 +48,16 @@ default_run_dir() {
   echo "$SKILL_DIR/runs/$repo-$branch"
 }
 
-SPECS=""
 LOGDIR=""
 DO_BUILD=1
-PROBE_BE=1
 BASE="develop"
 
-while getopts "s:d:nPb:" opt; do
+while getopts "d:nb:" opt; do
   case "$opt" in
-    s) SPECS="$OPTARG" ;;
     d) LOGDIR="$OPTARG" ;;
     n) DO_BUILD=0 ;;
-    P) PROBE_BE=0 ;;
     b) BASE="$OPTARG" ;;
-    *) echo "usage: run_gate.sh [-s \"specs\"] [-d LOGDIR] [-n] [-P] [-b BASE]" >&2; exit 2 ;;
+    *) echo "usage: run_gate.sh [-d LOGDIR] [-n] [-b BASE]" >&2; exit 2 ;;
   esac
 done
 
@@ -148,19 +145,6 @@ if node -e 'const s=require("./package.json").scripts||{};process.exit(s["test:u
   else
     stage "vitest" "$LOGDIR/vitest.log" npm run vitest
   fi
-fi
-
-# Affected Playwright specs — only when specs were passed. Bounded backend probe first (read-only,
-# lock-free) so the gate never spins on a down backend. The specs themselves run under pw-lock.sh —
-# the backend :9000 + Playwright DB are shared singletons across concurrent worktree loops, so only
-# one loop runs specs at a time. Restore-on-acquire (pw-lock default) gives this run a clean DB.
-if [ -n "$SPECS" ]; then
-  if [ "$PROBE_BE" = 1 ]; then
-    "$SKILL_DIR/preflight.sh" -B || exit 1
-  fi
-  # shellcheck disable=SC2086 — SPECS is an intentional space-separated list of paths.
-  stage "playwright" "$LOGDIR/playwright.log" \
-    "$SKILL_DIR/pw-lock.sh" -d "$(dirname "$LOGDIR")" -- npx playwright test $SPECS
 fi
 
 echo "run_gate: ALL PASSED"

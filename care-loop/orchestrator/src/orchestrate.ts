@@ -332,7 +332,11 @@ export function reduceCiFix(
 ): import("./ci-round.js").CiFixFn {
   return async (input) => {
     const r = await c({ worktree, ...input });
-    return { outcome: r.payload.outcome, filesChanged: r.payload.filesChanged };
+    return {
+      outcome: r.payload.outcome,
+      filesChanged: r.payload.filesChanged,
+      timedOut: r.payload.timedOut,
+    };
   };
 }
 

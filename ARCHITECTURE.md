@@ -87,8 +87,10 @@ nohup care-loopd start … &
 **Concurrency** between runs is solved by:
 
 - **Worktree isolation** (each run gets its own git worktree via `git worktree add -b`)
-- **Global `pw-lock` mutex** (for shared Playwright backend)
 - **Per-run lockfile** (`<run-dir>/.orchestrator.lock`, atomic mkdir, steal stale locks)
+
+(There is no shared test backend to serialize: the gate is static-only — Playwright specs are
+verified by CI, not locally — so the former `pw-lock` mutex was removed, see PLAN-remove-local-e2e.)
 
 **In-process layout:**
 
@@ -506,11 +508,10 @@ care-loop/orchestrator/
 
 ### Key Helpers (bash)
 
-- `run_gate.sh` — full build + test gate before push (memory-heavy, subprocess)
+- `run_gate.sh` — static pre-push gate: tsc → lint → build → vitest (memory-heavy, subprocess). No
+  Playwright: e2e specs are verified by CI, not locally (PLAN-remove-local-e2e).
 - `poll-pr.sh` — blocking CI poll until green
 - `collect-feedback.sh` — pre-digest bot feedback into `feedback.md`
-- `preflight.sh` — pre-run checks
-- `pw-lock.sh` — global Playwright mutex
 
 ### Skill Files
 

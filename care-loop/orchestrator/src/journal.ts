@@ -51,6 +51,7 @@ export type EventType =
   | "doctor.coherence"
   | "doctor.verify"
   | "doctor.pr"
+  | "doctor.report"
   | "doctor.error";
 
 export interface JournalEvent {

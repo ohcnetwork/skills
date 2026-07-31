@@ -114,12 +114,17 @@ export interface AutoDoctorSeams {
   spawnDoctor: (i: {
     runDir: string;
     repoRoot: string;
+    /** report mode ⇒ the spawn must EDIT NOTHING; it only diagnoses and returns the manifest with
+     *  every proposed change spelled out in text. Drives the wiring's system-prompt selection. */
+    report?: boolean;
   }) => Promise<DoctorOutput>;
   git: GitSeam;
   runTests: () => Promise<VerifyResult>;
   runEvals: (taskPrefixes: string[]) => Promise<VerifyResult>;
   coherenceCheck: (skills: string[]) => Promise<{ ok: boolean; note?: string }>;
   gh: AutoDoctorGh;
+  /** write the single proposal document (report mode's ONLY side effect). `path` is repo-relative. */
+  writeReport: (path: string, content: string) => void;
   append: (ev: NewEvent) => void; // journal sink
   now: () => Date;
 }
@@ -134,12 +139,18 @@ export interface AutoDoctorOptions {
   /** dry run (Phase-3 smoke): spawn + apply + verify, but NO branch/commit/PR — edits are left in the
    *  working tree to inspect. The verdict (would-be draft?) is still computed and returned/journaled. */
   dry?: boolean;
+  /** report mode (cross-run collation): diagnose and write ONE proposal document to `proposals/` —
+   *  edit NOTHING else (no skill edits, no git, no verify). Distinct from `dry`, which still mutates
+   *  the working tree. Meant to be run over many runs so the proposals can be collated. Wins over `dry`. */
+  report?: boolean;
 }
 
 export interface AutoDoctorResult {
   ran: boolean;
   skipped?: string; // reason, when ran === false
   dry?: boolean; // true when no branch/commit/PR was made (Phase-3 smoke)
+  report?: boolean; // true when this was a no-apply report run (only a proposal doc was written)
+  reportPath?: string; // repo-relative path of the proposal doc (report mode)
   branch?: string;
   pr?: number;
   draft?: boolean;
@@ -181,6 +192,58 @@ export async function runAutoDoctor(
       proposeOnly: 0,
       fixtures: { committed: [], proposed: [] },
     };
+  }
+
+  // ── Report mode: a pure, no-apply diagnosis. The doctor edits NOTHING; the deterministic layer
+  //    writes exactly ONE proposal document (the only side effect) so the run leaves a clean tree and
+  //    the proposals across many runs can be collated. No branch/commit/PR, no verify, no reconcile
+  //    (nothing was written to reconcile against). Wins over `dry`. ────────────────────────────────
+  if (opts.report) {
+    const date = dateStamp(seams.now());
+    const reportPath = `care-loop-doctor/proposals/${date}-${opts.runSlug}.md`;
+    try {
+      seams.append({ event: "doctor.start", data: { mode: "report" } });
+      const out = await seams.spawnDoctor({
+        runDir: opts.runDir,
+        repoRoot: opts.repoRoot,
+        report: true,
+      });
+      const doc = renderProposalDoc(out, { slug: opts.runSlug, date });
+      seams.writeReport(reportPath, doc);
+      seams.append({
+        event: "doctor.report",
+        data: {
+          path: reportPath,
+          findings: out.findings.length,
+          proposedEdits: out.skillEdits.length,
+          proposeOnly: out.proposeOnly.length,
+        },
+      });
+      return {
+        ran: true,
+        report: true,
+        reportPath,
+        applied: [],
+        demoted: [],
+        proposeOnly: out.proposeOnly.length,
+        fixtures: { committed: [], proposed: [] },
+        coverageDelta: out.coverageDelta,
+      };
+    } catch (err) {
+      seams.append({
+        event: "doctor.error",
+        data: { mode: "report", message: err instanceof Error ? err.message : String(err) },
+      });
+      return {
+        ran: false,
+        skipped: `error: ${err instanceof Error ? err.message : String(err)}`,
+        report: true,
+        applied: [],
+        demoted: [],
+        proposeOnly: 0,
+        fixtures: { committed: [], proposed: [] },
+      };
+    }
   }
 
   const branch = `care-loop/self-improve/${dateStamp(seams.now())}-${opts.runSlug}`;
@@ -461,3 +524,69 @@ export function renderPrBody(
 }
 
 const fmt = (n: number): string => (n > 0 ? `+${n}` : `${n}`);
+
+/** Render the single proposal document for report mode. No changes are applied — this is a read-only,
+ *  self-contained diagnosis meant to be collated against sibling runs. Proposed changes are grouped by
+ *  apply-authority (eval-covered ⇒ would auto-apply in a real run; everything else ⇒ human required),
+ *  so a reviewer sweeping many of these can triage by trust tier at a glance. */
+export function renderProposalDoc(
+  out: DoctorOutput,
+  ctx: { slug: string; date: string },
+): string {
+  const L: string[] = [];
+  const d = out.coverageDelta;
+  L.push(`# Doctor proposal — ${ctx.date} — ${ctx.slug}`);
+  L.push(`> No changes applied. Read-only diagnosis for cross-run collation.`);
+  L.push("");
+  L.push(
+    `**Coverage delta (would-be):** 🟢 ${fmt(d.green)} · 🟡 ${fmt(d.yellow)} · 🔴 ${fmt(d.red)}`,
+  );
+  L.push("");
+
+  // Proposed changes, split by apply-authority. In a real (autonomous) run, eval-covered skill edits
+  // auto-apply behind the eval gate; everything else needs a human. Report mode applies neither.
+  const autoApply = out.skillEdits.filter((e) => hasEvalCoverage(e.skill));
+  const proposeSkills = out.skillEdits.filter((e) => !hasEvalCoverage(e.skill));
+
+  L.push(`## Proposed changes`);
+  if (autoApply.length) {
+    L.push(`### Would auto-apply (eval-covered)`);
+    for (const e of autoApply)
+      L.push(`- **${e.skill}** (${e.files.join(", ")}): ${e.note}`);
+    L.push("");
+  }
+  if (proposeSkills.length || out.proposeOnly.length) {
+    L.push(`### Human required`);
+    for (const e of proposeSkills)
+      L.push(`- **${e.skill}** (no eval coverage — ${e.files.join(", ")}): ${e.note}`);
+    for (const p of out.proposeOnly)
+      L.push(`- **${p.target}** (${p.reason}): ${p.patch}`);
+    L.push("");
+  }
+  if (out.fixtures.length) {
+    L.push(`### Proposed fixtures`);
+    for (const fx of out.fixtures)
+      L.push(`- \`${fx.name}\` (${fx.kind}${fx.recurred ? ", recurred" : ""}) for ${fx.skill}`);
+    L.push("");
+  }
+  if (!autoApply.length && !proposeSkills.length && !out.proposeOnly.length && !out.fixtures.length)
+    L.push(`_No changes proposed — healthy run._\n`);
+
+  L.push(`## Findings`);
+  for (const f of out.findings) {
+    const tags = [
+      f.reObserved ? `re-observed (seen: ${f.seen})` : "new",
+      f.regression ? "⚠️ REGRESSION" : "",
+      f.bsRow ?? "",
+      `${f.sensorType}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    L.push(`- **${f.imp}** [dim ${f.dimension}] ${f.summary} — _${tags}_`);
+  }
+  L.push("");
+
+  L.push(`---`);
+  L.push(out.reportBody);
+  return L.join("\n");
+}

@@ -126,6 +126,29 @@ The manifest you return (`DoctorOutput` in `auto-doctor.ts`): `findings[]`, `ski
 covered skill), `proposeOnly[]`, `fixtures[]` (verbatim | class-sibling, `recurred`), `coverageDelta`,
 `reportBody`. Interactive (human-invoked) runs are unchanged — the one-gate flow in step 5 still applies.
 
+## Report mode (no-apply proposal — cross-run collation)
+
+`care-loopd doctor <run-dir> --report` is a **pure diagnosis**: diagnose the run and write **one
+proposal document** to `care-loop-doctor/proposals/<yyyy-mm-dd>-<run-slug>.md`, and **edit nothing
+else** — no skill edits, no `IMPROVEMENTS.md`/`HARNESS-COVERAGE.md` mutation, no fixtures, no git, no
+verify. It exists so a batch of runs can each emit a self-contained proposal, then the proposals are
+collated to decide which are worth applying. Distinct from `--dry`, which still **mutates the working
+tree** (applies the covered-skill edits in place, only skipping branch/commit/PR); `--report` wins if
+both are passed.
+
+In this mode the doctor spawn runs in a **no-edit posture**: describe every proposed change
+**concretely as text** — each `skillEdits[].note` / `proposeOnly[].patch` names the exact file +
+section + before→after so a human can apply it without the doctor — and put the full narrative in
+`reportBody`. The orchestrator renders the manifest into the one proposal doc (proposals grouped by
+apply-authority: eval-covered "would auto-apply" vs. "human required"), which is the sole side effect.
+Run it across every recent run, then collate `care-loop-doctor/proposals/` for the changes worth doing:
+
+```bash
+for d in care-loop/runs/*/; do
+  [ -f "$d/journal.jsonl" ] && care-loopd doctor "$d" --report
+done
+```
+
 ## Escape → care-evals fixture (closed-loop improvement)
 
 When your diagnosis surfaces an escape (bot caught what your reviewer's findings missed), convert it to a **care-evals fixture** so the regression is caught offline forever.

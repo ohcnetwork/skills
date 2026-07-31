@@ -5,6 +5,7 @@ import {
   guardReason,
   hasEvalCoverage,
   renderPrBody,
+  renderProposalDoc,
   type AutoDoctorSeams,
   type AutoDoctorOptions,
   type DoctorOutput,
@@ -44,6 +45,8 @@ interface Harness {
   branchedTo: string | null;
   ranTests: boolean;
   ranEvalsWith: string[] | null;
+  wroteReport: { path: string; content: string } | null;
+  spawnedReport: boolean | undefined;
 }
 
 function harness(
@@ -73,10 +76,13 @@ function harness(
     branchedTo: null,
     ranTests: false,
     ranEvalsWith: null,
+    wroteReport: null,
+    spawnedReport: undefined,
     seams: undefined as unknown as AutoDoctorSeams,
   };
   h.seams = {
-    spawnDoctor: async () => {
+    spawnDoctor: async ({ report }) => {
+      h.spawnedReport = report;
       if (over.spawnThrows) throw new Error("boom");
       return out;
     },
@@ -105,6 +111,9 @@ function harness(
         h.createdPr = { branch: o.branch, draft: o.draft, title: o.title };
         return 42;
       },
+    },
+    writeReport: (path, content) => {
+      h.wroteReport = { path, content };
     },
     append: (ev) => events.push(ev as NewEvent),
     now: () => new Date("2026-07-20T00:00:00Z"),
@@ -344,6 +353,77 @@ test("dry run applies + verifies but makes no branch/commit/PR", async () => {
   assert.equal((pr!.data as { dry?: boolean }).dry, true);
 });
 
+// ── report mode: pure diagnosis, ONE proposal doc, no working-tree changes ────────────────────────
+
+test("report mode writes one proposal doc and makes no branch/commit/PR/verify", async () => {
+  const out = baseOutput({
+    // even with a covered skill edit CLAIMED, report mode must not apply, revert, or verify anything
+    skillEdits: [
+      { skill: "care-ux-review", files: ["care-ux-review/SKILL.md"], note: "add 320px check" },
+    ],
+    proposeOnly: [
+      { target: "orchestrator/src/foo.ts", reason: "orchestrator-code", patch: "guard the nil" },
+    ],
+    findings: [
+      {
+        imp: "IMP-16",
+        dimension: 8,
+        sensorType: "inferential",
+        summary: "ux missed a tablet overflow",
+        reObserved: false,
+        seen: 1,
+        regression: false,
+      },
+    ],
+  });
+  const h = harness(out);
+  const r = await runAutoDoctor(opts({ report: true }), h.seams);
+  assert.equal(r.ran, true);
+  assert.equal(r.report, true);
+  assert.equal(r.reportPath, "care-loop-doctor/proposals/2026-07-20-care_fe-eng-729.md");
+  // no side effects other than the one doc
+  assert.equal(h.branchedTo, null);
+  assert.equal(h.commits.length, 0);
+  assert.equal(h.createdPr, null);
+  assert.equal(h.ranTests, false);
+  assert.equal(h.ranEvalsWith, null);
+  assert.deepEqual(h.reverted, []); // nothing applied ⇒ nothing to revert
+  assert.deepEqual(r.applied, []);
+  // the spawn was told it's report mode
+  assert.equal(h.spawnedReport, true);
+  // the doc was written and carries the proposal content
+  assert.ok(h.wroteReport);
+  assert.equal(h.wroteReport!.path, r.reportPath);
+  assert.match(h.wroteReport!.content, /Would auto-apply \(eval-covered\)/);
+  assert.match(h.wroteReport!.content, /care-ux-review/);
+  assert.match(h.wroteReport!.content, /Human required/);
+  assert.match(h.wroteReport!.content, /orchestrator\/src\/foo\.ts/);
+  assert.equal(r.proposeOnly, 1);
+  // journal: report start + report events, no pr/apply/verify
+  assert.deepEqual(evNames(h), ["doctor.start", "doctor.report"]);
+  const start = h.events.find((e) => e.event === "doctor.start");
+  assert.equal((start!.data as { mode?: string }).mode, "report");
+});
+
+test("report mode wins over dry", async () => {
+  const h = harness(baseOutput());
+  const r = await runAutoDoctor(opts({ report: true, dry: true }), h.seams);
+  assert.equal(r.report, true);
+  assert.equal(r.dry, undefined);
+  assert.ok(h.wroteReport);
+  assert.equal(h.branchedTo, null);
+});
+
+test("report mode: a throwing spawn ⇒ ran:false, doctor.error, no doc", async () => {
+  const h = harness(baseOutput(), { spawnThrows: true });
+  const r = await runAutoDoctor(opts({ report: true }), h.seams);
+  assert.equal(r.ran, false);
+  assert.equal(r.report, true);
+  assert.match(r.skipped!, /error: boom/);
+  assert.equal(h.wroteReport, null);
+  assert.ok(evNames(h).includes("doctor.error"));
+});
+
 // ── best-effort: a throwing spawn never propagates ────────────────────────────────────────────────
 
 test("spawnDoctor throwing ⇒ ran:false, doctor.error journaled, no PR", async () => {
@@ -386,4 +466,38 @@ test("renderPrBody surfaces regression flags, seen counts, and coverage delta", 
   assert.match(body, /seen: 6/);
   assert.match(body, /🟢 \+1/);
   assert.match(body, /🟡 -1/);
+});
+
+test("renderProposalDoc splits proposals by apply-authority and stays no-apply", () => {
+  const doc = renderProposalDoc(
+    baseOutput({
+      coverageDelta: { green: 2, yellow: 0, red: -1 },
+      skillEdits: [
+        { skill: "care-ux-review", files: ["care-ux-review/SKILL.md"], note: "add 320px" },
+        { skill: "care-planner", files: ["care-planner/SKILL.md"], note: "tune recon" },
+      ],
+      proposeOnly: [
+        { target: "orchestrator/src/lock.ts", reason: "orchestrator-code", patch: "widen the lock" },
+      ],
+      findings: [
+        {
+          imp: "IMP-9",
+          dimension: 3,
+          sensorType: "computational",
+          summary: "cost spiked",
+          reObserved: true,
+          seen: 4,
+          regression: false,
+        },
+      ],
+    }),
+    { slug: "care_fe-eng-729", date: "2026-07-27" },
+  );
+  assert.match(doc, /# Doctor proposal — 2026-07-27 — care_fe-eng-729/);
+  assert.match(doc, /No changes applied/);
+  // covered skill under "would auto-apply", uncovered planner + orchestrator code under "human required"
+  assert.match(doc, /Would auto-apply \(eval-covered\)[\s\S]*care-ux-review/);
+  assert.match(doc, /Human required[\s\S]*care-planner[\s\S]*lock\.ts/);
+  assert.match(doc, /seen: 4/);
+  assert.match(doc, /🔴 -1/);
 });

@@ -7,8 +7,8 @@
 // PR TARGET: the self-improvement PR lands in the SKILLS repo (where the skills live), NOT care_fe —
 // so `gh` is an OctokitGitHub pointed at the skills repo's own origin, derived from its git remote.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { OctokitGitHub } from "./github.js";
 import { runHelper } from "./shell.js";
 import { Journal } from "./journal.js";
@@ -157,6 +157,7 @@ export interface AutoDoctorWiringConfig {
   modelsFile?: string;
   enabled: boolean; // false ⇒ --no-doctor / CARE_DOCTOR=0
   dry?: boolean; // Phase-3 smoke: apply + verify, no branch/commit/PR
+  report?: boolean; // report mode: diagnose + write ONE proposal doc, edit nothing else
 }
 
 /** Read event names from the run journal (best-effort — a torn tail is fine, we only need names). */
@@ -214,24 +215,41 @@ export async function runEndOfRunDoctor(
     append: (ev) => j.append(ev),
     now: () => new Date(),
 
-    spawnDoctor: async ({ runDir, repoRoot }): Promise<DoctorOutput> => {
+    spawnDoctor: async ({ runDir, repoRoot, report }): Promise<DoctorOutput> => {
       const skill = doctorMethodology();
-      const editSystem =
-        `${skill}\n\n---\n\nYou are running in AUTONOMOUS END-OF-RUN MODE. The skills repo root is ` +
-        `${repoRoot}. Read the loopd run at ${runDir}, then APPLY the eval-covered skill edits + write ` +
-        `the diagnosis / IMPROVEMENTS / HARNESS-COVERAGE updates + any fixtures IN PLACE (edit the files). ` +
-        `Do NOT run git, gh, npm, or the evals — the orchestrator does that. Propose-only items are text, not edits.`;
-      const emitSystem =
-        `Emit the DoctorOutput manifest describing EXACTLY what you just did, as JSON matching the schema. ` +
-        `Do not explore or edit further.`;
+      // Report mode is a PURE diagnosis: edit nothing, spell every proposal out in text so the single
+      // proposal doc the orchestrator writes is self-contained and collatable across runs.
+      const editSystem = report
+        ? `${skill}\n\n---\n\nYou are running in REPORT / PROPOSAL MODE. The skills repo root is ` +
+          `${repoRoot}. Read the loopd run at ${runDir} and DIAGNOSE it, but EDIT NO FILES — do not ` +
+          `touch any skill, IMPROVEMENTS.md, HARNESS-COVERAGE.md, fixtures, or the run dir. Instead, ` +
+          `describe every proposed change CONCRETELY in the manifest: each \`skillEdits[].note\` and ` +
+          `\`proposeOnly[].patch\` must name the exact file + section + before→after so a human could ` +
+          `apply it without you, and put the full narrative diagnosis in \`reportBody\`. ` +
+          `Do NOT run git, gh, npm, or the evals.`
+        : `${skill}\n\n---\n\nYou are running in AUTONOMOUS END-OF-RUN MODE. The skills repo root is ` +
+          `${repoRoot}. Read the loopd run at ${runDir}, then APPLY the eval-covered skill edits + write ` +
+          `the diagnosis / IMPROVEMENTS / HARNESS-COVERAGE updates + any fixtures IN PLACE (edit the files). ` +
+          `Do NOT run git, gh, npm, or the evals — the orchestrator does that. Propose-only items are text, not edits.`;
+      const emitSystem = report
+        ? `Emit the DoctorOutput manifest of your PROPOSED changes (you edited nothing), as JSON ` +
+          `matching the schema. Do not explore or edit further.`
+        : `Emit the DoctorOutput manifest describing EXACTLY what you just did, as JSON matching the schema. ` +
+          `Do not explore or edit further.`;
+      const editInstruction = report
+        ? `Diagnose the run at ${runDir} and propose the improvements as text — edit nothing.`
+        : `Diagnose the run at ${runDir} and apply the covered-skill improvements now.`;
+      const emitInstruction = report
+        ? "Emit the DoctorOutput manifest for the changes you propose."
+        : "Emit the DoctorOutput manifest for the changes you made.";
       const out = await driveDoctorSpawn(
         {
           providerID: provider,
           modelID: model,
           editSystem,
-          editInstruction: `Diagnose the run at ${runDir} and apply the covered-skill improvements now.`,
+          editInstruction,
           emitSystem,
-          emitInstruction: "Emit the DoctorOutput manifest for the changes you made.",
+          emitInstruction,
           timeoutMs: DOCTOR_SPAWN_TIMEOUT,
         },
         DOCTOR_OUTPUT_SCHEMA,
@@ -312,6 +330,12 @@ export async function runEndOfRunDoctor(
         return gh.createPr({ head: o.branch, base, title: o.title, body: o.body, draft: o.draft });
       },
     },
+
+    writeReport: (relPath: string, content: string) => {
+      const abs = resolve(skillsRoot, relPath);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content, "utf8");
+    },
   };
 
   return runAutoDoctor(
@@ -321,6 +345,7 @@ export async function runEndOfRunDoctor(
       runSlug: cfg.runSlug,
       enabled: cfg.enabled,
       dry: cfg.dry,
+      report: cfg.report,
       journalEvents: readJournalEvents(cfg.runDir),
     },
     seams,

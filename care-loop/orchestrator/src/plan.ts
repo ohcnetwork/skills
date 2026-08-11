@@ -86,6 +86,7 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
         mainRepoPath: input.mainRepoPath,
         runDir: input.runDir,
         phase: "interview",
+        attachments: input.attachments,
         round: spawn++,
         step: "1",
       });
@@ -118,6 +119,7 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
         questions,
         answers,
         amendment,
+        attachments: input.attachments,
         round: spawn++,
         step: "1",
       });
@@ -188,6 +190,7 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           questions,
           answers,
           amendment,
+          attachments: input.attachments,
           round: spawn++,
           step: "1",
         });

@@ -9,6 +9,7 @@
 
 import { createOpencode } from "@opencode-ai/sdk";
 import { createServer } from "node:net";
+import { readFileSync } from "node:fs";
 import {
   JOBRESULT_SCHEMA,
   validateJobResult,
@@ -497,6 +498,44 @@ function sumCost(a?: SpawnCost, b?: SpawnCost): SpawnCost | undefined {
  * Turn A `reconSystem`/`task` do the exploration; Turn B `emitSystem`/`emitInstruction` do the emit.
  * Cost is summed across both turns. Same permission/tools as promptStructured (read-only, no subagent).
  */
+/** One image/file attachment to send alongside the recon task text (PLAN-jira-ticket-fetch.md §3.5). */
+export interface PromptAttachment {
+  path: string;
+  mime: string;
+  filename?: string;
+}
+
+/** Expand attachment specs into opencode `file` parts (base64 `data:` URI in `url` —
+ *  FilePartInput shape, probed to reach the model on Copilot). A read failure on one attachment is
+ *  skipped-and-logged rather than fatal — a missing image must not abort the recon. */
+function fileParts(
+  attachments: PromptAttachment[] | undefined,
+): Array<{ type: "file"; mime: string; filename?: string; url: string }> {
+  if (!attachments?.length) return [];
+  const parts: Array<{
+    type: "file";
+    mime: string;
+    filename?: string;
+    url: string;
+  }> = [];
+  for (const a of attachments) {
+    try {
+      const b64 = readFileSync(a.path).toString("base64");
+      parts.push({
+        type: "file",
+        mime: a.mime,
+        filename: a.filename,
+        url: `data:${a.mime};base64,${b64}`,
+      });
+    } catch (e) {
+      console.warn(
+        `[promptAgenticThenStructured] skipping unreadable attachment ${a.path}: ${(e as Error).message}`,
+      );
+    }
+  }
+  return parts;
+}
+
 export async function promptAgenticThenStructured(
   spec: {
     role: string;
@@ -508,6 +547,7 @@ export async function promptAgenticThenStructured(
     emitInstruction: string; // Turn B — user message
     round: number;
     timeoutMs?: number;
+    attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
   },
   schema: object,
 ): Promise<{
@@ -530,6 +570,7 @@ async function promptAgenticThenStructuredImpl(
     emitInstruction: string; // Turn B — user message
     round: number;
     timeoutMs?: number;
+    attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
   },
   schema: object,
 ): Promise<{
@@ -553,13 +594,18 @@ async function promptAgenticThenStructuredImpl(
     if (!sessionId) throw new Error("opencode: session.create returned no id");
 
     // Turn A — AGENTIC recon, NO `format`. This is the whole fix: let the tool loop run unconstrained.
+    // Any ticket images ride here as `file` parts (probed to reach the model on Copilot) so recon forms
+    // its understanding WITH the mockups/screenshots. Empty attachments ⇒ byte-identical text-only path.
     const reconInfo = await driveToCompletion(
       oc.client,
       sessionId,
       {
         model: { providerID: spec.providerID, modelID: spec.modelID },
         system: spec.reconSystem,
-        parts: [{ type: "text", text: spec.task }],
+        parts: [
+          { type: "text", text: spec.task },
+          ...fileParts(spec.attachments),
+        ],
       },
       timeoutMs,
     );

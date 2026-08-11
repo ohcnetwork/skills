@@ -147,6 +147,48 @@ test("happy path: interview → draft → approve writes artifacts + plan.approv
   );
 });
 
+test("attachments from PlanInput reach the planner on both interview and plan phases", async () => {
+  const runDir = rd();
+  const att = [{ path: "/a/mock.png", mime: "image/png", filename: "mock.png" }];
+  const seen: Record<string, unknown[] | undefined> = {};
+  const capturing: Planner = async (inp) => {
+    seen[inp.phase] = inp.attachments;
+    if (inp.phase === "interview")
+      return env(
+        { phase: "interview", questions: [] },
+        "questions",
+        "interview",
+        inp.round,
+      );
+    return env(
+      {
+        phase: "plan",
+        scope: "s",
+        files: ["f.tsx"],
+        approach: "a",
+        criteria: ["c"],
+        nonGoals: ["n"],
+        testSurface: "t",
+        classification: "standard",
+        plannedBy: "Opus 4.8",
+        modelPinSatisfied: true,
+      },
+      "planned",
+      "standard",
+      inp.round,
+    );
+  };
+  const res = await runPlan({
+    input: { ...makeInput(runDir), attachments: att },
+    planner: capturing,
+    gate: fakeGate([{ decision: "approve" }]),
+    lockOpts,
+  });
+  assert.equal(res.outcome, "approved");
+  assert.deepEqual(seen.interview, att, "interview phase got attachments");
+  assert.deepEqual(seen.plan, att, "plan phase got attachments");
+});
+
 test("no interview questions → gate.interview is skipped, still approves", async () => {
   const runDir = rd();
   const res = await runPlan({

@@ -25,6 +25,12 @@ import { runPlan, hasApprovedPlan } from "./plan.js";
 import { terminalFront, derivePaths } from "./front-terminal.js";
 import { probePr, planResume, type ResumePlan } from "./resume.js";
 import type { PlanInput } from "./plan-front.js";
+import type { TicketFetcher } from "./ports.js";
+import {
+  enrichPlanInput,
+  jiraConfigFromEnv,
+  jiraTicketFetcher,
+} from "./ticket-fetch.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
 import { startDashboard } from "./dashboard.js";
@@ -373,10 +379,23 @@ async function resumeBuild(
   if (res.phase !== "ci") process.exit(1);
 }
 
+/** Build the ticket fetcher from env (Jira), unless the operator opted out with `--no-ticket-fetch`.
+ *  Unconfigured env ⇒ undefined ⇒ enrichment is a no-op (planner runs on the raw kickoff task). */
+function ticketFetcherFromEnv(
+  flags: Record<string, string | true>,
+): TicketFetcher | undefined {
+  if (flags["no-ticket-fetch"] === true) return undefined;
+  const cfg = jiraConfigFromEnv();
+  return cfg ? jiraTicketFetcher(cfg) : undefined;
+}
+
 async function cmdPlan(flags: Record<string, string | true>): Promise<void> {
   // The pluggable front sources the input + pairs the terminal gate; the planner is the default
   // opencode Opus skill; runPlan is the invariant core. A different workflow swaps only the front.
-  const { input, gate } = await terminalFront(flags).resolve();
+  const { input: seed, gate } = await terminalFront(flags).resolve();
+  // Pre-Step-1 enrichment: fold the Jira ticket (text + image attachments) into the planner input,
+  // cached under runDir + resume-safe; a no-op when no fetcher is configured (PLAN-jira-ticket-fetch).
+  const input = await enrichPlanInput(seed, ticketFetcherFromEnv(flags));
   const modelsFile =
     typeof flags.models === "string" ? flags.models : undefined;
   const { planner } = defaultPlanSeams({
@@ -548,7 +567,8 @@ async function maybeRunDoctor(
  *  loop with the SAME input — no re-supplied flags. `hasApprovedPlan` stays the INTERNAL phase boundary
  *  (runPlan just wrote `plan.approved`); it is no longer a CLI boundary. */
 async function cmdRun(flags: Record<string, string | true>): Promise<void> {
-  const { input, gate } = await terminalFront(flags).resolve();
+  const { input: seed, gate } = await terminalFront(flags).resolve();
+  const input = await enrichPlanInput(seed, ticketFetcherFromEnv(flags));
   const modelsFile =
     typeof flags.models === "string" ? flags.models : undefined;
   const { planner } = defaultPlanSeams({

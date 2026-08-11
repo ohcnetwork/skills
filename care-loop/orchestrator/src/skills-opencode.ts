@@ -1333,6 +1333,7 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
     questions,
     answers,
     amendment,
+    attachments,
     round,
   }) => {
     const startedAt = new Date().toISOString();
@@ -1367,12 +1368,13 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
           providerID: provider,
           modelID: reconModel,
           reconSystem: buildPlannerInterviewSystem(),
-          task: `Ticket ${ticket}. Task: ${task}\nRepo (read-only, absolute paths): ${mainRepoPath}\nRecon, then produce the questions that would change the diff.`,
+          task: `Ticket ${ticket}. Task: ${task}\nRepo (read-only, absolute paths): ${mainRepoPath}\n${attachments?.length ? `${attachments.length} ticket image(s) attached below, in the order the \`[image: NAME]\` markers appear in the text above — each marker is that image (mockups/screenshots). Factor them into your recon.\n` : ""}Recon, then produce the questions that would change the diff.`,
           emitSystem: buildPlannerInterviewEmitSystem(),
           emitInstruction:
             "Emit the interview questions from your recon as the required JSON now.",
           round,
           timeoutMs,
+          attachments,
         },
         PLANNER_INTERVIEW_SCHEMA,
       );
@@ -1410,12 +1412,15 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
           providerID: provider,
           modelID: planModel,
           reconSystem: buildPlannerPlanSystem(),
-          task: `Ticket ${ticket}. Task: ${task}\nRepo (read-only, absolute paths; the Q&A below already cites the relevant files): ${mainRepoPath}\n\nInterview Q&A (contains the recon findings — rely on these):\n${qa}${amendBlock}\n\nProduce the plan.`,
+          task: `Ticket ${ticket}. Task: ${task}\nRepo (read-only, absolute paths; the Q&A below already cites the relevant files): ${mainRepoPath}\n\nInterview Q&A (contains the recon findings — rely on these):\n${qa}${amendBlock}\n${attachments?.length ? `${attachments.length} ticket image(s) attached below, matching the \`[image: NAME]\` markers in the text in order (mockups/screenshots) — the acceptance criteria must reflect them.\n` : ""}\nProduce the plan.`,
           emitSystem: buildPlannerPlanEmitSystem(),
           emitInstruction:
             "Emit the plan you just drafted as the required JSON now.",
           round,
           timeoutMs,
+          // Plan phase is a fresh cold spawn (no warm session from the interview), so resend the images
+          // — this is where the acceptance criteria get drafted, exactly where visual detail matters.
+          attachments,
         },
         PLANNER_PLAN_SCHEMA,
       );

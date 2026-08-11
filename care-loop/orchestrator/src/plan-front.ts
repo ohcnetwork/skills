@@ -8,6 +8,7 @@
 //   await runPlan({ input, planner, gate });   // ← identical for terminal / jira / pr fronts
 
 import type { PlanGate } from "./plan-gate.js";
+import type { Attachment } from "./ports.js";
 
 /** The normalized initial input every workflow must produce for a plan run. `runDir` and `worktree`
  *  are derived by the front from (repo, branch) using the same convention as `start`, so the plan and
@@ -21,6 +22,7 @@ export interface PlanInput {
   mainRepoPath: string; // the main checkout recon reads (read-only)
   worktree: string; // where `start` will later create the worktree
   runDir: string; // <skill-dir>/runs/<repo>-<branch-flat>
+  attachments?: Attachment[]; // ticket images (from a TicketFetcher) — threaded to the planner
 }
 
 /** A pluggable front: source the initial input + provide the matching gate, then delegate to runPlan. */

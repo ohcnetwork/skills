@@ -160,6 +160,31 @@ export interface CiFixInput {
 }
 export type CiFixer = (input: CiFixInput) => Promise<SkillResult<CiFixPayload>>;
 
+/** A locally-downloaded ticket attachment (an image in v1). `path` is an on-disk file under the run
+ *  dir; the planner turns it into an opencode `file` part (base64 data URI) so the model sees the
+ *  pixels. See PLAN-jira-ticket-fetch.md §3.5 + the `probe:image` feasibility proof. */
+export interface Attachment {
+  path: string; // absolute on-disk path (under runDir/attachments/)
+  mime: string; // e.g. "image/png" — becomes the file part's mime
+  filename: string; // original name, for the model's benefit + logs
+}
+
+/** Assembled ticket context — the product of a TicketFetcher. `enrichedText` (description + AC) folds
+ *  into the planner's `task`; `attachments` (images) ride the recon turn as file parts. */
+export interface TicketContext {
+  enrichedText: string;
+  attachments: Attachment[];
+}
+
+/** TicketFetcher — the OPTIONAL pre-Step-1 enrichment seam (PLAN-jira-ticket-fetch.md). Given a ticket
+ *  id, returns the full ticket as planner context (text + downloaded image attachments). Default =
+ *  unset ⇒ the planner runs on the raw kickoff `task`, no network/auth (today's behavior). A run's
+ *  kickoff calls this once, caches the result under runDir, and degrades to the raw `task` on failure. */
+export type TicketFetcher = (input: {
+  ticket: string; // e.g. "ENG-648"
+  runDir: string; // cache + download target
+}) => Promise<TicketContext>;
+
 /** Planner — the 4th role skill (Step 1). One spawn runs one phase: `interview` (recon → questions)
  *  or `plan` (draft the artifacts). `round` is a monotonic per-run spawn counter (interview=1, first
  *  draft=2, each amend increments) so the logging decorator writes distinct input/result sidecars. */
@@ -173,6 +198,7 @@ export interface PlannerInput {
   questions?: PlanQuestion[]; // plan phase: the interview questions (carry recon context) to reuse
   answers?: PlanAnswer[]; // plan phase: the interview answers to fold in
   amendment?: string; // plan phase: free-text amendment from a gate re-draft
+  attachments?: Attachment[]; // ticket images (from a TicketFetcher) — sent as file parts on recon
   step?: string; // FSM step that invoked this skill (for log attribution)
 }
 export type Planner = (

@@ -364,8 +364,14 @@ export function reduceTestGrade(
 
 import { spawnSync } from "node:child_process";
 // The change under review = everything the branch adds vs its base (COMMITTED, since the agent may
-// commit itself) PLUS any still-uncommitted edits.
-function defaultDiffOf(worktree: string, base: string): string {
+// commit itself) PLUS any still-uncommitted edits PLUS any UNTRACKED new files. The untracked leg
+// matters: `git add -A` only runs at step 5, so at 4a/4b time a brand-new file (typically a fresh
+// *.spec.ts) is not yet tracked and `git diff HEAD` omits it entirely — which silently blinds the
+// reviewer and test-grader to the very spec they're meant to grade (COLLATION-2026-07-28 §E.1). We
+// synthesize an add-diff for each with `git diff --no-index /dev/null <f>` (exits non-zero on a
+// difference, tolerated by the `?? ""`), which emits the standard `+++ b/<f>` header the spec/diff
+// parsers key on.
+export function defaultDiffOf(worktree: string, base: string): string {
   const run = (...a: string[]) =>
     spawnSync("git", ["-C", worktree, ...a], {
       encoding: "utf8",
@@ -373,5 +379,10 @@ function defaultDiffOf(worktree: string, base: string): string {
     }).stdout ?? "";
   const committed = run("diff", `${base}...HEAD`);
   const uncommitted = run("diff", "HEAD");
-  return committed + uncommitted;
+  const untracked = run("ls-files", "--others", "--exclude-standard")
+    .split("\n")
+    .filter(Boolean)
+    .map((f) => run("diff", "--no-index", "/dev/null", f))
+    .join("");
+  return committed + uncommitted + untracked;
 }

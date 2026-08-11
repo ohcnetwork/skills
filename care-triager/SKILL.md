@@ -109,6 +109,19 @@ fresh `address`. A `[resolved]` or bot-withdrawn thread is never re-opened. If a
 would re-trigger a thread you already resolved, that is the signal you are in a churn loop — stop and
 decline.
 
+**Already-resolved threads are SKIPPED — emit no verdict at all (not even `decline`).** A `decline`
+is still a verdict row: it re-enters the Step-7 reply/resolve cycle and costs a full spawn every
+round. So a thread that is **already settled** — one _we_ resolved in a prior round (its fix is in
+`addressed.md` and shipped), one already in `declined.md` from a prior round, or one the bot itself
+tagged `[resolved]` / withdrew — is **omitted from `verdicts.md` entirely**, not re-declined. It has
+already been replied to and resolved once; a fresh verdict just re-litigates a closed thread. **Only a
+thread re-opened with genuinely NEW content after our resolution earns a fresh verdict** (grade that
+new content on its own merits). This is the decline-tail complement to the address-churn recurrence
+guard above: the failure mode is a round of all-`decline` "fix already applied" rows on threads that
+were closed rounds ago (COLLATION-2026-07-28 §A) — those rounds move no behavior and should not exist.
+When every remaining thread is already-settled with nothing new, the collated set is empty → write an
+empty verdict list and go straight to the Step-7 exit check.
+
 **Scope Governor check:** compare the current diff against `baseline.md`; if it's past the ~2×
 tripwire without approval, **decline** the accreting items (reason: `scope governor — past 2× tripwire`)
 rather than adding more `address` items — keep the round in-scope instead of stopping the run.

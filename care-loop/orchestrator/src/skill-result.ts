@@ -96,6 +96,9 @@ export interface TestGradeFinding {
 }
 export interface TestGradePayload {
   hasSpecs: boolean; // false when no spec files were found in the diff (grade is skipped)
+  /** true when hasSpecs is false BUT the plan declared a Test-surface contract (tests were owed and
+   *  none were delivered) — a `specs_owed` advisory, not a silent no_specs pass (COLLATION §E.2). */
+  specsOwed?: boolean;
   criteriaGrades: TestGradeFinding[];
 }
 

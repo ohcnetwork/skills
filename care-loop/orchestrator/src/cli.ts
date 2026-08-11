@@ -594,9 +594,11 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   await startFromInput(input, flags);
 }
 
-/** `care-loopd doctor <run-dir> [--dry] [--models <file>]` — run the end-of-run doctor against an
- *  existing completed run, standalone from the loop. `--dry` = diagnose + apply + verify but NO
- *  branch/commit/PR (the working-tree edits stand for inspection); the Phase-3 smoke path. */
+/** `care-loopd doctor <run-dir> [--dry|--report] [--models <file>]` — run the end-of-run doctor against
+ *  an existing completed run, standalone from the loop. `--dry` = diagnose + apply + verify but NO
+ *  branch/commit/PR (working-tree edits stand for inspection); the Phase-3 smoke path. `--report` =
+ *  diagnose only and write ONE proposal doc to `care-loop-doctor/proposals/`, editing nothing else —
+ *  meant to be run across many runs so the proposals can be collated. `--report` wins over `--dry`. */
 async function cmdDoctor(
   runDir: string,
   flags: Record<string, string | true>,
@@ -605,19 +607,27 @@ async function cmdDoctor(
     console.error(`no journal at ${runDir} — nothing to diagnose`);
     process.exit(2);
   }
+  const report = flags.report === true;
   const dry = flags.dry === true;
   const modelsFile =
     typeof flags.models === "string" ? flags.models : undefined;
-  console.log(`care-loopd doctor${dry ? " (dry)" : ""}: ${runDir}\n`);
+  const mode = report ? " (report)" : dry ? " (dry)" : "";
+  console.log(`care-loopd doctor${mode}: ${runDir}\n`);
   const r = await runEndOfRunDoctor({
     runDir,
     runSlug: basename(runDir),
     modelsFile,
     enabled: true,
     dry,
+    report,
   });
   if (!r.ran) {
     console.log(`\ndoctor: skipped (${r.skipped})`);
+    return;
+  }
+  if (r.report) {
+    console.log(`\ndoctor (report): wrote ${r.reportPath}`);
+    console.log(`  propose-only=${r.proposeOnly}`);
     return;
   }
   console.log(

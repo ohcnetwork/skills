@@ -37,7 +37,12 @@ the specs around it (`playwright` skill conventions, `CLAUDE.md`).
 3. **The spec(s)** under grade — the Playwright spec(s) (and vitest once it lands). Loop-invoked:
    the specs from Step 3.
 
-Grade **only when specs exist** — the e2e track is optional, so "no specs" is not a failure here.
+Grade **only when specs exist** — the e2e track is optional, so "no specs" is not a failure **when the
+plan owed no tests**. But "no specs" is _not_ a free pass when the Step-1 plan declared a **Test-surface
+contract** (`baseline.md`) for this change: delivering zero specs against a contract that named a
+spec/testid/role is a **`specs_owed`** advisory listing the unasserted criteria, not a silent skip —
+otherwise an untested feature converges on bots/CI alone (COLLATION §E.2). Loop-invoked, the
+orchestrator makes this call deterministically before spawning; standalone, apply the same rule.
 
 ## Step 2 — Grade each acceptance criterion
 
@@ -176,9 +181,11 @@ This lets implementers fix critical gaps immediately while understanding that se
 Lead with the per-criterion verdict table, then the fixes.
 
 **Only `Wrong` blocks.** A spec that contradicts the criteria or asserts unrelated behavior blocks;
-everything else (`Missing` / `Weak` / faithfulness) is **advisory** — partial specs are legitimate
-(blocking on `Missing` would let one partial spec trigger a full-coverage gate while zero specs skip
-it entirely — a perverse incentive).
+everything else (`Missing` / `Weak` / faithfulness / `specs_owed`) is **advisory** — partial specs are
+legitimate (blocking on `Missing` would let one partial spec trigger a full-coverage gate while zero
+specs skip it entirely — a perverse incentive). The `specs_owed` case closes the other half of that
+incentive: zero specs no longer skips **silently** when the plan owed tests — it surfaces as an
+advisory (visible to triage + the PR + the doctor), it just doesn't hard-gate the loop.
 
 - **Standalone:** present the table + fixes; don't edit until approved.
 - **Loop-invoked (Step 4.5):** `Wrong` specs loop back to the Step-3 E2E author to fix (bounded by

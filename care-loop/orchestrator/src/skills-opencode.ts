@@ -34,7 +34,12 @@ import type {
   UxValidator,
   CiFixer,
 } from "./ports.js";
-import type { TriageItem, CiFixPayload, CiFailure } from "./skill-result.js";
+import type {
+  TriageItem,
+  CiFixPayload,
+  CiFailure,
+  TestGradeFinding,
+} from "./skill-result.js";
 
 export interface SkillModels {
   provider?: string; // default "github-copilot"
@@ -750,6 +755,62 @@ function specPathsFromDiff(diff: string): string[] {
   return [...paths];
 }
 
+/** Did the plan OWE tests? Reads `baseline.md`'s `## Test-surface contract` section (written by the
+ *  Step-1 planner) and decides whether the author was expected to deliver a spec. A change with a
+ *  substantive contract that names a spec/testid/role/assertion owed tests; one whose contract is
+ *  absent or an explicit "no spec needed" disclaimer did not. Deterministic — no spawn (COLLATION §E.2).
+ *  Conservative default: an ambiguous, substantive contract counts as owed (surfacing an advisory is
+ *  cheap and non-blocking; a silent pass on an untested feature is the failure mode we're closing). */
+export function testSurfaceOwed(runDir: string): boolean {
+  let baseline = "";
+  try {
+    baseline = readFileSync(join(runDir, "baseline.md"), "utf8");
+  } catch {
+    return false; // no plan artifact → nothing owed (e.g. --skip-plan run)
+  }
+  // Extract the "## Test-surface contract" section body (up to the next ## heading or end of file).
+  // No `m` flag: `$` must mean end-of-string, not end-of-line (else the non-greedy body collapses to "").
+  const m = /(?:^|\n)##\s+Test-surface contract[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i.exec(baseline);
+  const body = (m?.[1] ?? "").trim();
+  if (!body) return false;
+  // A named spec FILE (or "spec at <path>") is the unambiguous "write this test" signal → always owed,
+  // even when the prose also says "no data-testids" (a util still owes a unit spec at a named path).
+  const namesSpecFile = /\.(spec|test)\.[tj]sx?|\bspec at\b/i.test(body);
+  if (namesSpecFile) return true;
+  // No concrete file named: an explicit "no e2e/unit/spec/test needed" disclaimer wins (a soft "unit
+  // spec" / "test" mention inside that very phrase must NOT read as owed).
+  const disclaims =
+    /\bno\b[^.\n]*\b(e2e|unit|spec|test)s?\b[^.\n]*\b(need|require|necessary|planned|owed)/i.test(
+      body,
+    );
+  if (disclaims) return false;
+  // Otherwise: a testid/role/assertion mention, or any substantive contract, is owed.
+  const namesSurface = /data-testid|\brole\s*[=:"]|\bassert|\b(new|unit|e2e)\s+spec\b/i.test(body);
+  return namesSurface || body.length > 60;
+}
+
+/** The acceptance criteria (criteria.md bullet lines) as `Missing`/`Critical` grades — used to spell
+ *  out exactly which criteria are unasserted when specs were owed but none delivered. */
+function unmetCriteriaGrades(runDir: string): TestGradeFinding[] {
+  let criteria = "";
+  try {
+    criteria = readFileSync(join(runDir, "criteria.md"), "utf8");
+  } catch {
+    return [];
+  }
+  return criteria
+    .split("\n")
+    .map((l) => l.replace(/^\s*[-*]\s+/, "").trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((criterion) => ({
+      criterion,
+      verdict: "Missing" as const,
+      criticality: "Critical" as const,
+      finding: "No spec delivered; the plan declared a Test-surface contract for this change.",
+      fix: "Author the owed spec(s) per baseline.md's Test-surface contract.",
+    }));
+}
+
 /** Default test-grader (Step 4b): single-spawn with pre-read criteria + spec files. */
 export function opencodeTestGrader(
   models: SkillModels = {},
@@ -789,15 +850,22 @@ export function opencodeTestGrader(
 
     const hasSpecs = specPaths.length > 0;
     if (!hasSpecs) {
-      // No spec files in this diff — grade is skipped (specs are optional).
+      // No spec files in this diff. A silent `no_specs` pass is only correct when the plan owed no
+      // tests — if the Step-1 planner declared a Test-surface contract for this change, zero specs is
+      // a `specs_owed` advisory that lists the unasserted criteria, not a free skip (COLLATION §E.2).
+      const owed = testSurfaceOwed(runDir);
+      const specsOwedGrades = owed ? unmetCriteriaGrades(runDir) : [];
       return {
         schema: "care-loop/skill-result@1",
         skill: "care-test-grader",
         round,
         terminalState: "done",
-        verdict: "pass",
-        reasonCode: "no_specs",
-        payload: { hasSpecs: false, criteriaGrades: [] },
+        // advisory (never blocks — bias-toward-shipping / no perverse full-coverage gate), but the
+        // `specs_owed` reason + Missing grades make the gap visible in the round + PR instead of a
+        // 0ms silent pass that let untested features converge on bots/CI alone.
+        verdict: owed ? "advisory" : "pass",
+        reasonCode: owed ? "specs_owed" : "no_specs",
+        payload: { hasSpecs: false, specsOwed: owed, criteriaGrades: specsOwedGrades },
         modelUsed: model,
         startedAt,
         endedAt: new Date().toISOString(),

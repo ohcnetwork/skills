@@ -1,0 +1,46 @@
+# Doctor proposal — 2026-07-28 — care_fe-user-depts-bot-run
+> No changes applied. Read-only diagnosis for cross-run collation.
+
+**Coverage delta (would-be):** 🟢 0 · 🟡 +1 · 🔴 0
+
+## Proposed changes
+### Human required
+- **care-triager/SKILL.md (methodology name="default", after IMP-17 churn rules)** (no-eval-coverage): REPORT MODE — proposed as text, not applied (care-triager IS eval-covered via tr-*, so this WOULD auto-apply outside report mode; guard first). Two additions: (1) novel-vs-none discipline: 'missed_by: novel means un-catchable pre-merge. If ANY lens skill (reviewer/technical/ux/test-grade) surfaced the issue but the fix was dropped/not applied, it is NOT novel — attribute missed_by: none (a fix-application gap). Before writing novel, check round-1 care-reviewer findings for the same file/line; a match forbids novel.' (2) Already-resolved short-circuit: 'A thread the author already resolved, or the bot marked [resolved]/withdrew, is NOT re-graded — emit no fresh verdict (skip) so it does not re-enter the reply/resolve cycle. Only a thread re-opened with NEW content earns a fresh verdict.' Guard (1) with a tr-* fixture whose reviewer-findings input contains the escaped item → ground-truth missed_by != novel; guard (2) with tr-04 extension or new tr-05-resolved-thread-skip (ground truth: addressCount stays 0, no new verdict rows).
+- **care-loop/orchestrator/src (FSM 3→4a→4b→5 review feedback)** (orchestrator-code): Bind correctness-class 4a reviewer findings to the implementer BEFORE the first push. When care-reviewer returns verdict:findings with any class:correctness item, route a reapplication pass (existing 6b implementer path, fed payload.findings the way 6b is fed verdicts.md) before gate/push, then re-review. Cap to ONE pre-push reapply (match the single gate-loopback budget) to avoid loops. Closes the 'we caught it, shipped it anyway, bots re-found it, burned a CI round' leak (F1/F2). Add test: a 4a result with a correctness finding drives an implementer reapply before the first push event. Apply via orchestrator edit + npm test.
+
+### Proposed fixtures
+- `care-triager novel-vs-none mis-attribution (reviewer-r1 findings #1/#3 vs verdicts-r1 novel tags)` (verbatim) for care-triager
+
+## Findings
+- **IMP-22** [dim 8] care-reviewer-r1 CAUGHT all three substantive issues (non-debounced query, missing aria-label, empty-page pagination trap) as findings #1/#3/#4, but the implementer applied only the a11y fix; the debounce and pagination-guard shipped in the first push and bots re-found them in r1. The triager then tagged both escaped items missed_by:novel (verdicts-r1.md L8/L10) despite the reviewer having them in hand. Two defects: (a) novel mis-attribution hiding a real pipeline leak from dim-8 aggregation; (b) 4a correctness findings are non-binding — they never feed back to the implementer before the step-5 push. — _new · 4a correctness findings not bound to implementer / triager novel over-attribution · computational_
+- **IMP-16** [dim 8] Same had-it-and-it-escaped shape as the 2026-07-20 age-boundary escape, sharpened: here the reviewer did NOT hedge (flagged crisply) yet the correctness findings still shipped because 4a findings have no teeth. Generalizes IMP-16 from 'reviewer phrasing' to '4a correctness findings are advisory-only, not bound to the maker before the first push.' — _re-observed (seen: 3) · reviewer-catchable correctness still escaping · inferential_
+- **IMP-17** [dim 6] Rounds 2-3 were pure re-declining of already-resolved threads. r2: address=1 decline=7, all 'fix already applied'; r3: address=0 decline=3, all 'fix already applied', reply-step skipped 11. ~50% of post-r1 triager spend was re-triaging resolved threads. Exactly the recurrence IMP-17 / 2026-07-20 report #2 predicted; combined with #16586 this clears the recurrence gate for a triager already-resolved short-circuit. — _re-observed (seen: 3) · triager re-declines resolved threads each round · computational_
+
+---
+Report-mode (no-apply) diagnosis — NOTHING was edited (no skill edits, no IMPROVEMENTS/HARNESS-COVERAGE mutation, no fixtures committed, no git/verify/evals). diagnosed-by: Claude Opus 4.8 (github-copilot/claude-opus-4.8).
+
+Run: care_fe-user-depts-bot-run (PR #16591, ENG-559) — 'Add pagination and search for user departments'. Distinct from the already-diagnosed care_fe-user-dept-pagination (PR #16586): same feature area, different PR, different escape profile (that run authored specs; this one is no_specs). Outcome: run.end converged at step 7 after 3 rounds (~1h wall, ~26min compute), 1 resume, CI green each push. Judgment cost_cum ≈ $1.34 (Opus spawns only).
+
+DIM-7 FIRST: two findings are re-observations that clear recurrence gates (IMP-16 escape class; IMP-17 churn). No applied entry regressed.
+
+FINDINGS (ranked):
+
+1. [dim 8/4 — HEADLINE] care-reviewer-r1 CAUGHT all three substantive issues (findings #1 non-debounced query/no page-reset, #3 missing aria-label, #4 verify i18n key) that bots later raised. The implementer applied only the a11y fix; the debounce and empty-page pagination-guard shipped in the first push and bots re-found them in r1. The triager then tagged both escaped items missed_by:novel (verdicts-r1.md L8/L10; care-triager-r1 items 1&3) despite the reviewer's own r1 payload containing them. Two sub-problems: (a) ATTRIBUTION — novel means un-catchable pre-merge, but these were in-hand; correct tag is none (fix-application gap). novel hides a real leak from cross-run dim-8 aggregation. (b) MECHANISM — 4a correctness findings are non-binding: 4a runs after 3 and feeds nothing back to the maker before the step-5 push, so bots independently rediscover it and burn a CI round. New (IMP-22).
+
+2. [dim 8 — RE-OBSERVED, bumps IMP-16 seen:3] Same had-it-and-it-escaped shape as the 2026-07-20 age-boundary escape, sharpened. There the reviewer hedged; here it flagged crisply yet the finding still shipped because 4a findings have no teeth. Generalizes IMP-16 from 'reviewer phrasing' to '4a correctness findings are advisory-only, not bound to the maker before the first push.' This is the stronger, generalizable version of finding 1(b).
+
+3. [dim 6 — RE-OBSERVED, bumps IMP-17 / 2026-07-20 #2 to seen:3] Rounds 2-3 were pure re-declining of already-resolved threads. r2: address=1 decline=7, all 'fix already applied'; r3: address=0 decline=3, all 'fix already applied', reply-step skipped 11. The one genuinely-new r2 address item (verify search_departments key) was itself reviewer finding #4 the implementer hadn't confirmed. ~50% of post-r1 triager spend was re-triaging resolved threads — exactly the recurrence IMP-17 / the 2026-07-20 report predicted. Combined with #16586's independent observation this clears the recurrence gate for the triager already-resolved short-circuit.
+
+OBSERVATIONS: none material beyond the above.
+
+HEALTHY SIGNALS (regression detectors): Model tier held — every judgment spawn (planner r1-r3, reviewer r1, triager r1-r3, test-grader r1) on claude-opus-4.8; maker on the CLI tier; no plan_wrong_tier (dim1 🟢). Resume reconciled cleanly — one run.resume at 5-await, re-waited CI, no redo, run.end converged present, no torn tail (dim2 🟢). Gate discipline intact — every push preceded by run_gate.sh exit-0; lint-fix.log present (IMP-18 auto-fix working) (dim4 🟢). verdicts.md written every round with per-item class·missed_by·severity — dim8 exact-read plumbing holding (IMP-15); F1's mis-attribution is a CONTENT issue, not a plumbing regression. No spawn.invalid — every role returned schema-valid output first try (dim5 🟢).
+
+PROPOSED CHANGES (text only, nothing applied). Coverage delta (would-be): 🟢 0 · 🟡 +1 · 🔴 0.
+
+Eval-covered (would auto-apply outside report mode) — care-triager/SKILL.md: (1) novel-vs-none discipline rule; (2) already-resolved short-circuit (now seen ≥3 across runs). Guard both with tr-* fixtures.
+
+Human-required (orchestrator tested code, propose-only, apply via edit + npm test) — care-loop/orchestrator/src: bind correctness-class 4a reviewer findings to the implementer (existing 6b path) before the first push, capped to one pre-push reapply, then re-review. Closes the F1/F2 leak. Add a test asserting a 4a correctness finding drives an implementer reapply before the first push event.
+
+Proposed fixture (PROPOSED for human review, NOT auto-committed — bias-toward-shipping, first observation): care-triager novel-vs-none mis-attribution — verbatim MRE from care-reviewer-r1.result.json (findings #1/#3) + verdicts-r1.md (same items tagged novel); ground truth missed_by:none. Guards the triager rule #1.
+
+HISTORY INTO PR: F1 = NEW (IMP-22 — first novel mis-attribution + first 4a-finding-dropped-before-push observation). F2 = RE-OBSERVED (IMP-16 seen +1, sharpened). F3 = RE-OBSERVED (IMP-17-adjacent seen ≥3, clears gate). No applied entry regressed. Coverage delta +1 🟡: new HARNESS-COVERAGE row '4a correctness findings not bound to implementer / triager novel over-attribution' flips 🔴→🟡 once the orchestrator bind lands + the triager fixture is committed.

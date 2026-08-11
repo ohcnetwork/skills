@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runStart, roleSpawn, type StartOptions } from "../src/orchestrate.ts";
+import { execFileSync } from "node:child_process";
+import {
+  runStart,
+  roleSpawn,
+  defaultDiffOf,
+  type StartOptions,
+} from "../src/orchestrate.ts";
 import type { SpawnFn, HelperFn } from "../src/pipeline.ts";
 import type { CiConclusion } from "../src/github.ts";
 import type {
@@ -281,4 +287,50 @@ test("roleSpawn noop-passes 4b/4c when skills not injected", async () => {
   });
   assert.equal(uv.verdict, "pass");
   assert.equal(uv.reason_code, "role_noop");
+});
+
+// ── defaultDiffOf: untracked new files must be in the diff (COLLATION-2026-07-28 §E.1) ────────────
+// Before the fix, a brand-new *.spec.ts (not yet `git add`ed until step 5) was invisible to 4a/4b
+// because `git diff HEAD` omits untracked files — silently blinding the reviewer + test-grader.
+
+test("defaultDiffOf includes untracked new files (fresh spec is visible at 4a/4b)", () => {
+  const dir = rd();
+  const git = (...a: string[]) =>
+    execFileSync("git", ["-C", dir, ...a], { encoding: "utf8" });
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@t");
+  git("config", "user.name", "t");
+  writeFileSync(join(dir, "base.ts"), "export const x = 1;\n");
+  git("add", "base.ts");
+  git("commit", "-qm", "base");
+
+  // A new spec the agent authored but has NOT staged yet (git add -A only runs at step 5).
+  writeFileSync(
+    join(dir, "feature.spec.ts"),
+    'import { test } from "vitest";\ntest("renders age band", () => {});\n',
+  );
+
+  const diff = defaultDiffOf(dir, "main");
+  // the untracked spec appears with the standard `+++ b/<path>` header the spec parser keys on
+  assert.match(diff, /^\+\+\+ b\/feature\.spec\.ts$/m);
+  assert.match(diff, /renders age band/);
+});
+
+test("defaultDiffOf: no untracked files ⇒ committed+uncommitted only (unchanged behavior)", () => {
+  const dir = rd();
+  const git = (...a: string[]) =>
+    execFileSync("git", ["-C", dir, ...a], { encoding: "utf8" });
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@t");
+  git("config", "user.name", "t");
+  writeFileSync(join(dir, "base.ts"), "export const x = 1;\n");
+  git("add", "base.ts");
+  git("commit", "-qm", "base");
+  // an uncommitted edit to a TRACKED file is still captured; nothing untracked to append
+  writeFileSync(join(dir, "base.ts"), "export const x = 2;\n");
+
+  const diff = defaultDiffOf(dir, "main");
+  assert.match(diff, /-export const x = 1;/);
+  assert.match(diff, /\+export const x = 2;/);
+  assert.doesNotMatch(diff, /no-index/);
 });

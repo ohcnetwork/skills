@@ -1,0 +1,46 @@
+# Doctor proposal — 2026-07-28 — care_fe-user-dept-pagination
+> No changes applied. Read-only diagnosis for cross-run collation.
+
+**Coverage delta (would-be):** 🟢 0 · 🟡 +1 · 🔴 0
+
+## Proposed changes
+### Human required
+- **care-loop/orchestrator/src/orchestrate.ts (defaultDiffOf, L368-377)** (orchestrator-code): Include untracked new files so 4a/4b grade fresh spec/component files BEFORE they are committed. After `const uncommitted = run("diff", "HEAD");` add:
+
+  const untracked = run("ls-files", "--others", "--exclude-standard")
+    .split("\n")
+    .filter(Boolean)
+    .map((f) => run("diff", "--no-index", "/dev/null", f)) // synthesizes +++ b/<f> add-diff
+    .join("");
+  return committed + uncommitted + untracked;
+
+(git diff --no-index exits non-zero on difference; existing `spawnSync(...).stdout ?? ""` tolerates it.) Add a test asserting an untracked *.spec.ts appears in defaultDiffOf output and drives specPathsFromDiff to non-empty. Apply via orchestrator edit + npm test.
+- **care-loop/orchestrator/src/auto-doctor.ts (verify-then-PR flow, before openPr)** (orchestrator-code): Push the self-improve branch to origin and confirm success BEFORE calling gh pr create/openPr, mirroring runStart's push-before-PR gating (npm-test.log ok 106 proves that ordering for the main flow). On push failure, journal doctor.error and abort without a dangling unpushed commit. Add a test: 'auto-doctor pushes the self-improve branch before openPr; a push failure aborts before PR creation.' Apply via orchestrator edit + npm test. (Fixes the seq-135 head-invalid PR-creation crash observed in this run's 2026-07-21 auto-doctor pass.)
+- **care-triager/SKILL.md (methodology name="default", after the IMP-17 churn rules)** (no-eval-coverage): REPORT MODE — proposed as text, not applied. Add an already-resolved short-circuit: 'A thread the PR author (us) has already resolved, or that the bot itself marked [resolved]/withdrew, is NOT re-graded — emit no fresh verdict (skip) so it does not re-enter the reply/resolve cycle. Only a thread re-opened with NEW content after our resolution earns a fresh verdict.' care-triager IS eval-covered (tr-*), so this WOULD auto-apply outside report mode; guarded by extending tr-04-age-comment-churn or a new tr-05-resolved-thread-skip whose ground truth is skip / addressCount stays 0. seen:2 clears the recurrence gate for a real edit.
+
+### Proposed fixtures
+- `care-test-grade escaped spec defects (silent-continue fallbacks + hardcoded no-match term)` (verbatim) for care-test-grade
+
+## Findings
+- **IMP-19** [dim 8] Step 4b test-grade passed no_specs in 0ms on a round where the implementer HAD authored a spec; two real spec defects (silent-continue fallbacks + hardcoded no-match term) escaped to bots with missed_by: care-test-grade. Root cause: defaultDiffOf (orchestrate.ts:368-377) uses `git diff HEAD` which omits UNTRACKED new files, so a brand-new spec is invisible to specPathsFromDiff at 4a/4b time (git add -A only runs later at step 5). 4a reviewer shares the same blind spot. — _new · BS-new · 4a/4b diff omits untracked new files (🔴→🟡 once defaultDiffOf fix + care-test-grade fixture land) · computational_
+- **IMP-20** [dim 2] This run's own auto-doctor pass (2026-07-21) passed coherence+verify then errored at PR creation: `Validation Failed {resource:PullRequest, field:head, code:invalid}` (seq 135). The self-improve branch was committed locally (git-commit.log) but never pushed before gh pr create. auto-doctor.ts should push the self-improve branch before openPr, mirroring runStart's push-before-PR ordering (npm-test.log ok 106). — _new · computational_
+- **IMP-21** [dim 6] 7 rounds, ~85% of spend after r2 was CI churn + re-declining bot-resolved threads (r7 verdicts: all 19 missed_by:none, every reason 'Fix already applied'; reply-step skipped 12/20/29/29/30 across r3-r7). Recurrence of 2026-07-20 finding #2 which explicitly said a decline-heavy resolved-thread tail across runs warrants a triager 'already-resolved → skip' rule. Now seen:2, clears the recurrence gate. — _re-observed (seen: 2) · inferential_
+
+---
+Report-mode (no-apply) proposal — nothing was edited (no skill edits, no IMPROVEMENTS/HARNESS-COVERAGE mutation, no fixtures committed, no git/verify). diagnosed-by: Claude Opus 4.8.
+
+Run: care_fe-user-dept-pagination (PR #16586). Outcome: run.end converged at step 7 after 7 rounds (~6h), 3 resumes, CI green, r7 triage clean (address=0 decline=19). cost_cum ≈ $1.95 (Opus judgment spawns only). This run already had a 2026-07-21 autonomous auto-doctor pass that applied IMP-17/IMP-18; this is an independent report-mode diagnosis of net-new findings.
+
+FINDINGS (ranked):
+
+1. [dim 8/4 — escape via harness blind spot] HEADLINE. 4b test-grade returned pass/no_specs/hasSpecs:false in 0ms (care-test-grader-r1.result.json) on a round where the implementer authored tests/facility/users/userDepartmentsPagination.spec.ts (planned in baseline.md L26, committed seq 38). Two rounds later the bots caught two real spec defects the grader should have owned, and the triager attributed both to us (verdicts-r4.md: address·test·missed_by:care-test-grade — (a) silent-skip `if(!rolesRes.ok) continue` fallbacks that can leave <12 linked departments so pagination assertions fail on the wrong cause; (b) medium — hardcoded no-match term 'zzz_no_match_xyz_999' that should be Faker-generated). ROOT CAUSE is computational, not a judgment miss: defaultDiffOf (orchestrate.ts:368-377) = `git diff base...HEAD` + `git diff HEAD`, and `git diff HEAD` omits UNTRACKED new files. The new spec is untracked at 4b time (git add -A runs later at step 5; r1 implementer result shows staged:false), so specPathsFromDiff (skills-opencode.ts:743-751) finds zero spec headers → hasSpecs:false. The 4a reviewer shares the identical defaultDiffOf and was equally blind (its r1 findings are all on the .tsx). Every first-round new spec/component file in every run is invisible to 4a and 4b. propose-only (tested orchestrator code). Proposed fix: extend defaultDiffOf to append untracked files via `git ls-files --others --exclude-standard` piped through `git diff --no-index /dev/null <f>`. FIXTURE: verbatim MRE of the r4 spec escape as a care-test-grade eval (expected verdict wrong) — first-observation single escape → PROPOSED for human review, NOT auto-committed (bias-toward-shipping; missed_by:care-test-grade has not recurred).
+
+2. [dim 2 — orchestrator bug] This run's 2026-07-21 auto-doctor passed coherence (seq133) + verify (tests:true evals:true, seq134) then errored at PR creation: Validation Failed {resource:PullRequest field:head code:invalid} (seq135). The self-improve branch was committed locally (git-commit.log) but never pushed before gh pr create. propose-only (auto-doctor.ts). Proposed fix: push the self-improve branch before openPr, mirroring runStart's push-before-PR gating (npm-test.log ok 106).
+
+3. [dim 6 — bot-round efficiency] 7 rounds; ~85% of spend after r2 was CI churn + re-declining bot-resolved threads (r7: all 19 missed_by:none, every reason 'Fix already applied'; reply-step skipped 12/20/29/29/30 across r3-r7; cost_cum $0.61→$1.95). This is the exact recurrence the 2026-07-20 report's finding #2 said to watch for. seen:2 → clears the recurrence gate. care-triager IS eval-covered (tr-*) so this WOULD auto-apply outside report mode; here it is proposed as text: add an already-resolved short-circuit to care-triager/SKILL.md so bot-resolved / author-resolved threads are skipped (no fresh verdict) rather than re-triaged each round, guarded by tr-04 extension or a new tr-05-resolved-thread-skip.
+
+OBSERVATIONS (not findings): (a) recurring implementer filesChanged path typos ('ests/…', prior run 'rc/…') — cosmetic, seen:2, the Sonnet maker truncates the first char of the payload path; edits landed correctly. (b) verify harness healthy this run (evals 8/8 cr-* PASS, npm-test 184/184) unlike 2026-07-20 — so IMP-17/IMP-18 were eval-verified in-run; only the push-before-PR bug (finding 2) stopped the PR.
+
+HEALTHY SIGNALS: model tier held (all judgment on Opus, maker/ci-fix on Sonnet; no plan_wrong_tier / WrongTierError) — dim1 🟢. Resume reconciled cleanly across 3 deaths, no torn tail / no JournalCorruptionError — dim2 🟢. Gate discipline intact, every push preceded by run_gate exit-0; the r4 gate-blocked outcome is IMP-18's diagnosed mechanism working (already applied), not a regression — dim4 🟢. verdicts.md written every round with per-item class·missed_by·severity — dim8 exact-read holding (IMP-15); the triager correctly attributed the two test escapes to care-test-grade rather than dodging to novel, which is what surfaced finding 1. Triager declined-by-citation correctly on r7 (no rubber-stamping).
+
+HISTORY INTO PR: finding 1 = NEW (first missed_by:care-test-grade escape in the backlog). finding 3 = RE-OBSERVED (bump 2026-07-20 finding #2 to seen:2). No applied entry regressed. Coverage delta: +1 🟡 (new HARNESS-COVERAGE row '4a/4b diff omits untracked new files' flips 🔴→🟡 once the defaultDiffOf fix + care-test-grade fixture land).

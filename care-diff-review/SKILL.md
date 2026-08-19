@@ -13,7 +13,7 @@ and _why_ (the requirement it fulfills) from the code alone — no commit messag
 skill reconstructs that intent from the diff, surfaces every place the code failed to convey it,
 and confirms the reconstruction with the user. Wherever the reading was hard, that's the finding.
 
-<!-- care-loop:methodology name="default" -->
+<!-- care-loop:methodology name="agreement" -->
 
 ## Working agreement (applies throughout)
 
@@ -50,44 +50,14 @@ finding needs its context). **Do not read the commit message, PR body, or branch
 they're the answer key. Form your reading from the code, then optionally cross-check against them
 at the end.
 
-<!-- care-loop:methodology name="default" -->
-
 ## Step 2 — Reconstruct the intent from the code
 
-For the diff as a whole, and for each distinct logical change, state plainly:
+Reconstruct, per change, _what it does_ / _why_ / a _confidence_ rating. This methodology is the
+**`care-intent`** skill, extracted verbatim so it can run as a standalone maker-tier role and be
+graded by care-evals — read `care-intent/SKILL.md` for it. Form the reading from the code first; the
+commit message, PR body, and branch name are the answer key (see Step 1).
 
-- **What it does** — the behavior change, in one or two sentences.
-- **Why** — the requirement or problem it most plausibly fulfills, inferred from the code.
-- **Confidence** — _high_ if the code makes it self-evident; _low_ if you had to guess.
-
-Reason from _this_ code in _this_ file. Read the actual control flow and data flow — don't
-pattern-match to a catalog of known bugs.
-
-### Intent reconstruction mini-checklist
-
-Before settling on a reconstruction, verify these structural facts. They're not required for every change, but they'll catch gaps:
-
-- **Entry point** — where does the change activate? (component mount? event handler? API call? conditional branch?)
-- **Exit point** — what's the observable outcome? (render output? state change? side effect? API request?)
-- **Shared state touched?** — does it modify local state, props, context, or server state? (impacts other consumers)
-- **Fallback/edge paths** — are there conditional branches the change introduces? (happy path + error/empty cases?)
-- **Scope shift** — does this change affect other files or does it stay local? (shared component → check siblings)
-
-**Example reconstruction checklist:**
-
-```
-Change: Add a "low stock" warning banner to the inventory list
-
-✓ Entry: Component mounts with `items` prop
-✓ Exit: Banner rendered above list if any item.stock < 10
-✓ State: None (reads props, no local state or context)
-✓ Fallback: Empty inventory → no banner; all items in stock → no banner
-✓ Scope: Isolated to InventoryList.tsx (no siblings affected, only this component renders the banner)
-
-Confidence: HIGH — straightforward conditional render, no surprises
-```
-
-This checklist doesn't change your output (still one or two sentences), but it ensures you didn't miss a multi-file scope or an important edge case.
+<!-- care-loop:methodology name="findings" -->
 
 ## Step 3 — Legibility gaps (the core output)
 
@@ -190,7 +160,7 @@ When invoked by care-loop (Step 4a), tier your findings so the orchestrator can 
 - **Convention** findings are noted in the round summary (fix if time permits)
 - **Polish** findings are advisory (not loop-back candidates)
 
-<!-- care-loop:methodology name="default" -->
+<!-- care-loop:methodology name="findings" -->
 
 ## Reference — what "legible CARE code" looks like
 

@@ -84,3 +84,48 @@ test("loadMethodology memoizes per (path, region) — a second read of a since-c
   );
   assert.equal(loadMethodology(p, "default"), "v1"); // cached
 });
+
+// ── PLAN-pr-salvage §3.1: care-intent extraction must not move the 4a reviewer prompt ─────────────
+import { readFileSync } from "node:fs";
+import {
+  reviewerMethodology,
+  intentReconstruction,
+} from "../src/skill-source.ts";
+
+const goldenDir = join(import.meta.dirname, "fixtures");
+
+test("reviewerMethodology is byte-identical after Step 2 → care-intent (no-tsx)", () => {
+  const golden = readFileSync(
+    join(goldenDir, "reviewer-methodology-notsx.golden.txt"),
+    "utf8",
+  );
+  assert.equal(reviewerMethodology({ tsx: false }), golden);
+});
+
+test("reviewerMethodology is byte-identical after Step 2 → care-intent (tsx appends ux-static)", () => {
+  const golden = readFileSync(
+    join(goldenDir, "reviewer-methodology-tsx.golden.txt"),
+    "utf8",
+  );
+  assert.equal(reviewerMethodology({ tsx: true }), golden);
+});
+
+test("the answer-key rule stays OUT of the reviewer prompt (it lives outside every region)", () => {
+  // Regression guard for the extraction trap: care-diff-review Step 1's "don't read the commit
+  // message / PR body" rule is NOT in the reviewer prompt today, and must not sneak in via care-intent.
+  const r = reviewerMethodology({ tsx: false });
+  assert.doesNotMatch(r, /are the answer key/i);
+});
+
+test("the Reference block stays IN the reviewer prompt (the second findings region)", () => {
+  const r = reviewerMethodology({ tsx: false });
+  assert.match(r, /what "legible CARE code" looks like/);
+});
+
+test("intentReconstruction is Step 2 only — no Reference block, no answer-key rule", () => {
+  const ir = intentReconstruction();
+  assert.match(ir, /Reconstruct the intent from the code/);
+  assert.match(ir, /Intent reconstruction mini-checklist/);
+  assert.doesNotMatch(ir, /what "legible CARE code" looks like/); // Reference excluded
+  assert.doesNotMatch(ir, /Legibility gaps/); // Step 3 excluded — reconstruction, not critique
+});

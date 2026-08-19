@@ -166,6 +166,22 @@ def _prompt_care_review(skill_md: str, diff_text: str) -> str:
     )
 
 
+def _prompt_care_intent(skill_md: str, diff_text: str) -> str:
+    return (
+        "You are running the **care-intent** skill (intent reconstruction, maker tier). Its full, "
+        "current instructions follow verbatim between <skill></skill> — follow them exactly; they are "
+        "the source of truth, not any summary.\n\n"
+        f"<skill>\n{skill_md}\n</skill>\n\n"
+        f"{_SUBAGENT_NOTE}\n\n"
+        "Reconstruct the intent from the diff alone. There is NO commit message, PR body, or branch "
+        "name — reason only from the code. The diff is inlined between <diff></diff>:\n\n"
+        f"<diff>\n{diff_text}\n</diff>\n\n"
+        "Produce the reconstruction with an **Overall** line and a **Per-change** list; for each "
+        "change give what it does, why, and a confidence rating. Describe what THIS control flow "
+        "actually does, not what an option/function name suggests."
+    )
+
+
 def _prompt_test_grade(skill_md: str, stage: str) -> str:
     criteria = _read(os.path.join(stage, "criteria.md"))
     intent_path = os.path.join(stage, "intent.md")
@@ -284,6 +300,9 @@ def run_task(task_dir: str, adapter_name: str, model: str | None, care_fe: str,
             failures = _read(os.path.join(task.dir, "failures.md"))
             criteria = _read(os.path.join(task.dir, "criteria.md"))
             prompt = _prompt_cifix(_load_skill_md("care-ci-fix"), failures, diff_text, criteria)
+        elif task.skill == "care-intent":
+            diff_text = _read(os.path.join(task.dir, "change.diff"))
+            prompt = _prompt_care_intent(_load_skill_md("care-intent"), diff_text)
         else:
             raise SystemExit(f"no runner for skill {task.skill!r}")
 

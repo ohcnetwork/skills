@@ -86,11 +86,26 @@ export function loadMethodology(absPath: string, regionName: string): string {
  * structured spawn and cannot drive a browser.
  */
 export function reviewerMethodology(opts: { tsx: boolean }): string {
-  const parts: string[] = [
+  // care-diff-review's methodology is now three sibling regions — `agreement`, the extracted
+  // `care-intent` (Step 2, its own skill), then `findings` (Step 3 + correctness + refactor-safety +
+  // Reference). Compose them in that file order, joined with the same "\n\n" loadMethodology uses
+  // internally, so the reviewer prompt is byte-identical to when Step 2 lived inline. Pinned by the
+  // reviewer-methodology golden test (PLAN-pr-salvage §3.1/§8).
+  const diffReview = [
     loadMethodology(
       resolve(SKILLS_ROOT, "care-diff-review/SKILL.md"),
-      "default",
+      "agreement",
     ),
+    intentReconstruction(),
+    loadMethodology(
+      resolve(SKILLS_ROOT, "care-diff-review/SKILL.md"),
+      "findings",
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const parts: string[] = [
+    diffReview,
     loadMethodology(
       resolve(SKILLS_ROOT, "care-technical-review/SKILL.md"),
       "default",
@@ -105,6 +120,16 @@ export function reviewerMethodology(opts: { tsx: boolean }): string {
     );
   }
   return parts.filter(Boolean).join("\n\n---\n\n");
+}
+
+/**
+ * The intent-reconstruction methodology (care-diff-review Step 2), sourced from the standalone
+ * `care-intent` skill. Injected alone into the salvage reconstruction spawn (PLAN-pr-salvage §3.1),
+ * and composed into the 4a reviewer above. Deliberately excludes care-diff-review's Reference block
+ * (a legibility-grading aid, not reconstruction methodology).
+ */
+export function intentReconstruction(): string {
+  return loadMethodology(resolve(SKILLS_ROOT, "care-intent/SKILL.md"), "default");
 }
 
 /**

@@ -353,7 +353,7 @@ def _grade_cifix(task: Task, text: str) -> tuple[bool, float, dict]:
 # --------------------------------------------------------------------------- public API
 def grade(task: Task, output_text: str, *, model_used: str = "?", adapter: str = "?",
           judge_adapter=None, judge_model: str | None = None) -> Grading:
-    if task.skill in ("care-review", "care-ux-review"):
+    if task.skill in ("care-review", "care-ux-review", "care-intent"):
         # care-ux-review output is prose findings too — signal-based recall over must_flag +
         # false-positive count + clean-control handling, same as care-review.
         passed, score, detail = _grade_care_review(task, output_text)

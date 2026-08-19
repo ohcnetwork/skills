@@ -43,6 +43,7 @@ import { opencodeIntentReconstructor } from "./skills-opencode.js";
 import { openRunStore, setActiveRunStore, SqliteRunStore } from "./run-store.js";
 import { reindexRuns } from "./reindex.js";
 import { resolveRunId } from "./run-context.js";
+import { startService } from "./service/serve.js";
 
 const RUNS_ROOT = join(__dirname, "../../runs");
 const DB_PATH = join(RUNS_ROOT, "loops.db");
@@ -70,6 +71,11 @@ Usage:
 
   care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
        flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
+
+  care-loopd serve [flags]       HTTP API over loops.db for the team frontend (PLAN-loop-service §6).
+       Read-only and DB-only: no route touches a run dir. Binds loopback unless --host says otherwise
+       (there is no authentication — the X-Care-User header is a claim, and the boundary is the network).
+       flags: --port <n> (default 3142) · --db <path> (default ../runs/loops.db) · --host <addr>
 
   care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
        fleet projection dashboard/status read (PLAN-sqlite-run-store.md). Safe at any time: it clears
@@ -817,6 +823,15 @@ async function main(): Promise<void> {
       if (!rest[0]) usage();
       await cmdDoctor(resolve(rest[0]), parseFlags(rest.slice(1)));
       break;
+    case "serve": {
+      const sf = parseFlags(rest);
+      startService({
+        dbPath: typeof sf.db === "string" ? resolve(sf.db) : DB_PATH,
+        port: typeof sf.port === "string" ? Number.parseInt(sf.port, 10) : 3142,
+        host: typeof sf.host === "string" ? sf.host : undefined,
+      });
+      break;
+    }
     case "reindex": {
       const df = parseFlags(rest);
       const runsDir =

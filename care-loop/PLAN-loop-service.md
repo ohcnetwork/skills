@@ -207,15 +207,75 @@ repo; that should stay a deliberate local action, not a side effect of every tea
 
 ## 6. HTTP API
 
-```
-GET    /api/runs?requested_by=&status=   → RunSummary[]     RunIndex.list, LEFT JOIN queue
-GET    /api/runs/:run_id                 → RunDetail        RunIndex.slugOf → .get
-POST   /api/runs                         → { run_id }       enqueue (201) — id minted at insert
-POST   /api/runs/:run_id/cancel          → 202
-GET    /api/runs/:run_id/gate            → PendingAsk|null
-POST   /api/runs/:run_id/gate            → 204              answer
-GET    /api/runs/:run_id/events          → SSE              live tail
-```
+**The service reads the DATABASE and nothing else.** No route touches a run directory, a
+`journal.jsonl`, or a `state.json` — `run_events` mirrors the journal completely (same `seq`/`ts`/
+`event`/`step`/`round`/`data`/`prev`), so there is nothing the filesystem could add. The FE in turn
+talks only to this API, never to the DB. Three layers, each with exactly one thing below it.
+
+This is a genuine constraint, not a preference, and it costs one thing — see "What DB-only cannot
+serve" below.
+
+### The full surface
+
+Every route is `/api/*`, returns JSON, and takes `X-Care-User`. `:id` is always a **run_id** (ULID);
+the directory slug appears in responses as a display label and is never a key.
+
+| Method | Route | Returns | Step |
+|---|---|---|---|
+| `GET` | `/health` | `{ ok, db, supervisor, version }` | 1 |
+| `GET` | `/me` | `{ login }` — the resolved identity, echoed back | 1 |
+| `GET` | `/runs` | `{ items: RunSummary[], total, limit, offset }` | 1 |
+| `GET` | `/runs/:id` | `{ run, detail, queue }` — `runs` + `run_detail` + its queue row | 1 |
+| `GET` | `/runs/:id/events` | `{ items: JournalEvent[], next_seq }` — paginated timeline | 1 |
+| `GET` | `/runs/:id/stream` | SSE — live event tail | 2 |
+| `POST` | `/runs` | `201 { run_id, queue_id }` — enqueue | 3 |
+| `GET` | `/queue` | `{ items: QueueRow[] }` — pending + running | 3 |
+| `GET` | `/stats` | `{ active, by_step, cost_usd, runs_today }` | 3 |
+| `POST` | `/runs/:id/cancel` | `202` | 4 |
+| `GET` | `/runs/:id/gate` | `PendingAsk \| null` | 5 |
+| `POST` | `/runs/:id/gate` | `204` | 5 |
+
+`GET /runs` filters: `requested_by`, `repo`, `branch`, `step`, `active` (non-terminal step), `stale`,
+`limit` (default 50, max 200), `offset`. All are optional and all compose.
+
+`GET /runs/:id/events` filters: `after_seq` (the pagination cursor — `seq` is dense and monotonic per
+run, so it beats an offset), `event` (repeatable type filter), `limit` (default 500, max 2000).
+
+**One `cancel`, not two.** Minting `run_id` at enqueue (§4) means a request has a stable id before it
+has a process, so a single route covers both cases: a `pending` row is marked `cancelled` in place,
+a `running` one signals the child. The FE never has to know which state it caught the run in — which
+is exactly the distinction it is least able to make without a race.
+
+### Conventions
+
+- **Envelope on lists, bare object on singletons.** `{ items, total, limit, offset }` for collections;
+  the resource itself for a single fetch. Pagination added later to a bare array is a breaking change,
+  and this contract is frozen before the FE is written.
+- **Errors are `{ error: { code, message } }`** with a real status: `400` malformed, `404` unknown
+  run, `409` state conflict (cancelling a finished run), `503` DB unreachable. `code` is a stable
+  string the FE can branch on; `message` is for humans and may change.
+- **No route makes an authorization decision** (see below). `?requested_by=` is a filter, not a
+  permission.
+- **Timestamps are ISO-8601 UTC strings**, exactly as stored. No epoch ints, no server-side
+  formatting — the FE owns presentation.
+
+### What DB-only cannot serve
+
+Skill *output* is not in the database. `skill-log.ts` deliberately keeps the journal spine lean: a
+`skill.result` event carries bounded fields (verdict, reason_code, model, duration, counts) plus a
+`{path, sha256}` **reference**, while the full envelope goes to a content-addressed sidecar under
+`<run-dir>/skills/`. So the API can say *the reviewer returned 3 findings and declined*, but not
+*here is what it wrote*.
+
+Three ways out, and the choice should be deliberate:
+
+1. **Ship v1 without artifact bodies.** Verdicts, counts, and reasons are enough to watch a run.
+   Recommended — it costs nothing now and blocks nothing later.
+2. **Add a `run_artifacts` table**, written by the same `SkillLogger.artifact()` call that writes the
+   sidecar. Small, keeps DB-only intact, and makes drill-down work. Do this the moment the FE wants
+   to show what a skill actually said.
+3. **Let the service read sidecar files.** Rejected: it puts the filesystem back under the API for
+   one feature, and the supervisor would then need the run dirs mounted wherever it runs.
 
 `X-Care-User` on every request, persisted as `requested_by`. Freeze this contract before the FE
 starts — it is the whole reason the FE is sequenced third.
@@ -327,15 +387,29 @@ that made bot-authoring worth the trade.
 | # | Work | Est |
 |---|------|-----|
 | 0 | [[PLAN-sqlite-run-store]] steps 1–5 — **built as of 2026-08-19** | done |
-| 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` | 0.5d |
+| 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` — **built 2026-08-20** | done |
 | 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted | 1.5d |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join | 0.5d |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel | 1.5d |
 | 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
 | 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
 
-**~5.5d.** Step 0 is already done — `run-store.ts`, `run-index.ts`, `run-id.ts`, `run-context.ts`, and
-`reindex.ts` are built and tested, so step 1 starts against a working `RunIndex`.
+**~5.5d.** Steps 0–1 are done. `run-store.ts`, `run-id.ts`, `run-context.ts`, and `reindex.ts` gave
+step 1 a working store to build on; step 1 then rewrote `run-index.ts` as a **DB-only** port (`get`
+takes a run_id and reads `run_events`, where it used to take a directory slug and read the journal
+file) and added `src/service/` — `app.ts` (routes), `identity.ts`, `query.ts`, `errors.ts`,
+`serve.ts` — behind `care-loopd serve`. 17 tests cover the port and the HTTP contract; the contract
+tests drive a real Express app over an in-memory db, so the shape the FE is written against is frozen
+before the FE exists.
+
+Two things fell out of building it, both worth keeping in mind at step 2:
+
+- The vanilla `dashboard.html` reads `{name, state}`, which is not the service's shape. `dashboard.ts`
+  now adapts the index rows back into its own shape so the old page keeps working until step 2
+  deletes it. That adapter is the ONLY thing keeping two response shapes alive; it goes with the page.
+- `serve` opens the db `readOnly: true` and binds loopback by default. Both are deliberate: the
+  service has no reason to write (§3, one writer per run), and it has no authentication, so exposing
+  it beyond loopback should take an explicit `--host`.
 
 Steps 1–2 ship a read-only team dashboard before any spawn code exists, which is where the value/risk
 ratio is best. The [[PLAN-sqlite-run-store]] §10 cutover is **not** a prerequisite for any step here

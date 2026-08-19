@@ -14,7 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Journal } from "./journal.js";
 import { projectState } from "./state.js";
 import { renderEvent } from "./render.js";
-import { SqliteRunIndex, type RunSummary as RunSummaryV2 } from "./run-index.js";
+import { SqliteRunIndex, MAX_LIST_LIMIT } from "./run-index.js";
 import { isValidRunId } from "./run-id.js";
 import type { CareState } from "./state.js";
 import type { JournalEvent } from "./journal.js";
@@ -204,9 +204,30 @@ export function startDashboard(runsDir: string, port: number): void {
       const includeStale = url.searchParams.get("stale") === "1";
       const index = openIndexIfPresent(absRunsDir);
       if (index) {
-        const summaries: (RunSummaryV2 & { error?: string })[] = index
-          .list()
-          .filter((s) => includeStale || !s.stale);
+        // Adapt the index's flat rows back into THIS page's `{name, state}` shape. The vanilla
+        // dashboard.html is on its way out ([[PLAN-loop-service]] step 2 replaces it with the React
+        // FE), and the service's own contract is the flat one — but until the page is deleted, the
+        // db path and the scan path must serve it the same JSON or the fleet view breaks depending
+        // on whether a loops.db happens to exist.
+        const summaries: RunSummary[] = index
+          .list({ includeStale, limit: MAX_LIST_LIMIT })
+          .map((r) => ({
+            name: r.slug,
+            state: {
+              step: r.step,
+              round: r.round,
+              pr: r.pr,
+              tier: r.tier,
+              repo: r.repo,
+              branch: r.branch,
+              updated_at: r.updatedAt,
+            } as CareState,
+            eventCount: r.eventCount,
+            lastCost: r.costUsd,
+            startedAt: r.startedAt,
+            durationMs: r.durationMs,
+            stale: r.stale,
+          }));
         index.close();
         json(res, summaries);
         return;

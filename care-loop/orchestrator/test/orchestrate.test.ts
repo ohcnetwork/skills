@@ -34,6 +34,8 @@ const convergingGh = (ci: CiConclusion = "pass", prNumber = 100) =>
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",

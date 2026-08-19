@@ -27,10 +27,12 @@ const review = (
   submittedAt: string,
   commitId = "",
 ): PrReview => ({
+  id: 0,
   user,
   submittedAt,
   state: "COMMENTED",
   commitId,
+  body: "",
 });
 const comment = (user: string, createdAt: string, body = ""): PrComment => ({
   user,

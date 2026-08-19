@@ -31,6 +31,8 @@ const convergingGh = (ci: CiConclusion = "pass") =>
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -350,6 +352,8 @@ test("batched round: CI red + bot comments → bot fix AND ci-fixer in one round
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -409,6 +413,8 @@ test("CI-fix residual: bots clean + CI red → ci-fixer runs, commits, loop → 
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -493,6 +499,8 @@ test("§3 guard: ci-fixer edits a spec + 4b passes → proceeds to push → conv
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -545,6 +553,8 @@ test("§3 guard: source-only ci-fix (no spec touched) → guard is SKIPPED", asy
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -639,6 +649,8 @@ test("step 7 is reached once BOTH bots clean + CI green (multi-round scenario)",
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -906,6 +918,8 @@ const standaloneCiRedGh = (o: {
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",
@@ -1102,6 +1116,8 @@ const batchedGh = (opts: {
     }),
     listReviews: async () => [
       {
+        id: 0,
+        body: "",
         user: "a[bot]",
         submittedAt: "2099-01-01T00:00:00Z",
         state: "COMMENTED",

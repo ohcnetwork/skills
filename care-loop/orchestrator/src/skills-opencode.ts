@@ -24,6 +24,7 @@ import {
   uxValidatorMethodology,
   ciFixerMethodology,
   playwrightMechanics,
+  intentReconstruction,
 } from "./skill-source.js";
 import type {
   Implementer,
@@ -40,6 +41,7 @@ import type {
   CiFailure,
   TestGradeFinding,
 } from "./skill-result.js";
+import type { Tier } from "./state.js";
 
 export interface SkillModels {
   provider?: string; // default "github-copilot"
@@ -1514,5 +1516,99 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
       plannedBy,
       cost,
     );
+  };
+}
+
+// ── Intent reconstruction (care-intent, maker tier) — PLAN-pr-salvage §3.1 ─────────────────────────
+// Given a DIFF ONLY (the PR body is deliberately withheld — blindness is structural), reconstruct
+// what each change does + why + a confidence rating, and draft testable criteria. Runs read-only on
+// the maker tier; reads the worktree to confirm control flow, exactly like the planner reads the main
+// repo. Two-turn (agentic recon → structured emit), same split as the planner (structured output over
+// an agentic loop serial-spins; see promptAgenticThenStructured).
+
+const INTENT_SCHEMA = {
+  $schema: "http://json-schema.org/draft-07/schema#",
+  type: "object",
+  additionalProperties: false,
+  required: ["intent", "criteria", "classification"],
+  properties: {
+    intent: {
+      type: "string",
+      description:
+        "the reconstruction: an Overall line + a per-change what/why/confidence, from the code alone",
+    },
+    criteria: {
+      type: "array",
+      items: { type: "string" },
+      description: "draft testable acceptance criteria implied by the reconstructed behavior",
+    },
+    classification: { enum: ["trivial", "standard", "complex"] },
+  },
+} as const;
+
+function buildIntentReconSystem(): string {
+  const methodology = intentReconstruction();
+  const base =
+    "You are the care-loop intent reconstructor (care-intent, maker tier). You are given a DIFF for an " +
+    "existing PR and read-only access to the worktree. Reconstruct, from the CODE ALONE, what the change " +
+    "does and the requirement it most plausibly fulfills, per distinct logical change, with a confidence " +
+    "rating. There is NO commit message, PR body, or branch name — do not ask for one; reason only from " +
+    "the diff and the surrounding code you can read. Read at most a few files to confirm control flow. End " +
+    "your turn with the reconstruction in plain prose (Overall + per-change what/why/confidence) plus the " +
+    "draft acceptance criteria the behavior implies — do NOT emit JSON yet; a follow-up turn will format it.";
+  if (!methodology) return base;
+  return `${base}\n\n=== RECONSTRUCTION METHODOLOGY ===\n${methodology}\n=== END METHODOLOGY ===`;
+}
+
+function buildIntentEmitSystem(): string {
+  return (
+    "You are the care-loop intent reconstructor. In your previous turn you reconstructed the intent. Now " +
+    "emit EXACTLY that as the required JSON — intent (the Overall + per-change what/why/confidence prose), " +
+    "criteria (the draft acceptance criteria), and classification. Do NOT read or explore further, and do " +
+    "NOT change the reconstruction. Respond ONLY as the required JSON."
+  );
+}
+
+/** A reconstruction port: diff → { intent, criteria, classification }. The worktree is captured at
+ *  wiring time; the caller (adopt.ts) passes ONLY the diff. */
+export type IntentReconstructor = (input: {
+  diff: string;
+}) => Promise<{ intent: string; criteria: string[]; classification?: Tier }>;
+
+export function opencodeIntentReconstructor(
+  models: SkillModels = {},
+  worktree: string,
+  runDir: string,
+): IntentReconstructor {
+  const provider = models.provider ?? defaults.provider;
+  // Maker tier — reconstruction is description, not judgment (§3.1 D4).
+  const model = models.plannerRecon ?? defaults.plannerRecon;
+  const timeoutMs = Number(process.env.OC_INTENT_TIMEOUT_MS) || 360_000;
+  return async ({ diff }) => {
+    const round = 1;
+    const { data } = await promptAgenticThenStructured(
+      {
+        role: "care-intent",
+        providerID: provider,
+        modelID: model,
+        reconSystem: buildIntentReconSystem(),
+        task:
+          `Worktree (read-only, absolute paths): ${worktree}\n\n` +
+          `Reconstruct the intent of this PR from the diff below (and the code it touches). ` +
+          `There is no description — reason only from the code.\n\n` +
+          `=== DIFF ===\n${diff}\n=== END DIFF ===`,
+        emitSystem: buildIntentEmitSystem(),
+        emitInstruction:
+          "Emit your reconstruction (intent, criteria, classification) as the required JSON now.",
+        round,
+        timeoutMs,
+      },
+      INTENT_SCHEMA,
+    );
+    return {
+      intent: typeof data.intent === "string" ? data.intent : "",
+      criteria: Array.isArray(data.criteria) ? (data.criteria as string[]) : [],
+      classification: data.classification as Tier | undefined,
+    };
   };
 }

@@ -36,13 +36,17 @@ export interface PrInfo {
   headSha: string;
   headRef: string;
   title: string;
+  body?: string; // PR description — salvage (PLAN-pr-salvage §3.1) reads it; not the reconstruction spawn
+  baseRef?: string; // the base branch (e.g. "develop") — salvage diffs head against it
 }
 
 export interface PrReview {
+  id: number; // review databaseId — the join key for attributing inline comments (pull_request_review_id)
   user: string;
   submittedAt: string; // ISO
   state: string;
   commitId: string; // the SHA this review was submitted against (resume: bots-at-head)
+  body: string; // the review summary body — where CARE/Grumpy post findings (PLAN-pr-salvage §6 C0a)
 }
 
 export interface PrComment {
@@ -53,6 +57,7 @@ export interface PrComment {
   id?: number; // comment/thread id (review + issue comments)
   path?: string; // review comments only
   line?: number | null; // review comments only
+  reviewId?: number; // pull_request_review_id — joins an inline comment to its parent review (C0b attribution)
 }
 
 /** A review thread, with the GraphQL node id (needed to RESOLVE it), its resolution state, the
@@ -225,6 +230,8 @@ export class OctokitGitHub implements GitHubApi {
       headSha: data.head.sha,
       headRef: data.head.ref,
       title: data.title,
+      body: data.body ?? "",
+      baseRef: data.base?.ref ?? "",
     };
   }
 
@@ -235,10 +242,12 @@ export class OctokitGitHub implements GitHubApi {
       per_page: 100,
     });
     return rows.map((r) => ({
+      id: r.id,
       user: r.user?.login ?? "",
       submittedAt: r.submitted_at ?? "",
       state: r.state ?? "",
       commitId: r.commit_id ?? "",
+      body: r.body ?? "",
     }));
   }
 
@@ -255,6 +264,7 @@ export class OctokitGitHub implements GitHubApi {
       id: c.id,
       path: c.path ?? undefined,
       line: c.line ?? c.original_line ?? null,
+      reviewId: c.pull_request_review_id ?? undefined,
     }));
   }
 

@@ -34,6 +34,12 @@ import {
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
 import { startDashboard } from "./dashboard.js";
+import { OctokitGitHub } from "./github.js";
+import { loadModels } from "./models-config.js";
+import { symlinkProvisioner } from "./provision.js";
+import { adoptPr } from "./adopt.js";
+import { salvageGate } from "./salvage-gate-terminal.js";
+import { opencodeIntentReconstructor } from "./skills-opencode.js";
 
 function usage(): never {
   console.error(`care-loopd — headless care-loop orchestrator
@@ -48,6 +54,12 @@ Usage:
               --run-dir <path> · --base <develop> · --body <pr body> · --models <file>
               --build-less · --max-rounds <n> · --poll-timeout-ms <ms> · --no-doctor
        (end-of-run self-improvement runs by default; --no-doctor or CARE_DOCTOR=0 to skip)
+
+  care-loopd --pr <n> [flags]    SALVAGE an existing PR instead of planning a new change: reconstruct
+       its intent from the diff (blind — the description is not fed to the model), confirm it at the one
+       human gate (with a description-vs-diff divergence check), synthesize the run dir, then enter the
+       CI-round loop (address bot reviews → push → wait → repeat). Re-invoke after CI re-reviews.
+       flags: --repo · --main · --worktree · --run-dir · --models · --max-rounds <n> (1 = one-shot)
 
   care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
        flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
@@ -566,7 +578,96 @@ async function maybeRunDoctor(
  *  recon → interview → consolidated human gate, and on approval we continue STRAIGHT into the autonomous
  *  loop with the SAME input — no re-supplied flags. `hasApprovedPlan` stays the INTERNAL phase boundary
  *  (runPlan just wrote `plan.approved`); it is no longer a CLI boundary. */
+/** Ensure a worktree exists on the PR branch at the remote head. Fresh checkout for salvage (adopt),
+ *  provisioned with the generated-artifact symlinks the gate/build need. If the worktree already
+ *  exists it is left as-is — cmdResume's reconcile (fetch + rebase) brings it to the remote head. */
+function ensureSalvageWorktree(
+  mainRepoPath: string,
+  worktree: string,
+  branch: string,
+): void {
+  if (existsSync(worktree)) return; // cmdResume reconciles an existing checkout
+  const g = (...a: string[]) =>
+    spawnSync("git", ["-C", mainRepoPath, ...a], { encoding: "utf8" });
+  g("fetch", "origin", branch);
+  const add = g("worktree", "add", "-B", branch, worktree, `origin/${branch}`);
+  if (add.status !== 0)
+    throw new Error(
+      `git worktree add failed for ${branch}: ${(add.stderr || "").trim()}`,
+    );
+  const prov = symlinkProvisioner()({ worktree, mainRepoPath });
+  if (prov.exit !== 0) console.error(`  provision warning: ${prov.summary}`);
+}
+
+/** `care-loopd --pr <n>` — salvage an existing PR: reconstruct its intent from the diff, confirm it
+ *  at the one human gate, synthesize the run dir, then hand off to the CI-round loop (PLAN-pr-salvage).
+ *  The adopted journal projects to mode "ci", so the handoff is literally `cmdResume`. */
+async function cmdSalvage(
+  prNum: number,
+  flags: Record<string, string | true>,
+): Promise<void> {
+  const repo = typeof flags.repo === "string" ? flags.repo : "ohcnetwork/care_fe";
+  const [owner, name] = repo.split("/");
+  const gh = new OctokitGitHub({ owner, name });
+  const prInfo = await gh.getPr(prNum);
+  if (prInfo.state !== "open") {
+    console.error(`PR #${prNum} is ${prInfo.state} — nothing to salvage`);
+    process.exit(2);
+  }
+  const branch = prInfo.headRef;
+  const base =
+    prInfo.baseRef || (typeof flags.base === "string" ? flags.base : "develop");
+  const { mainRepoPath, worktree, runDir } = derivePaths(branch, flags);
+  const modelsFile =
+    typeof flags.models === "string" ? flags.models : undefined;
+  const models = loadModels(modelsFile);
+
+  console.log(`care-loopd salvage: PR #${prNum} (${repo})`);
+  console.log(`  branch=${branch}  base=${base}`);
+  console.log(`  worktree=${worktree}\n  run dir=${runDir}\n`);
+
+  ensureSalvageWorktree(mainRepoPath, worktree, branch);
+
+  const res = await adoptPr({
+    gh,
+    pr: prNum,
+    repo,
+    runDir,
+    worktree,
+    // Head-vs-base diff from the checked-out worktree. NOT handed the PR body (§3.1 blindness).
+    diffProvider: async () =>
+      spawnSync("git", ["-C", worktree, "diff", `origin/${base}...HEAD`], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      }).stdout ?? "",
+    reconstruct: opencodeIntentReconstructor(models, worktree, runDir),
+    gate: salvageGate(),
+    reconstructedBy: `care-intent (${models.plannerRecon ?? "maker"})`,
+  });
+
+  if (!res.approved) {
+    console.log(`\nsalvage: rejected at gate — nothing adopted`);
+    process.exit(1);
+  }
+  console.log(
+    `\n── adopted PR #${prNum} — entering the CI-round loop ${"─".repeat(24)}\n`,
+  );
+  // The adopted run dir IS a valid mode:"ci" resume — reuse the whole resume path (probe, reconcile,
+  // lock, runCiRounds) with zero duplication.
+  await cmdResume(runDir, flags);
+}
+
 async function cmdRun(flags: Record<string, string | true>): Promise<void> {
+  // `--pr <n>` salvages an existing PR instead of planning a new change.
+  if (flags.pr !== undefined && flags.pr !== true) {
+    const pr = Number(flags.pr);
+    if (!Number.isInteger(pr) || pr <= 0) {
+      console.error(`--pr must be a positive integer, got ${String(flags.pr)}`);
+      process.exit(2);
+    }
+    await cmdSalvage(pr, flags);
+    return;
+  }
   const { input: seed, gate } = await terminalFront(flags).resolve();
   const input = await enrichPlanInput(seed, ticketFetcherFromEnv(flags));
   const modelsFile =

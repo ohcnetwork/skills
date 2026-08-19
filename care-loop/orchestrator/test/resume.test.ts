@@ -9,10 +9,12 @@ import type { PrReview } from "../src/github.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
 
 const review = (user: string, commitId: string): PrReview => ({
+  id: 0,
   user,
   commitId,
   submittedAt: "2026-07-13T10:00:00Z",
   state: "COMMENTED",
+  body: "",
 });
 
 test("probePr reports the PR head, CI conclusion, and reviewers up-to-date at local head", async () => {

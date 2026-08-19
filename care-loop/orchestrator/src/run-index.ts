@@ -189,6 +189,19 @@ function clamp(value: number | undefined, fallback: number, max: number): number
   return Math.min(Math.max(Math.trunc(value), 1), max);
 }
 
+/** The paging actually applied to a `list` call — defaults filled in, `limit` clamped to the ceiling.
+ *
+ *  Exported because the HTTP layer must echo back the EFFECTIVE values, not the requested ones. A
+ *  response that says `limit: 999` while serving 200 rows breaks the most natural client-side
+ *  pagination there is (`offset += limit`), and does it silently: the reader skips 799 rows per page
+ *  and nothing errors. One resolver, used by the query and by the envelope, makes that impossible. */
+export function resolvePaging(filter: ListFilter = {}): { limit: number; offset: number } {
+  return {
+    limit: clamp(filter.limit, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
+    offset: Math.max(0, Math.trunc(filter.offset ?? 0)),
+  };
+}
+
 /** The shared WHERE for `list`/`count`, so one filter cannot mean two things in a single response —
  *  a paginated list whose `total` came from a different predicate is a subtly wrong page count. */
 function whereFor(f: ListFilter): { sql: string; params: (string | number)[] } {
@@ -226,8 +239,7 @@ export class SqliteRunIndex implements RunIndex {
 
   list(filter: ListFilter = {}): RunSummary[] {
     const { sql, params } = whereFor(filter);
-    const limit = clamp(filter.limit, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
-    const offset = Math.max(0, Math.trunc(filter.offset ?? 0));
+    const { limit, offset } = resolvePaging(filter);
     const rows = this.db
       .prepare(`SELECT * FROM runs${sql} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as unknown as RunRow[];

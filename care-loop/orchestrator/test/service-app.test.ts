@@ -8,7 +8,11 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { DatabaseSync } from "node:sqlite";
 import { buildApp } from "../src/service/app.ts";
-import { SqliteRunIndex } from "../src/run-index.ts";
+import {
+  SqliteRunIndex,
+  DEFAULT_LIST_LIMIT,
+  MAX_LIST_LIMIT,
+} from "../src/run-index.ts";
 import { mintRunId } from "../src/run-id.ts";
 import { validateState, type CareState } from "../src/state.ts";
 import type { SqliteRunStore } from "../src/run-store.ts";
@@ -109,6 +113,7 @@ test("GET /api/runs returns an envelope with a filter-consistent total", async (
     assert.equal(paged.body.items.length, 2);
     assert.equal(paged.body.total, 3, "total describes the filter, not the page");
     assert.equal(paged.body.limit, 2);
+    assert.equal(paged.body.offset, 0);
   } finally {
     await h.close();
   }
@@ -247,6 +252,31 @@ test("artifact routes reject a malformed sha (400) and report an unknown one (40
     assert.equal(missing.body.error.code, "artifact_not_found");
 
     assert.equal((await h.get(`/api/runs/${mintRunId()}/artifacts`)).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the paging envelope reports what was APPLIED, never what was asked for", async () => {
+  const h = await harness();
+  try {
+    for (let i = 0; i < 3; i++) seed(h.store, `care_fe-${i}`);
+
+    // Omitted limit must still report the default in force — a client cannot page by a null.
+    const bare = await h.get("/api/runs");
+    assert.equal(bare.body.limit, DEFAULT_LIST_LIMIT);
+    assert.equal(bare.body.offset, 0);
+
+    // Over the ceiling: the response must say 200, not 999. A client doing `offset += limit` on the
+    // requested value would skip 799 rows per page and never see an error.
+    const over = await h.get("/api/runs?limit=999");
+    assert.equal(over.body.limit, MAX_LIST_LIMIT);
+
+    // Zero rows is not a meaningful page — it used to be clamped up to 1 and reported as 0.
+    const zero = await h.get("/api/runs?limit=0");
+    assert.equal(zero.status, 400);
+    assert.equal(zero.body.error.code, "bad_query");
+    assert.equal((await h.get(`/api/runs/${seed(h.store, "care_fe-z")}/events?limit=0`)).status, 400);
   } finally {
     await h.close();
   }

@@ -12,7 +12,7 @@ import { ApiError, notFound, sendError } from "./errors.js";
 import { identity } from "./identity.js";
 import { bool, int, str, strList } from "./query.js";
 import { isValidRunId } from "../run-id.js";
-import type { RunIndex } from "../run-index.js";
+import { resolvePaging, type RunIndex } from "../run-index.js";
 
 export interface AppDeps {
   index: RunIndex;
@@ -88,15 +88,17 @@ export function buildApp(deps: AppDeps): Express {
         step: str(q, "step"),
         active: bool(q, "active"),
         includeStale: bool(q, "stale") ?? false,
-        limit: int(q, "limit"),
+        limit: int(q, "limit", { min: 1 }),
         offset: int(q, "offset"),
       };
-      const items = deps.index.list(filter);
+      // Echo the EFFECTIVE paging, not what was asked for: `?limit=999` serves 200 rows, and a
+      // response claiming 999 would make `offset += limit` skip 799 of them without erroring.
+      const applied = resolvePaging(filter);
       res.json({
-        items,
+        items: deps.index.list(filter),
         total: deps.index.count(filter),
-        limit: filter.limit ?? null,
-        offset: filter.offset ?? 0,
+        limit: applied.limit,
+        offset: applied.offset,
       });
     }),
   );
@@ -124,7 +126,7 @@ export function buildApp(deps: AppDeps): Express {
       const page = deps.index.events(id, {
         afterSeq: int(q, "after_seq"),
         events: strList(q, "event"),
-        limit: int(q, "limit"),
+        limit: int(q, "limit", { min: 1 }),
       });
       res.json({ items: page.items, next_seq: page.nextSeq });
     }),

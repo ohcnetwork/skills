@@ -29,13 +29,22 @@ export function strList(q: RawQuery, key: string): string[] | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-/** A non-negative integer. Rejects NaN, floats, and negatives rather than letting them reach SQL. */
-export function int(q: RawQuery, key: string): number | undefined {
+/** A non-negative integer. Rejects NaN, floats, and negatives rather than letting them reach SQL.
+ *  `min` guards the values that are syntactically fine but meaningless — `?limit=0` parses, and would
+ *  otherwise be silently clamped up to 1, which is a stranger answer than an error. */
+export function int(
+  q: RawQuery,
+  key: string,
+  opts: { min?: number } = {},
+): number | undefined {
   const raw = str(q, key);
   if (raw === undefined) return undefined;
   if (!/^\d+$/.test(raw))
     throw badRequest("bad_query", `${key} must be a non-negative integer, got '${raw}'`);
-  return Number.parseInt(raw, 10);
+  const n = Number.parseInt(raw, 10);
+  if (opts.min !== undefined && n < opts.min)
+    throw badRequest("bad_query", `${key} must be at least ${opts.min}, got ${n}`);
+  return n;
 }
 
 /** A boolean. Accepts the forms a URL actually carries; anything else is a 400 rather than silently

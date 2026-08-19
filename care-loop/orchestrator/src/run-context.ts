@@ -9,12 +9,16 @@
 // or another process reads the same cached value. It is a pure cache, not a second source of truth —
 // deleting it is always safe: the next call re-derives from the journal (minting fresh only if the
 // journal is ALSO empty), so PLAN §2's "journal is the single source of truth" still holds.
+//
+// `CARE_RUN_ID` lets a CALLER supply the id instead of having one minted here — the loop-service
+// supervisor mints at enqueue so its `POST /api/runs` can answer `{ run_id }` synchronously. It only
+// ever names a FRESH run dir; pointing it at an established one throws rather than rebinding.
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Journal } from "./journal.js";
 import { projectState } from "./state.js";
-import { mintRunId } from "./run-id.js";
+import { isValidRunId, mintRunId } from "./run-id.js";
 
 const CACHE_FILE = ".run_id";
 
@@ -32,12 +36,53 @@ function writeCache(runDir: string, runId: string): void {
   renameSync(tmp, p);
 }
 
+export class RunIdConflictError extends Error {}
+
+/** The caller-supplied run id, if any: `CARE_RUN_ID`. Set by the loop-service supervisor, which mints
+ *  the ULID at ENQUEUE time so `POST /api/runs` can return `{ run_id }` synchronously — the child
+ *  process starts long afterwards, so it cannot be the one to mint it ([[PLAN-loop-service]] §5).
+ *  Validated here rather than at first use: a malformed id would otherwise reach the `runs` primary
+ *  key and only fail once a run was already part-written. */
+function readPinnedRunId(): string | null {
+  const raw = process.env.CARE_RUN_ID?.trim();
+  if (!raw) return null;
+  if (!isValidRunId(raw))
+    throw new RunIdConflictError(
+      `CARE_RUN_ID '${raw}' is not a valid run id (expected a 26-char Crockford base32 ULID)`,
+    );
+  return raw;
+}
+
+/** A pinned id may only ever NAME a fresh run, never REBIND an established one. Silently preferring
+ *  either side would be worse than failing: taking the pin hijacks an existing run's identity
+ *  mid-flight, and taking the existing id makes the service's `POST` response a lie. */
+function assertNoConflict(
+  established: string,
+  pinned: string | null,
+  runDir: string,
+  source: string,
+): void {
+  if (pinned && pinned !== established)
+    throw new RunIdConflictError(
+      `CARE_RUN_ID is ${pinned} but ${runDir} is already run ${established} (from its ${source}) — ` +
+        `refusing to rebind an established run`,
+    );
+}
+
 /** Resolve (and cache) the stable run id for a run directory: the cache file if present, else the
- *  id folded from an existing journal (self-healed by `validateState` if it predates run_id), else a
- *  freshly minted ULID for a brand-new run dir. */
+ *  id folded from an existing journal (self-healed by `validateState` if it predates run_id), else
+ *  `CARE_RUN_ID` if the caller pinned one, else a freshly minted ULID for a brand-new run dir.
+ *
+ *  Precedence is deliberately "established beats pinned": the pin only supplies an id for a run dir
+ *  that does not have one yet. See `assertNoConflict`. */
 export function resolveRunId(runDir: string): string {
+  const pinned = readPinnedRunId();
+
   const cached = readCache(runDir);
-  if (cached) return cached;
+  if (cached) {
+    assertNoConflict(cached, pinned, runDir, "cache");
+    return cached;
+  }
 
   const journalPath = join(runDir, "journal.jsonl");
   let runId: string;
@@ -46,9 +91,14 @@ export function resolveRunId(runDir: string): string {
     // read() is DB-backed (§10 item 3), so it would need the id to query by. The replica file is
     // parsed directly instead, independent of any run_id.
     const { events } = new Journal(journalPath, "unresolved").readReplica();
-    runId = events.length > 0 ? projectState(events).run_id : mintRunId();
+    if (events.length > 0) {
+      runId = projectState(events).run_id;
+      assertNoConflict(runId, pinned, runDir, "journal");
+    } else {
+      runId = pinned ?? mintRunId();
+    }
   } else {
-    runId = mintRunId();
+    runId = pinned ?? mintRunId();
   }
   writeCache(runDir, runId);
   return runId;

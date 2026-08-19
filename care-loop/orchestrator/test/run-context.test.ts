@@ -9,8 +9,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openRun, resolveRunId, resolveRequestedBy } from "../src/run-context.ts";
-import { isValidRunId } from "../src/run-id.ts";
+import {
+  openRun,
+  resolveRunId,
+  resolveRequestedBy,
+  RunIdConflictError,
+} from "../src/run-context.ts";
+import { isValidRunId, mintRunId } from "../src/run-id.ts";
 import { projectState } from "../src/state.ts";
 import { Journal, serializeEvent, GENESIS } from "../src/journal.ts";
 import { useRealStore } from "./_store.ts";
@@ -206,4 +211,90 @@ test("a run seeded with CARE_REQUESTED_BY set lands it on the runs row", () => {
     if (saved === undefined) delete process.env.CARE_REQUESTED_BY;
     else process.env.CARE_REQUESTED_BY = saved;
   }
+});
+
+// ── CARE_RUN_ID: the caller-supplied id (loop-service supervisor mints at enqueue) ──────────────
+
+function withPinnedRunId<T>(value: string | undefined, fn: () => T): T {
+  const saved = process.env.CARE_RUN_ID;
+  try {
+    if (value === undefined) delete process.env.CARE_RUN_ID;
+    else process.env.CARE_RUN_ID = value;
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.CARE_RUN_ID;
+    else process.env.CARE_RUN_ID = saved;
+  }
+}
+
+test("CARE_RUN_ID names a fresh run dir instead of minting", () => {
+  const dir = tmpRunDir();
+  const pinned = mintRunId();
+  const got = withPinnedRunId(pinned, () => resolveRunId(dir));
+  assert.equal(got, pinned);
+  // and it is cached, so the child agrees with the service on every later call
+  assert.equal(readFileSync(join(dir, ".run_id"), "utf8").trim(), pinned);
+  assert.equal(withPinnedRunId(undefined, () => resolveRunId(dir)), pinned);
+});
+
+test("CARE_RUN_ID is rejected when malformed, before it can reach the primary key", () => {
+  const dir = tmpRunDir();
+  assert.throws(
+    () => withPinnedRunId("not-a-ulid", () => resolveRunId(dir)),
+    RunIdConflictError,
+  );
+  // nothing was cached — the run dir is untouched and still free to start
+  assert.equal(existsSync(join(dir, ".run_id")), false);
+});
+
+test("CARE_RUN_ID matching the established id is a no-op (supervisor restart is idempotent)", () => {
+  const dir = tmpRunDir();
+  const established = resolveRunId(dir);
+  assert.equal(withPinnedRunId(established, () => resolveRunId(dir)), established);
+});
+
+test("CARE_RUN_ID conflicting with a cached id throws rather than rebinding the run", () => {
+  const dir = tmpRunDir();
+  const established = resolveRunId(dir); // caches .run_id
+  assert.throws(
+    () => withPinnedRunId(mintRunId(), () => resolveRunId(dir)),
+    (err: unknown) =>
+      err instanceof RunIdConflictError && (err as Error).message.includes(established),
+  );
+  // the established id survives the failed attempt
+  assert.equal(withPinnedRunId(undefined, () => resolveRunId(dir)), established);
+});
+
+test("CARE_RUN_ID conflicting with an existing journal throws (cache deleted, run still established)", () => {
+  const dir = tmpRunDir();
+  const { journal, runId } = openRun(dir);
+  journal.append({
+    event: "run.start",
+    step: "1",
+    round: 1,
+    data: {
+      state: {
+        task: "t",
+        repo: "ohcnetwork/care_fe",
+        branch: "b",
+        worktree: "/tmp/wt",
+        tier: "standard",
+        pr: null,
+        round: 1,
+        step: "1",
+        head_sha: "abc",
+        last_reviewed_sha: "",
+        run_id: runId,
+        requested_by: null,
+        ticket: null,
+        summary: null,
+      },
+    },
+  });
+  unlinkSync(join(dir, ".run_id")); // force the journal-fold branch, not the cache branch
+  assert.throws(
+    () => withPinnedRunId(mintRunId(), () => resolveRunId(dir)),
+    (err: unknown) =>
+      err instanceof RunIdConflictError && (err as Error).message.includes("journal"),
+  );
 });

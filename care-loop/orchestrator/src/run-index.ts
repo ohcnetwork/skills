@@ -15,7 +15,9 @@ import { renderEvent } from "./render.js";
  *  match the pre-existing dashboard.ts `RunSummary` JSON contract exactly — dashboard.html needs no
  *  change (verify with a render diff, not by assumption — PLAN §7). */
 export interface RunSummary {
-  name: string; // slug — the run dir's basename
+  runId: string; // ULID — the stable key; what `/api/runs/:run_id` and the FE link by
+  name: string; // slug — the run dir's basename. A DISPLAY label: no unique constraint, and a
+  //               reused branch collides on it deterministically. Never key off this.
   state: {
     step: string;
     round: number;
@@ -42,10 +44,12 @@ export interface RunDetail {
 
 export interface RunIndex {
   list(filter?: { requestedBy?: string }): RunSummary[];
+  slugOf(runId: string): string | null;
   get(runsDir: string, name: string): RunDetail;
 }
 
 interface RunRow {
+  run_id: string;
   slug: string;
   step: string;
   round: number;
@@ -62,6 +66,7 @@ interface RunRow {
 
 function rowToSummary(row: RunRow): RunSummary {
   return {
+    runId: row.run_id,
     name: row.slug,
     state: {
       step: row.step,
@@ -96,7 +101,21 @@ export class SqliteRunIndex implements RunIndex {
     return rows.map(rowToSummary);
   }
 
-  /** Detail view: reads the journal file directly (one file, one run — cheap forever, PLAN §7). */
+  /** Map a run id to its directory slug, or null if this db has no such run. The service's
+   *  `/api/runs/:run_id` routes resolve the on-disk location through here — `slug` is a display
+   *  label with NO unique constraint (a reused branch collides deterministically), so it is a
+   *  lookup key only for the legacy no-db path. */
+  slugOf(runId: string): string | null {
+    const row = this.db
+      .prepare("SELECT slug FROM runs WHERE run_id = ?")
+      .get(runId) as { slug: string } | undefined;
+    return row ? row.slug : null;
+  }
+
+  /** Detail view: reads the journal file directly (one file, one run — cheap forever, PLAN §7).
+   *  `name` is the directory SLUG; `readReplica()` (not `read()`) is what can be called with it,
+   *  because `read()` is DB-backed and queries BY run_id — passing a slug there matched no rows and
+   *  silently returned an empty timeline. */
   get(runsDir: string, name: string): RunDetail {
     const dir = join(runsDir, name);
     const journalPath = join(dir, "journal.jsonl");
@@ -105,7 +124,7 @@ export class SqliteRunIndex implements RunIndex {
     }
     try {
       const j = new Journal(journalPath, name);
-      const { events, truncatedTail } = j.read();
+      const { events, truncatedTail } = j.readReplica();
       const state = events.length > 0 ? projectState(events) : null;
       const rendered = events.map((e) => ({ ...e, rendered: renderEvent(e) }));
       return { name, state, events: rendered, truncatedTail };

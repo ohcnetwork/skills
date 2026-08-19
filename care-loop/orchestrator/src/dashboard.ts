@@ -15,6 +15,7 @@ import { Journal } from "./journal.js";
 import { projectState } from "./state.js";
 import { renderEvent } from "./render.js";
 import { SqliteRunIndex, type RunSummary as RunSummaryV2 } from "./run-index.js";
+import { isValidRunId } from "./run-id.js";
 import type { CareState } from "./state.js";
 import type { JournalEvent } from "./journal.js";
 
@@ -216,10 +217,24 @@ export function startDashboard(runsDir: string, port: number): void {
       return;
     }
 
-    // API: run detail
+    // API: run detail — keyed by RUN_ID, with the directory slug still accepted for the no-db path
+    // and any bookmarked url. The two are unambiguous by shape (a run id is 26 Crockford base32
+    // chars, a slug is `${repo}-${branch}`), so this dispatches on the value rather than guessing.
+    // run_id is the real key: `slug` has no unique constraint and a reused branch collides on it.
     const detailMatch = path.match(/^\/api\/runs\/([^/]+)$/);
     if (detailMatch) {
-      const name = decodeURIComponent(detailMatch[1]);
+      const key = decodeURIComponent(detailMatch[1]);
+      let name = key;
+      if (isValidRunId(key)) {
+        const index = openIndexIfPresent(absRunsDir);
+        const slug = index ? index.slugOf(key) : null;
+        index?.close();
+        if (!slug) {
+          json(res, { error: "not found" }, 404);
+          return;
+        }
+        name = slug;
+      }
       const dir = join(absRunsDir, name);
       if (!existsSync(dir)) {
         json(res, { error: "not found" }, 404);

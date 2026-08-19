@@ -84,6 +84,19 @@ pending request or an answered gate. Move it to `FULL` with step 3, not at the c
 The service is always on. `POST /api/runs` inserts a row and returns; the supervisor claims pending
 rows, spawns, and writes the terminal status when the child exits.
 
+**The service mints `run_id`, not the child and not SQLite.** Worth stating because the natural
+assumption is wrong on both counts: `run_id` is a ULID minted in application code (`run-id.ts` —
+48-bit ms timestamp + 80 bits random, Crockford base32, time-sortable), and SQLite only ever stores
+it as `TEXT PRIMARY KEY`. Until now the *child* minted it on first touch of the run dir, which cannot
+work here: `POST /api/runs` has to answer `{ run_id }` synchronously, and the child starts long
+afterwards — possibly never, if the row sits pending or the spawn fails.
+
+So the service calls `mintRunId()` at insert time and passes the value to the child as `CARE_RUN_ID`.
+`resolveRunId` (run-context.ts) honours it for a run dir that has no id yet, and **throws rather than
+rebinding** one that does — a pinned id may name a fresh run, never hijack an established one. A
+supervisor restart re-spawning the same row with the same id is therefore idempotent, while a stale
+id pointed at an occupied dir fails loudly instead of silently forking the run's identity.
+
 ```sql
 CREATE TABLE queue (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +106,7 @@ CREATE TABLE queue (
   branch       TEXT NOT NULL,
   task         TEXT NOT NULL,          -- the request payload the form collected
   ticket       TEXT,
-  run_id       TEXT,                   -- NULL until spawned; joins to runs.run_id
+  run_id       TEXT NOT NULL,          -- minted HERE at enqueue (see below); joins to runs.run_id
   enqueued_at  TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT,
@@ -196,8 +209,8 @@ repo; that should stay a deliberate local action, not a side effect of every tea
 
 ```
 GET    /api/runs?requested_by=&status=   → RunSummary[]     RunIndex.list, LEFT JOIN queue
-GET    /api/runs/:run_id                 → RunDetail        RunIndex.get
-POST   /api/runs                         → { run_id }       enqueue (201)
+GET    /api/runs/:run_id                 → RunDetail        RunIndex.slugOf → .get
+POST   /api/runs                         → { run_id }       enqueue (201) — id minted at insert
 POST   /api/runs/:run_id/cancel          → 202
 GET    /api/runs/:run_id/gate            → PendingAsk|null
 POST   /api/runs/:run_id/gate            → 204              answer
@@ -335,8 +348,30 @@ backups get more valuable.
   per-user; add fairness only if it actually bites.
 - **Poison rows.** A request that fails spawn every time retries forever. Cap `attempts` at 3, then
   `failed` with the last `error`.
-- **Worktree collisions.** Two runs on the same repo+branch will fight. Reject at enqueue on an
-  active-run check, rather than discovering it in a git error.
+- **Same repo+branch is one run, not two.** `derivePaths` (front-terminal.ts) derives BOTH the
+  worktree and the run dir from `${repoName}-${branch}`, so a second run on the same branch does not
+  conflict with the first — it *is* the first: same run dir, same `.run_id` cache, same run id, two
+  drivers appending into one event stream. What prevents that today is the loop's per-run lockfile
+  (`withLock(runDir)`), which refuses a second live holder. That is a correctness invariant and it
+  stays in the loop.
+
+  **Admission control is this service's job, not the loop's.** The loop should not have to know the
+  fleet exists; asking it to would mean two implementations of one policy, which is exactly how
+  `run_id` drifted into three formulas ([[PLAN-sqlite-run-store]] §5). So: **queue behind, don't
+  reject.** The claim query already filters on status; it also skips a `(repo, branch)` that has a
+  `running` row, and the second request starts when the first finishes. Rejecting would push the
+  retry back onto the requester for a situation the queue exists to handle.
+
+  The service needs one seam the loop does not currently export: a non-destructive
+  `inspectLock(runDir)` → `{ held, pid, alive }`. `lock.ts` already computes exactly this inside
+  `acquireLock` (with `defaultIsAlive` pid-probing and stale-lock stealing), but it is only reachable
+  by *taking* the lock. Needed because a `running` queue row is a lie after a crash — the lock's
+  liveness is what distinguishes "genuinely driving" from "crashed, resumable". Build it with the
+  supervisor (step 4), not before.
+
+  Decoupling the run dir from repo+branch (key it by `run_id`, demote slug to a display label) would
+  make two runs on one branch genuinely independent and retire the queue-behind rule, leaving only
+  git's own "one branch, one worktree" constraint. Not blocking; the cheaper rule buys time.
 - **`loops.db` holds unrebuildable service state.** Run tables survive a `reindex`; `queue` and
   `gate_asks` do not. Mitigation: `synchronous = FULL` (§3), plus a periodic
   `VACUUM INTO backups/loops-<ts>.db` and `PRAGMA integrity_check` on service boot. This gets

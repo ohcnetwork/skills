@@ -297,22 +297,27 @@ them, and they are worth keeping separate because they do not have the same life
    body as jsonb keyed by `(run_id, path)`, with `sha256` and `bytes` alongside, so the doctor's
    inputs are queryable today — `json_extract` over `content` needs no reparse. Nothing needs adding
    to the schema for it.
-2. **`reindex` rebuilds `run_artifacts` from them.** This outlives (1), but it is worth being precise
-   about why, because the obvious phrasing — "artifacts must stay rebuildable" — overstates it.
+2. **`reindex` rebuilds `run_artifacts` from them** — disaster recovery for the bodies. Real, but
+   narrowing: once step 3 lands `queue` and `gate_asks`, which no rebuild can restore, backups
+   (`VACUUM INTO` + boot `integrity_check`) become the actual answer to a lost db, and rebuildability
+   drops from necessary to cheap insurance. Cheap is right — 1.1 MB for the whole historical fleet.
 
-   As *disaster recovery* the argument is real but narrowing: once step 3 lands `queue` and
-   `gate_asks`, which no rebuild can restore, backups (`VACUUM INTO` + boot `integrity_check`) become
-   the actual answer to a lost db, and rebuildability drops from necessary to cheap insurance. Cheap
-   is right though — the sidecars are 1.1 MB for the entire historical fleet.
+A third reason was claimed and then withdrawn, because it is instructive: *schema-evolution backfill*.
+`reindex` is genuinely how existing runs acquire data a new schema version projects — v3 gave every
+existing db the `run_artifacts` table and **zero rows**, and the 188 artifacts exist only because
+reindex read them off disk. But that need was one-time and is now spent: the content is IN the
+database. A later version deriving something new from artifact content reads `run_artifacts.content`
+directly (`INSERT … SELECT json_extract(content, …)`), no disk involved. Disk is only required to
+backfill what the database does not already hold.
 
-   The durable reason is *schema evolution*. `reindex` is how existing runs acquire data a new schema
-   version projects. `run_artifacts` is the worked example: v3 gave every existing db the table via
-   `CREATE TABLE IF NOT EXISTS` and **zero rows**; the 188 artifacts exist only because reindex read
-   them off disk. Any future column or table derived from artifact CONTENT can only be backfilled if
-   that content is still on disk in a form independent of the db being rebuilt.
+**So the sidecars are transitional, not permanent.** Both remaining reasons expire — (1) at the doctor
+rework, (2) at step 3 backups — and the v3 backfill is already spent. There is no urgency to delete
+them, but nothing should be built assuming they will always be there.
 
-So the files outlive the doctor's need for them. If a later change proposes dropping them, the
-argument to answer is schema-evolution backfill — not disaster recovery, which backups will cover.
+**The `journal.jsonl` replica is a different question and should not be lumped in with this.** It is
+the independent witness the parity check compares the db against at `run.resume` and `run.end`
+([[PLAN-sqlite-run-store]] §2/§10). Retiring it means the database has no external check on itself —
+a decision about assurance, not about storage.
 
 `X-Care-User` on every request, persisted as `requested_by`. Freeze this contract before the FE
 starts — it is the whole reason the FE is sequenced third.

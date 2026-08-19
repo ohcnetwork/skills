@@ -11,7 +11,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Journal } from "./journal.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Tier } from "./state.js";
 import type { GitHubApi, PrInfo } from "./github.js";
 
@@ -163,10 +163,10 @@ export async function adoptPr(input: AdoptInput): Promise<AdoptResult> {
         `The diff touches .tsx; the changed components are the UI surfaces under review. See baseline.md.\n`,
     );
 
-  const j = new Journal(
-    join(input.runDir, "journal.jsonl"),
-    `${input.repo.replace("/", "-")}-${prInfo.headRef}`,
-  );
+  // openRun replaces the old `${repo}-${prInfo.headRef}` derive site, which used a DIFFERENT
+  // formula than every other site (headRef instead of the input branch) — see
+  // PLAN-sqlite-run-store.md §5 ("worse than a missed site").
+  const { journal: j, runId, isNew } = openRun(input.runDir);
   const seed: CareState = {
     task: prInfo.title,
     repo: input.repo,
@@ -179,8 +179,13 @@ export async function adoptPr(input: AdoptInput): Promise<AdoptResult> {
     head_sha: prInfo.headSha,
     last_reviewed_sha: "",
     updated_at: now(),
+    run_id: runId,
+    requested_by: resolveRequestedBy(),
+    ticket: null,
+    summary: null,
+    started_at: now(),
   };
-  if (j.read().events.length === 0)
+  if (isNew)
     j.append({ event: "run.start", step: "1", round: 1, data: { state: seed } });
   j.append({ event: "step.enter", step: "1", round: 1 });
 

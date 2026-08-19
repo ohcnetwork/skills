@@ -7,9 +7,13 @@ import { adoptPr, computeDivergence, type SalvageGate } from "../src/adopt.ts";
 import { planResume } from "../src/resume.ts";
 import { Journal } from "../src/journal.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
+import { useRealStore } from "./_store.ts";
 import type { PrInfo } from "../src/github.ts";
 
-const runDir = () => mkdtempSync(join(tmpdir(), "careloopd-adopt-"));
+const runDir = () => {
+  useRealStore();
+  return mkdtempSync(join(tmpdir(), "careloopd-adopt-"));
+};
 
 const prInfo = (over: Partial<PrInfo> = {}): PrInfo => ({
   number: 16632,
@@ -61,7 +65,7 @@ test("adopted journal projects to the CI-round entry step, and planResume enters
   assert.equal(res.state?.pr, 16632);
   assert.equal(res.state?.step, "5-await");
 
-  const events = new Journal(join(dir, "journal.jsonl"), "x").read().events;
+  const events = new Journal(join(dir, "journal.jsonl"), "x").readReplica().events;
   const plan = planResume(events);
   assert.equal(plan.resumable, true);
   assert.equal(plan.mode, "ci");
@@ -107,7 +111,7 @@ test("a rejected salvage gate ends the run and does not enter mode ci", async ()
   const res = await adoptPr(baseInput(dir, { gate }));
   assert.equal(res.approved, false);
   assert.ok(!existsSync(join(dir, "criteria.md"))); // no criteria written on reject
-  const events = new Journal(join(dir, "journal.jsonl"), "x").read().events;
+  const events = new Journal(join(dir, "journal.jsonl"), "x").readReplica().events;
   assert.equal(planResume(events).mode, "build"); // no PR recorded → not a ci resume
 });
 

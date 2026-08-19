@@ -6,9 +6,24 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { makeSkillLogger, withSkillLog } from "../src/skill-log.ts";
 import { Journal } from "../src/journal.ts";
+import { SqliteRunStore, setActiveRunStore } from "../src/run-store.ts";
+import { mintRunId } from "../src/run-id.ts";
 import type { SkillResult, ReviewPayload } from "../src/skill-result.ts";
 
-const rd = () => mkdtempSync(join(tmpdir(), "careloopd-log-"));
+/** Fresh in-memory store + a real ULID, with a minimal run.start already seeded — skill.invoke/
+ *  result events need the `runs` parent row to exist before appendEvent's FK will accept them (§4). */
+function rd(): { runDir: string; runId: string } {
+  setActiveRunStore(new SqliteRunStore(":memory:"));
+  const runDir = mkdtempSync(join(tmpdir(), "careloopd-log-"));
+  const runId = mintRunId();
+  new Journal(join(runDir, "journal.jsonl"), runId).append({
+    event: "run.start",
+    step: "1",
+    round: 1,
+    data: { state: { task: "t", repo: "a/b", step: "1", run_id: runId } },
+  });
+  return { runDir, runId };
+}
 const sha256 = (s: string) =>
   "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
 
@@ -29,8 +44,8 @@ const reviewOk = (round: number): SkillResult<ReviewPayload> => ({
 });
 
 test("skill.result event's artifact sha256 matches the sidecar bytes", async () => {
-  const runDir = rd();
-  const logger = makeSkillLogger({ runDir, runId: "r" });
+  const { runDir, runId } = rd();
+  const logger = makeSkillLogger({ runDir, runId });
   const reviewer = withSkillLog(
     "care-reviewer",
     async (i: { runDir: string; round: number }) => reviewOk(i.round),
@@ -39,7 +54,7 @@ test("skill.result event's artifact sha256 matches the sidecar bytes", async () 
 
   await reviewer({ runDir, round: 1 });
 
-  const { events } = new Journal(join(runDir, "journal.jsonl"), "r").read();
+  const { events } = new Journal(join(runDir, "journal.jsonl"), runId).read();
   const result = events.find((e) => e.event === "skill.result")!;
   assert.ok(result, "skill.result was appended");
   const arts = result.data!.artifacts as Array<{
@@ -57,8 +72,7 @@ test("skill.result event's artifact sha256 matches the sidecar bytes", async () 
 });
 
 test("journal hash-chain stays intact with skill.* interleaved between driver appends", async () => {
-  const runDir = rd();
-  const runId = "ohcnetwork-care_fe-x";
+  const { runDir, runId } = rd();
   const driver = new Journal(join(runDir, "journal.jsonl"), runId);
   const logger = makeSkillLogger({ runDir, runId });
   const reviewer = withSkillLog(
@@ -83,13 +97,13 @@ test("journal hash-chain stays intact with skill.* interleaved between driver ap
   assert.equal(truncatedTail, false);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["step.enter", "skill.invoke", "skill.result", "spawn.result"],
+    ["run.start", "step.enter", "skill.invoke", "skill.result", "spawn.result"],
   );
 });
 
 test("a throwing skill still records skill.result{failed} then rethrows", async () => {
-  const runDir = rd();
-  const logger = makeSkillLogger({ runDir, runId: "r" });
+  const { runDir, runId } = rd();
+  const logger = makeSkillLogger({ runDir, runId });
   const boom = withSkillLog(
     "care-reviewer",
     async (_i: { runDir: string; round: number }) => {
@@ -100,7 +114,7 @@ test("a throwing skill still records skill.result{failed} then rethrows", async 
 
   await assert.rejects(boom({ runDir, round: 1 }), /fetch failed/);
 
-  const { events } = new Journal(join(runDir, "journal.jsonl"), "r").read();
+  const { events } = new Journal(join(runDir, "journal.jsonl"), runId).read();
   const result = events.find((e) => e.event === "skill.result")!;
   assert.equal(result.data!.terminal_state, "failed");
   assert.equal(result.data!.reason_code, "threw");

@@ -9,7 +9,7 @@
 
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Journal } from "./journal.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Step } from "./state.js";
 import { transition, type FsmConfig } from "./fsm.js";
 import { renderLoopLog } from "./render.js";
@@ -169,15 +169,14 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
     ciGraceMs: 120_000,
     ...o.cfg,
   };
-  const runId = `${o.repo.replace("/", "-")}-${o.branch}`;
-  const j = new Journal(join(o.runDir, "journal.jsonl"), runId);
+  const { journal: j, runId, isNew } = openRun(o.runDir);
 
   let round = o.startRound ?? 1;
   let headSha = o.headSha;
   let sinceIso = o.sinceIso;
   let lastCi: CiConclusion = "none";
 
-  if (j.read().events.length === 0) {
+  if (isNew) {
     j.append({
       event: "run.start",
       step: "5-await",
@@ -195,6 +194,11 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
           head_sha: headSha,
           last_reviewed_sha: "",
           updated_at: new Date().toISOString(),
+          run_id: runId,
+          requested_by: resolveRequestedBy(),
+          ticket: null,
+          summary: null,
+          started_at: new Date().toISOString(),
         },
       },
     });

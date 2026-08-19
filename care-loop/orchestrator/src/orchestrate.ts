@@ -3,8 +3,7 @@
 // CI rounds (5-await→6a→6b→5), all on ONE journal. It depends only on the injected seams, so it's
 // fully fake-testable; cli.ts wires the default opencode/shell/octokit adapters.
 
-import { join } from "node:path";
-import { Journal } from "./journal.js";
+import { openRun } from "./run-context.js";
 import { projectAndWrite, type CareState } from "./state.js";
 import { runHalfPipe, type HelperFn, type SpawnFn } from "./pipeline.js";
 import type { FsmConfig } from "./fsm.js";
@@ -89,8 +88,6 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
   return withLock(
     o.runDir,
     async (): Promise<StartResult> => {
-      const runId = `${o.repo.replace("/", "-")}-${o.branch}`;
-
       // Phase 1 — build to a committed change (no PR). finalize:false keeps the journal open.
       const build = await runHalfPipe({
         runDir: o.runDir,
@@ -111,7 +108,7 @@ export async function runStart(o: StartOptions): Promise<StartResult> {
         return { phase: "build", outcome: build.outcome, state: build.state };
       }
 
-      const j = new Journal(join(o.runDir, "journal.jsonl"), runId);
+      const { journal: j } = openRun(o.runDir);
 
       // Phase 2 — push, then open the PR with the required [ENG-###] title (IMP-12).
       const p = o.push({

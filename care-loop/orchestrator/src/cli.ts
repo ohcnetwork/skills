@@ -40,6 +40,12 @@ import { symlinkProvisioner } from "./provision.js";
 import { adoptPr } from "./adopt.js";
 import { salvageGate } from "./salvage-gate-terminal.js";
 import { opencodeIntentReconstructor } from "./skills-opencode.js";
+import { openRunStore, setActiveRunStore, SqliteRunStore } from "./run-store.js";
+import { reindexRuns } from "./reindex.js";
+import { resolveRunId } from "./run-context.js";
+
+const RUNS_ROOT = join(__dirname, "../../runs");
+const DB_PATH = join(RUNS_ROOT, "loops.db");
 
 function usage(): never {
   console.error(`care-loopd — headless care-loop orchestrator
@@ -53,6 +59,7 @@ Usage:
        flags: --repo owner/name (ohcnetwork/care_fe) · --main <care_fe path> · --worktree <path>
               --run-dir <path> · --base <develop> · --body <pr body> · --models <file>
               --build-less · --max-rounds <n> · --poll-timeout-ms <ms> · --no-doctor
+              --requested-by <github-login> (or CARE_REQUESTED_BY; attribution only, never authz)
        (end-of-run self-improvement runs by default; --no-doctor or CARE_DOCTOR=0 to skip)
 
   care-loopd --pr <n> [flags]    SALVAGE an existing PR instead of planning a new change: reconstruct
@@ -63,6 +70,13 @@ Usage:
 
   care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
        flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
+
+  care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
+       fleet projection dashboard/status read (PLAN-sqlite-run-store.md). Safe at any time: it clears
+       and rebuilds ONLY from the journals, which stay the source of truth. Run it once to backfill an
+       existing runs/ tree, or any time you suspect the db has drifted (\`rm runs/loops.db\` first, or
+       just re-run — it always fully overwrites).
+       flags: --runs-dir <path> (default ../runs)
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
   care-loopd resume <run-dir>    Resume a crashed run. If a PR is open, reconcile it (probePr: head ·
@@ -104,7 +118,9 @@ function parseFlags(argv: string[]): Record<string, string | true> {
 }
 
 function journalOf(runDir: string): Journal {
-  return new Journal(join(runDir, "journal.jsonl"), "cli");
+  // resolveRunId (not a placeholder string): read() is DB-backed now (§10) and queries by run_id,
+  // so the CLI needs the run's actual ULID, not an arbitrary label.
+  return new Journal(join(runDir, "journal.jsonl"), resolveRunId(runDir));
 }
 
 function cmdStatus(runDir: string): void {
@@ -752,6 +768,16 @@ async function cmdDoctor(
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  // The DB is the source of truth now (PLAN-sqlite-run-store.md §2/§10) — every command opens it
+  // unconditionally; `openRunStore` is fatal if `DB_PATH` can't be reached (no `--no-db` opt-out any
+  // more, §10 item 5: a run that can't reach the DB can no longer resume or project state).
+  setActiveRunStore(openRunStore(DB_PATH));
+  // `--requested-by <login>` is sugar over CARE_REQUESTED_BY, which is the single channel the four
+  // seed sites read (run-context.ts#resolveRequestedBy). The loop-service supervisor sets the env var
+  // per child instead; the flag exists so a local run can attribute itself without exporting anything.
+  // Parsed off the RAW argv so it works before the subcommand switch, on every command alike.
+  const rb = parseFlags(argv)["requested-by"]; // parseFlags already skips non-flag tokens
+  if (typeof rb === "string" && rb.trim()) process.env.CARE_REQUESTED_BY = rb.trim();
   const [cmd, ...rest] = argv;
   // Bare `care-loopd` (or `care-loopd --task … --ticket …`) is the primary path: the combined
   // questionnaire → plan → gate → autonomous loop. A leading flag means "run with these overrides".
@@ -791,6 +817,22 @@ async function main(): Promise<void> {
       if (!rest[0]) usage();
       await cmdDoctor(resolve(rest[0]), parseFlags(rest.slice(1)));
       break;
+    case "reindex": {
+      const df = parseFlags(rest);
+      const runsDir =
+        typeof df["runs-dir"] === "string" ? resolve(df["runs-dir"]) : RUNS_ROOT;
+      const dbPath = join(runsDir, "loops.db");
+      const store = new SqliteRunStore(dbPath);
+      const result = reindexRuns(store, runsDir);
+      store.close();
+      console.log(
+        `reindex: ${result.runsIndexed} run(s) indexed` +
+          (result.runsSkipped.length ? `, ${result.runsSkipped.length} skipped` : ""),
+      );
+      for (const s of result.runsSkipped)
+        console.log(`  skipped ${s.slug}: ${s.error}`);
+      break;
+    }
     default:
       usage();
   }

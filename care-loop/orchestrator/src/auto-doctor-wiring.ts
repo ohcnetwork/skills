@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { OctokitGitHub } from "./github.js";
 import { runHelper } from "./shell.js";
 import { Journal } from "./journal.js";
+import { resolveRunId } from "./run-context.js";
 import { loadModels } from "./models-config.js";
 import {
   promptStructured,
@@ -189,7 +190,9 @@ export async function runEndOfRunDoctor(
   const slug = skillsRepoSlug();
   const gh = slug ? new OctokitGitHub({ owner: slug.split("/")[0], name: slug.split("/")[1] }) : null;
 
-  const j = new Journal(join(cfg.runDir, "journal.jsonl"), cfg.runSlug);
+  // The Journal's run_id is the persisted ULID (PLAN-sqlite-run-store.md §5), NOT `cfg.runSlug` —
+  // that stays a human label for the self-improvement branch/report/PR naming below.
+  const j = new Journal(join(cfg.runDir, "journal.jsonl"), resolveRunId(cfg.runDir));
 
   const git = {
     checkoutNewBranch: (name: string) => {

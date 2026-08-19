@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPlan, hasApprovedPlan } from "../src/plan.ts";
 import { Journal } from "../src/journal.ts";
+import { useRealStore } from "./_store.ts";
 import type { Planner, PlanGate, PlanInput } from "../src/ports.ts";
 import type { PlannerPayload } from "../src/skill-result.ts";
 import type {
@@ -13,7 +14,10 @@ import type {
   PlanQuestion,
 } from "../src/plan-gate.ts";
 
-const rd = () => mkdtempSync(join(tmpdir(), "careloopd-plan-"));
+const rd = () => {
+  useRealStore();
+  return mkdtempSync(join(tmpdir(), "careloopd-plan-"));
+};
 
 function makeInput(runDir: string): PlanInput {
   return {
@@ -102,8 +106,10 @@ function fakeGate(
 }
 
 const lockOpts = { pid: process.pid, isAlive: () => true };
+// readReplica(): runPlan mints its own real run_id internally via openRun — the literal "r" here
+// never matches it, so inspect the file directly rather than querying the (now DB-backed) read().
 const events = (runDir: string) =>
-  new Journal(join(runDir, "journal.jsonl"), "r").read().events;
+  new Journal(join(runDir, "journal.jsonl"), "r").readReplica().events;
 
 test("happy path: interview → draft → approve writes artifacts + plan.approved", async () => {
   const runDir = rd();

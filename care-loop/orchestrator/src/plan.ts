@@ -12,8 +12,9 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Journal, type JournalEvent } from "./journal.js";
+import { type JournalEvent } from "./journal.js";
 import { withLock } from "./lock.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Tier } from "./state.js";
 import type {
   PlanAnswer,
@@ -45,16 +46,15 @@ export function hasApprovedPlan(events: JournalEvent[]): boolean {
 
 export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
   const { input } = o;
-  const runId = `${input.repo.replace("/", "-")}-${input.branch}`;
   mkdirSync(input.runDir, { recursive: true });
 
   return withLock(
     input.runDir,
     async (): Promise<PlanResult> => {
-      const j = new Journal(join(input.runDir, "journal.jsonl"), runId);
+      const { journal: j, runId, isNew } = openRun(input.runDir);
 
       // Seed the shared journal at step 1 ONLY when empty — `start` continues this same journal.
-      if (j.read().events.length === 0) {
+      if (isNew) {
         const seed: CareState = {
           task: input.task,
           repo: input.repo,
@@ -67,6 +67,13 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           head_sha: "scratch",
           last_reviewed_sha: "",
           updated_at: new Date().toISOString(),
+          run_id: runId,
+          requested_by: resolveRequestedBy(),
+          // ticket/summary are known at the plan stage (PlanInput always carries them) — promoted
+          // into CareState (PLAN-sqlite-run-store.md §6) instead of being event-only.
+          ticket: input.ticket,
+          summary: input.summary,
+          started_at: new Date().toISOString(),
         };
         j.append({
           event: "run.start",

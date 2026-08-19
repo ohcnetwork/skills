@@ -10,9 +10,11 @@ import {
 import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { Journal } from "./journal.js";
 import { projectState } from "./state.js";
 import { renderEvent } from "./render.js";
+import { SqliteRunIndex, type RunSummary as RunSummaryV2 } from "./run-index.js";
 import type { CareState } from "./state.js";
 import type { JournalEvent } from "./journal.js";
 
@@ -35,6 +37,19 @@ interface RunDetail {
   events: (JournalEvent & { rendered: string })[];
   truncatedTail: boolean;
   error?: string;
+}
+
+/** Open the SQLite projection for a fast fleet-list query, or null if `reindex` has never run / the
+ *  db is unreadable — the caller falls back to the full-journal scan below (PLAN-sqlite-run-store.md
+ *  §7/§9: the dashboard only points at RunIndex once the two paths have been verified to agree). */
+function openIndexIfPresent(runsDir: string): SqliteRunIndex | null {
+  const dbPath = join(runsDir, "loops.db");
+  if (!existsSync(dbPath)) return null;
+  try {
+    return new SqliteRunIndex(new DatabaseSync(dbPath));
+  } catch {
+    return null;
+  }
 }
 
 function discoverRuns(runsDir: string, includeStale: boolean): string[] {
@@ -71,8 +86,11 @@ function summarizeRun(runsDir: string, name: string): RunSummary {
   }
 
   try {
+    // readReplica() (not read()): read() is DB-backed and queries by run_id (§10), but `name` here
+    // is the dir SLUG, not the ULID run_id — the replica file is what this fallback scan can read
+    // without first resolving the id (this whole path only runs when there's no loops.db anyway).
     const j = new Journal(journalPath, name);
-    const { events } = j.read();
+    const { events } = j.readReplica();
     const state = events.length > 0 ? projectState(events) : null;
     // Sum individual cost_usd from every skill.result event — works on both old journals
     // (where cost_cum was not accumulating correctly) and new ones.
@@ -135,8 +153,9 @@ function detailRun(runsDir: string, name: string): RunDetail {
   }
 
   try {
+    // readReplica(): same reasoning as summarizeRun above — `name` is the slug, not the run_id.
     const j = new Journal(journalPath, name);
-    const { events, truncatedTail } = j.read();
+    const { events, truncatedTail } = j.readReplica();
     const state = events.length > 0 ? projectState(events) : null;
     const rendered = events.map((e) => ({ ...e, rendered: renderEvent(e) }));
     return { name, state, events: rendered, truncatedTail };
@@ -178,9 +197,19 @@ export function startDashboard(runsDir: string, port: number): void {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const path = url.pathname;
 
-    // API: list runs
+    // API: list runs — the indexed SQLite path when a loops.db is present (fast, no per-run journal
+    // scan); falls back to the full-journal scan for a runs/ tree that predates `reindex`.
     if (path === "/api/runs") {
       const includeStale = url.searchParams.get("stale") === "1";
+      const index = openIndexIfPresent(absRunsDir);
+      if (index) {
+        const summaries: (RunSummaryV2 & { error?: string })[] = index
+          .list()
+          .filter((s) => includeStale || !s.stale);
+        index.close();
+        json(res, summaries);
+        return;
+      }
       const names = discoverRuns(absRunsDir, includeStale);
       const summaries = names.map((n) => summarizeRun(absRunsDir, n));
       json(res, summaries);

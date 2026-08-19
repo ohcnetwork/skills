@@ -10,13 +10,15 @@
 //     can replay exactly what the skill saw), written BEFORE the call so a crash mid-skill is on record;
 //   • a bounded `skill.result` event (verdict, reason_code, model, duration, counts, artifact refs) +
 //     the full SkillResult envelope as a sidecar — the durable, SDK-independent record the doctor reads.
-// Heavy content lives in the sidecars; the journal only carries bounded fields + {path,sha256} refs, so
+// Heavy content lives in the sidecars AND in run_artifacts (jsonb); the journal carries only bounded
+// fields + {path,sha256} refs, so
 // the hash-chained spine stays lean and one source of truth (see PLAN §5 / the observability contract).
 
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Journal, type EventType } from "./journal.js";
+import { getActiveRunStore } from "./run-store.js";
 import type { SkillArtifact, SkillResult } from "./skill-result.js";
 
 const sha256 = (s: string): string =>
@@ -33,7 +35,11 @@ export interface SkillLogger {
     data: Record<string, unknown>,
     opts?: { step?: string; round?: number; costUsd?: number },
   ): void;
-  artifact(relName: string, content: string): SkillArtifact;
+  /** Persist one artifact. Takes a JSON-serializable VALUE, not a pre-serialized string: the
+   *  serialization is then canonical and single-sourced, the sidecar text and the db's jsonb encoding
+   *  are guaranteed to agree, and "every artifact is valid JSON" becomes structural rather than a
+   *  convention every caller has to honour. */
+  artifact(relName: string, value: unknown): SkillArtifact;
 }
 
 export function makeSkillLogger(opts: {
@@ -64,14 +70,25 @@ export function makeSkillLogger(opts: {
         cost_cum,
       });
     },
-    artifact(relName, content) {
+    artifact(relName, value) {
+      // ONE serialization, used for all three of: the sidecar file, the hash, and the db encoding.
+      const content = JSON.stringify(value, null, 2);
       mkdirSync(skillsDir, { recursive: true });
       writeFileSync(join(skillsDir, relName), content);
-      return {
+      const ref = {
         name: relName.replace(/\.[^.]+$/, ""),
         path: `skills/${relName}`,
         sha256: sha256(content),
       };
+      // Mirror the BODY into the db too ([[PLAN-loop-service]] §6). The journal event still carries
+      // only the bounded {name,path,sha256} ref — the spine stays lean — but the service reads the
+      // database and nothing else, so the content has to be reachable there or the API can report
+      // that a skill returned three findings without being able to show what it wrote.
+      // Fatal on failure, exactly like the event append beside it: an artifact that silently failed
+      // to store is a run whose record is partly absent, repaired invisibly by the next reindex and
+      // masking a real db fault.
+      getActiveRunStore().putArtifact(opts.runId, { ...ref, content });
+      return ref;
     },
   };
 }
@@ -107,10 +124,7 @@ export function withSkillLog<
   return async (input) => {
     const round = input.round;
     const step = input.step;
-    const inputRef = logger.artifact(
-      `${name}-r${round}.input.json`,
-      JSON.stringify(input, null, 2),
-    );
+    const inputRef = logger.artifact(`${name}-r${round}.input.json`, input);
     logger.event(
       "skill.invoke",
       { skill: name, input: inputRef },
@@ -123,10 +137,7 @@ export function withSkillLog<
       const durationMs = Date.now() - t0;
       const artifacts: SkillArtifact[] = [
         inputRef,
-        logger.artifact(
-          `${name}-r${round}.result.json`,
-          JSON.stringify({ ...res, durationMs }, null, 2),
-        ),
+        logger.artifact(`${name}-r${round}.result.json`, { ...res, durationMs }),
       ];
       logger.event(
         "skill.result",

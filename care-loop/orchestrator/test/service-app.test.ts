@@ -206,3 +206,48 @@ test("an unknown route returns the same error envelope as every other failure", 
     await h.close();
   }
 });
+
+test("GET /api/runs/:id/artifacts lists metadata, and /:sha returns one parsed body", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a");
+    const sha = "sha256:" + "e".repeat(64);
+    h.store.putArtifact(runId, {
+      path: "skills/care-reviewer-r1.result.json",
+      name: "care-reviewer-r1.result",
+      sha256: sha,
+      content: JSON.stringify({ verdict: "pass", findings: [] }),
+    });
+
+    const list = await h.get(`/api/runs/${runId}/artifacts`);
+    assert.equal(list.status, 200);
+    assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.items[0].sha256, sha);
+    assert.equal(list.body.items[0].content, undefined, "the list must not carry bodies");
+
+    // addressed by the bare hex, which is what a URL segment should hold
+    const body = await h.get(`/api/runs/${runId}/artifacts/${"e".repeat(64)}`);
+    assert.equal(body.status, 200);
+    assert.deepEqual(body.body.content, { verdict: "pass", findings: [] });
+  } finally {
+    await h.close();
+  }
+});
+
+test("artifact routes reject a malformed sha (400) and report an unknown one (404)", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a");
+    const bad = await h.get(`/api/runs/${runId}/artifacts/nope`);
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_sha");
+
+    const missing = await h.get(`/api/runs/${runId}/artifacts/${"f".repeat(64)}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "artifact_not_found");
+
+    assert.equal((await h.get(`/api/runs/${mintRunId()}/artifacts`)).status, 404);
+  } finally {
+    await h.close();
+  }
+});

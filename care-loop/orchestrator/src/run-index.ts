@@ -70,11 +70,32 @@ export interface EventPage {
   nextSeq: number | null;
 }
 
+/** Artifact metadata, WITHOUT the body — what a timeline needs to offer a link. */
+export interface ArtifactSummary {
+  path: string;
+  name: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface ArtifactBody extends ArtifactSummary {
+  /** The artifact's JSON value, already parsed — the column holds jsonb, and re-stringifying it for
+   *  the client to parse again would be two pointless round trips. */
+  content: unknown;
+}
+
 export interface RunIndex {
   list(filter?: ListFilter): RunSummary[];
   count(filter?: ListFilter): number;
   get(runId: string): RunRecord | null;
   events(runId: string, filter?: EventFilter): EventPage;
+  /** Artifact metadata for a run, body excluded — listing a timeline must not stream 1 MB of skill
+   *  envelopes nobody asked for. */
+  artifacts(runId: string): ArtifactSummary[];
+  /** One artifact body by content hash (hex digest, with or without the `sha256:` prefix). Addressed
+   *  by hash rather than path because that is the handle the journal's artifact ref already carries,
+   *  so the frontend goes from a timeline event to a body without a second lookup. */
+  artifact(runId: string, sha256: string): ArtifactBody | null;
   /** run_id → directory slug, or null. For tooling that still needs the on-disk location (the legacy
    *  dashboard scan, the doctor); NOT used by any service route. */
   slugOf(runId: string): string | null;
@@ -265,6 +286,29 @@ export class SqliteRunIndex implements RunIndex {
       items: page.map(rowToEvent),
       nextSeq: hasMore && page.length > 0 ? page[page.length - 1].seq : null,
     };
+  }
+
+  artifacts(runId: string): ArtifactSummary[] {
+    return this.db
+      .prepare(
+        "SELECT path, name, sha256, bytes FROM run_artifacts WHERE run_id = ? ORDER BY path",
+      )
+      .all(runId) as unknown as ArtifactSummary[];
+  }
+
+  artifact(runId: string, sha256: string): ArtifactBody | null {
+    // Accept both spellings: the journal ref carries `sha256:<hex>`, while a URL path segment is
+    // cleaner as the bare hex. Normalizing here means neither caller has to think about it.
+    const full = sha256.startsWith("sha256:") ? sha256 : `sha256:${sha256}`;
+    // json(content) decodes the jsonb BLOB back to text; parsed once here so the response carries a
+    // real JSON value rather than a string containing JSON.
+    const row = this.db
+      .prepare(
+        "SELECT path, name, sha256, bytes, json(content) AS content FROM run_artifacts WHERE run_id = ? AND sha256 = ? LIMIT 1",
+      )
+      .get(runId, full) as unknown as (Omit<ArtifactBody, "content"> & { content: string }) | undefined;
+    if (!row) return null;
+    return { ...row, content: JSON.parse(row.content) as unknown };
   }
 
   slugOf(runId: string): string | null {

@@ -130,6 +130,34 @@ export function buildApp(deps: AppDeps): Express {
     }),
   );
 
+  app.get(
+    "/api/runs/:id/artifacts",
+    route((req, res) => {
+      const id = runIdParam(req);
+      if (!deps.index.get(id)) throw notFound("run_not_found", `no run ${id}`);
+      // Metadata only. A run's artifacts total ~160 KB and a timeline view wants the links, not the
+      // bodies — streaming every skill envelope to render a list would be the wrong default.
+      res.json({ items: deps.index.artifacts(id) });
+    }),
+  );
+
+  app.get(
+    "/api/runs/:id/artifacts/:sha",
+    route((req, res) => {
+      const id = runIdParam(req);
+      const raw = req.params.sha;
+      const sha = Array.isArray(raw) ? raw[0] : raw;
+      // Validate the shape before it reaches SQL, and so a typo is a 400 rather than an empty 404
+      // the caller has to guess at.
+      if (typeof sha !== "string" || !/^(sha256:)?[0-9a-f]{64}$/.test(sha))
+        throw new ApiError(400, "bad_sha", `'${String(sha)}' is not a sha256 hex digest`);
+      if (!deps.index.get(id)) throw notFound("run_not_found", `no run ${id}`);
+      const found = deps.index.artifact(id, sha);
+      if (!found) throw notFound("artifact_not_found", `run ${id} has no artifact ${sha}`);
+      res.json(found);
+    }),
+  );
+
   app.use((_req, res) => {
     sendError(res, notFound("not_found", "no such route"));
   });

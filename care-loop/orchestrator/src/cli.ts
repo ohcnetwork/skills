@@ -841,7 +841,7 @@ async function main(): Promise<void> {
       const result = reindexRuns(store, runsDir);
       store.close();
       console.log(
-        `reindex: ${result.runsIndexed} run(s) indexed` +
+        `reindex: ${result.runsIndexed} run(s), ${result.artifactsIndexed} artifact(s) indexed` +
           (result.runsSkipped.length ? `, ${result.runsSkipped.length} skipped` : ""),
       );
       for (const s of result.runsSkipped)

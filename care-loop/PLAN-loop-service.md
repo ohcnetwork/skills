@@ -227,6 +227,8 @@ the directory slug appears in responses as a display label and is never a key.
 | `GET` | `/runs` | `{ items: RunSummary[], total, limit, offset }` | 1 |
 | `GET` | `/runs/:id` | `{ run, detail, queue }` — `runs` + `run_detail` + its queue row | 1 |
 | `GET` | `/runs/:id/events` | `{ items: JournalEvent[], next_seq }` — paginated timeline | 1 |
+| `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | 1 |
+| `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | 1 |
 | `GET` | `/runs/:id/stream` | SSE — live event tail | 2 |
 | `POST` | `/runs` | `201 { run_id, queue_id }` — enqueue | 3 |
 | `GET` | `/queue` | `{ items: QueueRow[] }` — pending + running | 3 |
@@ -259,23 +261,37 @@ is exactly the distinction it is least able to make without a race.
 - **Timestamps are ISO-8601 UTC strings**, exactly as stored. No epoch ints, no server-side
   formatting — the FE owns presentation.
 
-### What DB-only cannot serve
+### Skill artifact bodies live in the db too
 
-Skill *output* is not in the database. `skill-log.ts` deliberately keeps the journal spine lean: a
-`skill.result` event carries bounded fields (verdict, reason_code, model, duration, counts) plus a
-`{path, sha256}` **reference**, while the full envelope goes to a content-addressed sidecar under
-`<run-dir>/skills/`. So the API can say *the reviewer returned 3 findings and declined*, but not
-*here is what it wrote*.
+Originally this section recorded a limitation: skill *output* was not in the database. `skill-log.ts`
+keeps the journal spine lean — a `skill.result` event carries bounded fields plus a `{path, sha256}`
+**reference**, with the full envelope in a content-addressed sidecar under `<run-dir>/skills/` — so a
+DB-only API could say *the reviewer returned 3 findings and declined* but not *here is what it wrote*.
 
-Three ways out, and the choice should be deliberate:
+**Resolved by storing the bodies (`run_artifacts`, schema v3) rather than by letting the service read
+files.** The journal spine is unchanged; the artifact table is a parallel mirror.
 
-1. **Ship v1 without artifact bodies.** Verdicts, counts, and reasons are enough to watch a run.
-   Recommended — it costs nothing now and blocks nothing later.
-2. **Add a `run_artifacts` table**, written by the same `SkillLogger.artifact()` call that writes the
-   sidecar. Small, keeps DB-only intact, and makes drill-down work. Do this the moment the FE wants
-   to show what a skill actually said.
-3. **Let the service read sidecar files.** Rejected: it puts the filesystem back under the API for
-   one feature, and the supervisor would then need the run dirs mounted wherever it runs.
+- **`content` is jsonb, in a `BLOB` column.** Every artifact is a serialized JSON value by
+  construction, because `SkillLogger.artifact` now takes a VALUE and does the serializing — so "valid
+  JSON" is structural, not a convention each caller has to honour. `json_extract()` works directly on
+  the stored bytes with no reparse. Measured on the real fleet: 188 artifacts, 643 KB of text → 568 KB
+  of jsonb, ~12% smaller.
+- **jsonb is a function and an encoding, NOT a column type.** Declaring a column `JSONB` is accepted
+  but matches no affinity rule (it does not contain `BLOB`), so it lands on **NUMERIC** affinity and
+  will coerce numeric-looking strings. `BLOB` is the correct declaration.
+- **PK is `(run_id, path)`, not `(run_id, sha256)`.** Path is unique within a run; content is not — an
+  unchanged input recurring across two rounds would otherwise collapse two artifacts into one row.
+- **`sha256` is a handle, not a verified digest.** Worth stating plainly because the name implies
+  more: nothing in the codebase re-hashes an artifact and compares. The only verified hashes are
+  `journal.ts`'s `prev` chain and `run-id`'s backfill seed. It addresses the sidecar text, and it is
+  what the journal's ref already carries — which is why the API serves bodies by it, letting the
+  frontend go from a timeline event to a body with no second lookup.
+
+**The sidecar files stay**, and that was a real decision rather than inertia. Two things depend on
+them: `care-loop-doctor` reads `skills/*.json` **by path** off the run dir (it is a skill, not a db
+client), and `reindex` rebuilds `run_artifacts` from them — which is what keeps artifacts out of the
+`queue`/`gate_asks` category of data no rebuild can restore. `rm loops.db && care-loopd reindex` is
+still lossless, verified against the real fleet.
 
 `X-Care-User` on every request, persisted as `requested_by`. Freeze this contract before the FE
 starts — it is the whole reason the FE is sequenced third.
@@ -451,6 +467,16 @@ backups get more valuable.
   `VACUUM INTO backups/loops-<ts>.db` and `PRAGMA integrity_check` on service boot. This gets
   strictly more important at the §10 cutover, when the run tables join them — but it is needed
   before that, not after.
+- **Nothing is soft-deleted yet, and one thing should be.** Agreed direction: user-initiated removal
+  should set a flag rather than delete a row. There is no call site today — no delete route, no delete
+  method — so nothing is built. Two carve-outs when it lands: `clearAll()` and the `ON DELETE CASCADE`
+  chain are NOT domain deletes, they are `reindex`'s truncate-before-rebuild, and soft-deleting there
+  would make a rebuild an append and retire the "`rm loops.db && reindex` is lossless" invariant the
+  whole projection rests on. The place it would genuinely help now is `stale`, which is currently
+  derived by string-matching the directory name (`slug.includes(".stale-")`, and in SQL
+  `slug NOT LIKE '%.stale-%'`) — a soft delete implemented as a filesystem naming convention leaking
+  into a query predicate. An explicit `archived_at` on `runs` should replace it.
+
 - **Attribution is unverified.** Anyone on the VPN can claim any username. Accepted: the boundary is
   the network. Revisit only if the box leaves the VPN.
 

@@ -56,11 +56,28 @@ export interface RunStore {
    *  run.end check is a DETECTOR, not a guard: by the time it fires both writes have committed, so
    *  it cannot prevent what it finds. It records instead of throwing, and the fleet surfaces it. */
   recordParityError(runId: string, reason: string | null): void;
+  /** Mirror a skill artifact's BODY into the db alongside the sidecar file it was just written to
+   *  ([[PLAN-loop-service]] §6). Fatal on failure, exactly like `appendEvent`: the database is the
+   *  source of truth the API reads, so a silently-missing artifact would be a run whose record is
+   *  partially absent, repaired invisibly by the next reindex and masking a real db fault.
+   *  Idempotent on (run_id, path) so a resumed or replayed step overwrites rather than throwing.
+   *  `content` is the canonical JSON TEXT; the store encodes it to jsonb. Malformed JSON throws
+   *  here — which is why `SkillLogger.artifact` serializes rather than accepting a string. */
+  putArtifact(runId: string, a: ArtifactRow): void;
   close(): void;
 }
 
+export interface ArtifactRow {
+  /** Run-dir-relative sidecar path, e.g. `skills/care-reviewer-r1.input.json`. Unique within a run. */
+  path: string;
+  name: string;
+  sha256: string;
+  /** Canonical JSON text — exactly what the sidecar file holds and what `sha256` was taken over. */
+  content: string;
+}
+
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
-const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -126,6 +143,37 @@ CREATE TABLE IF NOT EXISTS run_events (
   PRIMARY KEY (run_id, seq)
 );
 
+-- Skill artifact BODIES ([[PLAN-loop-service]] §6). The journal spine stays lean — a skill.result
+-- event carries bounded fields plus a {path,sha256} REF — but the service reads the database and
+-- nothing else, so the referenced content has to live here too or the API can report that a skill
+-- returned three findings without being able to show what it wrote.
+--
+-- Content is stored inline rather than by reference: the entire historical fleet is 200 artifacts /
+-- 1.1 MB, largest single 21 KB (measured 2026-08-20), so there is nothing here that warrants an
+-- external blob store or a size cap. The bytes column records the ORIGINAL text length, so a future
+-- runaway is visible as data rather than as a mystery.
+--
+-- content is SQLite's binary JSON (produced by jsonb(), read back with json()), not text. Every
+-- artifact is a serialized JSON value by construction — SkillLogger.artifact takes a value and does
+-- the serializing — so the encoding is always valid, and json_extract() over it needs no reparse if
+-- we ever want to query inside bodies. NOTE: jsonb is a FUNCTION and an encoding, not a column type;
+-- declaring a column "JSONB" would land on NUMERIC affinity and silently coerce numeric-looking
+-- strings. BLOB is the correct declaration.
+--
+-- PK is (run_id, path), not (run_id, sha256): the sidecar path is unique within a run, while two
+-- artifacts CAN share content (an unchanged input across two rounds) and keying by hash would
+-- silently collapse them into one row.
+CREATE TABLE IF NOT EXISTS run_artifacts (
+  run_id  TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  path    TEXT NOT NULL,      -- run-dir-relative, e.g. skills/care-reviewer-r1.input.json
+  name    TEXT NOT NULL,      -- logical name, as recorded on the journal's artifact ref
+  sha256  TEXT NOT NULL,      -- "sha256:<hex>" of the sidecar TEXT; a handle, not a verified digest
+  bytes   INTEGER NOT NULL,
+  content BLOB NOT NULL,      -- jsonb(); read with json(content)
+  PRIMARY KEY (run_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON run_artifacts(run_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_runs_mine   ON runs(requested_by, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_recent ON runs(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON run_events(event, ts DESC);
@@ -201,6 +249,11 @@ export class SqliteRunStore implements RunStore {
     if (!cols.some((c) => c.name === "parity_error")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN parity_error TEXT");
     }
+    // v3 (`run_artifacts`) needs no step here: it is a NEW table, so the `CREATE TABLE IF NOT EXISTS`
+    // in SCHEMA already created it on this connection. Only altering an EXISTING table needs code.
+    // An upgraded db has the table but no rows until the next `reindex` backfills them from the
+    // sidecars on disk — which is why artifacts stay rebuildable rather than joining `queue` and
+    // `gate_asks` as data a reindex cannot restore.
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -326,6 +379,25 @@ export class SqliteRunStore implements RunStore {
       .run({ reason, run_id: runId });
   }
 
+  putArtifact(runId: string, a: ArtifactRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO run_artifacts (run_id, path, name, sha256, bytes, content)
+         VALUES (:run_id, :path, :name, :sha256, :bytes, jsonb(:content))
+         ON CONFLICT(run_id, path) DO UPDATE SET
+           name = excluded.name, sha256 = excluded.sha256,
+           bytes = excluded.bytes, content = excluded.content`,
+      )
+      .run({
+        run_id: runId,
+        path: a.path,
+        name: a.name,
+        sha256: a.sha256,
+        bytes: Buffer.byteLength(a.content, "utf8"),
+        content: a.content,
+      });
+  }
+
   getLastEvent(runId: string): JournalEvent | null {
     const row = this.db
       .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
@@ -333,7 +405,7 @@ export class SqliteRunStore implements RunStore {
     return row ? rowToEvent(row) : null;
   }
 
-  /** Wipe every projected row (cascades to run_detail/run_events/run_rounds) — the first step of
+  /** Wipe every projected row (cascades to run_detail/run_events/run_rounds/run_artifacts) — the first step of
    *  `care-loopd reindex`'s rebuild-from-journals guarantee (PLAN-sqlite-run-store.md §8). Not part
    *  of the `RunStore` write-path interface: only reindex tooling needs a full clear. */
   clearAll(): void {
@@ -362,6 +434,7 @@ export class NullRunStore implements RunStore {
     return null;
   }
   recordParityError(_runId: string, _reason: string | null): void {}
+  putArtifact(_runId: string, _a: ArtifactRow): void {}
   close(): void {}
 }
 

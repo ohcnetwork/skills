@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openRun } from "../src/run-context.ts";
 import { Journal, type JournalEvent } from "../src/journal.ts";
-import { SqliteRunStore, setActiveRunStore } from "../src/run-store.ts";
+import { SCHEMA_VERSION, SqliteRunStore, setActiveRunStore } from "../src/run-store.ts";
 import { mintRunId } from "../src/run-id.ts";
 import {
   checkParity,
@@ -191,7 +191,7 @@ test("an UNREADABLE replica warns and never throws — a degraded backup is not 
 });
 
 // ── the migration ────────────────────────────────────────────────────────────
-test("migrate(): a v1 database gains parity_error and reaches user_version 2", () => {
+test("migrate(): a v1 database gains parity_error and reaches the current user_version", () => {
   const dbPath = tmpDb();
   // Build a v1-shaped DB by hand: `runs` WITHOUT parity_error, user_version = 1. SCHEMA's
   // CREATE TABLE IF NOT EXISTS leaves it alone, so this is the real upgrade path.
@@ -216,7 +216,7 @@ test("migrate(): a v1 database gains parity_error and reaches user_version 2", (
   const [{ user_version: version }] = rawDb(upgraded)
     .prepare("PRAGMA user_version")
     .all() as unknown as { user_version: number }[];
-  assert.equal(version, 2);
+  assert.equal(version, SCHEMA_VERSION);
   upgraded.close();
 });
 
@@ -227,6 +227,6 @@ test("migrate(): is idempotent — reopening an already-migrated DB is a no-op",
   const [{ user_version: version }] = rawDb(reopened)
     .prepare("PRAGMA user_version")
     .all() as unknown as { user_version: number }[];
-  assert.equal(version, 2);
+  assert.equal(version, SCHEMA_VERSION);
   reopened.close();
 });

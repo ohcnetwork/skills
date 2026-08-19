@@ -297,13 +297,22 @@ them, and they are worth keeping separate because they do not have the same life
    body as jsonb keyed by `(run_id, path)`, with `sha256` and `bytes` alongside, so the doctor's
    inputs are queryable today — `json_extract` over `content` needs no reparse. Nothing needs adding
    to the schema for it.
-2. **`reindex` rebuilds `run_artifacts` from them**, which is what keeps artifacts out of the
-   `queue`/`gate_asks` category of data no rebuild can restore. **This reason is permanent** — it is
-   the "`rm loops.db && care-loopd reindex` is lossless" invariant the whole projection rests on, and
-   it holds no matter what the doctor ends up reading. Verified against the real fleet.
+2. **`reindex` rebuilds `run_artifacts` from them.** This outlives (1), but it is worth being precise
+   about why, because the obvious phrasing — "artifacts must stay rebuildable" — overstates it.
 
-So the files outlive the doctor's need for them. If a later change proposes dropping them, (2) is the
-one to argue with, not (1).
+   As *disaster recovery* the argument is real but narrowing: once step 3 lands `queue` and
+   `gate_asks`, which no rebuild can restore, backups (`VACUUM INTO` + boot `integrity_check`) become
+   the actual answer to a lost db, and rebuildability drops from necessary to cheap insurance. Cheap
+   is right though — the sidecars are 1.1 MB for the entire historical fleet.
+
+   The durable reason is *schema evolution*. `reindex` is how existing runs acquire data a new schema
+   version projects. `run_artifacts` is the worked example: v3 gave every existing db the table via
+   `CREATE TABLE IF NOT EXISTS` and **zero rows**; the 188 artifacts exist only because reindex read
+   them off disk. Any future column or table derived from artifact CONTENT can only be backfilled if
+   that content is still on disk in a form independent of the db being rebuilt.
+
+So the files outlive the doctor's need for them. If a later change proposes dropping them, the
+argument to answer is schema-evolution backfill — not disaster recovery, which backups will cover.
 
 `X-Care-User` on every request, persisted as `requested_by`. Freeze this contract before the FE
 starts — it is the whole reason the FE is sequenced third.

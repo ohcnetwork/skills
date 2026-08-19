@@ -288,10 +288,22 @@ files.** The journal spine is unchanged; the artifact table is a parallel mirror
   frontend go from a timeline event to a body with no second lookup.
 
 **The sidecar files stay**, and that was a real decision rather than inertia. Two things depend on
-them: `care-loop-doctor` reads `skills/*.json` **by path** off the run dir (it is a skill, not a db
-client), and `reindex` rebuilds `run_artifacts` from them — which is what keeps artifacts out of the
-`queue`/`gate_asks` category of data no rebuild can restore. `rm loops.db && care-loopd reindex` is
-still lossless, verified against the real fleet.
+them, and they are worth keeping separate because they do not have the same lifetime:
+
+1. **`care-loop-doctor` reads `skills/*.json` by path** off the run dir — it is a skill, not a db
+   client. **This reason is temporary.** The doctor loop is slated for rework after this plan ships,
+   and the obvious shape for it is reading the API (or the db) instead of globbing run dirs, at which
+   point this dependency disappears. Whoever does that rework: `run_artifacts` already holds every
+   body as jsonb keyed by `(run_id, path)`, with `sha256` and `bytes` alongside, so the doctor's
+   inputs are queryable today — `json_extract` over `content` needs no reparse. Nothing needs adding
+   to the schema for it.
+2. **`reindex` rebuilds `run_artifacts` from them**, which is what keeps artifacts out of the
+   `queue`/`gate_asks` category of data no rebuild can restore. **This reason is permanent** — it is
+   the "`rm loops.db && care-loopd reindex` is lossless" invariant the whole projection rests on, and
+   it holds no matter what the doctor ends up reading. Verified against the real fleet.
+
+So the files outlive the doctor's need for them. If a later change proposes dropping them, (2) is the
+one to argue with, not (1).
 
 `X-Care-User` on every request, persisted as `requested_by`. Freeze this contract before the FE
 starts — it is the whole reason the FE is sequenced third.

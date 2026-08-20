@@ -153,10 +153,3 @@ test("events filter by type, and round-trip the data payload", () => {
   assert.equal(only.items.length, 1);
   assert.deepEqual(only.items[0].data, { verdict: "pass", findings: 3 });
 });
-
-test("slugOf maps a run id to its directory, and null for an unknown id", () => {
-  const { store, index } = fixture();
-  const runId = seed(store, "care_fe-a");
-  assert.equal(index.slugOf(runId), "care_fe-a");
-  assert.equal(index.slugOf(mintRunId()), null);
-});

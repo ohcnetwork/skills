@@ -125,9 +125,6 @@ export interface RunIndex {
    *  by hash rather than path because that is the handle the journal's artifact ref already carries,
    *  so the frontend goes from a timeline event to a body without a second lookup. */
   artifact(runId: string, sha256: string): ArtifactBody | null;
-  /** run_id → directory slug, or null. For tooling that still needs the on-disk location (the legacy
-   *  dashboard scan, the doctor); NOT used by any service route. */
-  slugOf(runId: string): string | null;
   close(): void;
 }
 
@@ -413,13 +410,6 @@ export class SqliteRunIndex implements RunIndex {
       .get(runId, full) as unknown as (Omit<ArtifactBody, "content"> & { content: string }) | undefined;
     if (!row) return null;
     return { ...row, content: JSON.parse(row.content) as unknown };
-  }
-
-  slugOf(runId: string): string | null {
-    const row = this.db
-      .prepare("SELECT slug FROM runs WHERE run_id = ?")
-      .get(runId) as { slug: string } | undefined;
-    return row ? row.slug : null;
   }
 
   close(): void {

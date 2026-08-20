@@ -111,3 +111,72 @@ test("service and child interleave writes to one db without SQLITE_BUSY", () => 
   child.close();
   serviceDb.close();
 });
+
+// §10 "Claim is atomic: two claim loops against one pending row ⇒ exactly one changes() == 1".
+// The existing queue.test.ts case claims twice SEQUENTIALLY, which proves the status guard but not
+// the locking. This drives two independent CONNECTIONS, which is what actually exercises
+// BEGIN IMMEDIATE — the failure it prevents is two supervisors spawning one run, and that failure
+// surfaces hours later as the loop's own lockfile refusing the second orchestrator.
+test("two connections racing the same pending row: exactly one wins", () => {
+  const p = dbPath();
+  const owner = new SqliteRunStore(p);
+
+  const connect = (): QueueStore => {
+    const db = new DatabaseSync(p);
+    applyConnectionPragmas(db);
+    return new QueueStore(db);
+  };
+  const a = connect();
+  const b = connect();
+
+  const enqueued = a.enqueue({
+    requestedBy: "svc",
+    repo: "ohcnetwork/care_fe",
+    branch: "contested",
+    task: "t",
+    ticket: "ENG-1",
+    summary: "s",
+  });
+
+  const winners = [a.claim(), b.claim()].filter((r) => r !== null);
+  assert.equal(winners.length, 1, "exactly one connection may claim a given row");
+  assert.equal(winners[0]!.runId, enqueued.runId);
+  assert.equal(a.byRunId(enqueued.runId)?.attempts, 1, "attempts must not double-count");
+  owner.close();
+});
+
+test("racing connections drain a queue without double-claiming any row", () => {
+  const p = dbPath();
+  const owner = new SqliteRunStore(p);
+  const connect = (): QueueStore => {
+    const db = new DatabaseSync(p);
+    applyConnectionPragmas(db);
+    return new QueueStore(db);
+  };
+  const a = connect();
+  const b = connect();
+
+  // Distinct branches, so admission control never skips one — every row is claimable and the only
+  // thing deciding who gets it is the lock.
+  for (let i = 0; i < 20; i++)
+    a.enqueue({
+      requestedBy: "svc",
+      repo: "ohcnetwork/care_fe",
+      branch: `b${i}`,
+      task: "t",
+      ticket: `ENG-${i}`,
+      summary: "s",
+    });
+
+  const claimed: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    // Alternate so neither connection can simply run ahead of the other.
+    const got = (i % 2 === 0 ? a : b).claim();
+    if (got) claimed.push(got.runId);
+  }
+
+  assert.equal(claimed.length, 20, "every row claimed");
+  assert.equal(new Set(claimed).size, 20, "and none of them twice");
+  assert.equal(a.list({ status: ["pending"] }).length, 0);
+  owner.close();
+});

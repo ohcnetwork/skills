@@ -77,7 +77,7 @@ export interface ArtifactRow {
 }
 
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -203,6 +203,39 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- The request queue. The service inserts; the supervisor claims, spawns, and writes the terminal
+-- status. The CHILD never sees this table — it is handed a run dir and flags, exactly as a human
+-- would from the CLI, which is what keeps the child the same binary either way.
+--
+-- run_id is minted at ENQUEUE (run-id.ts), because POST /api/runs must answer { run_id }
+-- synchronously while the child starts long afterwards — possibly never, if the row is cancelled or
+-- the spawn fails. It is deliberately NOT a foreign key to runs(run_id): the queue row exists before
+-- any run row does, so a FK would reject every insert. That also means reindex's DELETE FROM runs
+-- cannot cascade queue rows away, which is the behaviour we want — a queue row is unrecoverable
+-- where a runs row is rebuildable.
+--
+-- status: pending → running → done | failed, or cancelled from either of the first two.
+CREATE TABLE IF NOT EXISTS queue (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id       TEXT NOT NULL UNIQUE,
+  status       TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  repo         TEXT NOT NULL,
+  branch       TEXT NOT NULL,
+  task         TEXT NOT NULL,
+  ticket       TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  enqueued_at  TEXT NOT NULL,
+  started_at   TEXT,
+  finished_at  TEXT,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  error        TEXT
+);
+
+-- The claim scan reads pending rows oldest-first and checks for a live row on the same branch.
+CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_queue_target ON queue(repo, branch, status);
 CREATE INDEX IF NOT EXISTS idx_runs_mine   ON runs(requested_by, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_recent ON runs(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON run_events(event, ts DESC);
@@ -278,9 +311,9 @@ export class SqliteRunStore implements RunStore {
     if (!cols.some((c) => c.name === "parity_error")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN parity_error TEXT");
     }
-    // v3 (`run_artifacts`) and v4 (`users`/`sessions`) need no step here: they are NEW tables, so the
-    // `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on this connection. Only altering an
-    // EXISTING table needs code.
+    // v3 (`run_artifacts`), v4 (`users`/`sessions`) and v5 (`queue`) need no step here: they are NEW
+    // tables, so the `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on this connection.
+    // Only altering an EXISTING table needs code.
     // An upgraded db has the table but no rows until the next `reindex` backfills them from the
     // sidecars on disk — which is why artifacts stay rebuildable rather than joining `queue` and
     // `gate_asks` as data a reindex cannot restore.
@@ -435,9 +468,14 @@ export class SqliteRunStore implements RunStore {
     return row ? rowToEvent(row) : null;
   }
 
-  /** Wipe every projected row (cascades to run_detail/run_events/run_rounds/run_artifacts) — the first step of
-   *  `care-loopd reindex`'s rebuild-from-journals guarantee (PLAN-sqlite-run-store.md §8). Not part
-   *  of the `RunStore` write-path interface: only reindex tooling needs a full clear. */
+  /** Wipe every projected row (cascades to run_detail/run_events/run_rounds/run_artifacts) — the
+   *  first step of `care-loopd reindex`'s rebuild-from-journals guarantee (PLAN-sqlite-run-store.md
+   *  §8). Not part of the `RunStore` write-path interface: only reindex tooling needs a full clear.
+   *
+   *  Scoped to the RUN tables on purpose. `queue`, `users`, and `sessions` are service-owned and have
+   *  no journal behind them, so deleting a queue row is unrecoverable where deleting a runs row is
+   *  not. They survive a reindex by not being named here, and `queue.run_id` is deliberately not a
+   *  foreign key, so the cascade cannot reach them either. */
   clearAll(): void {
     this.db.exec("DELETE FROM runs");
   }

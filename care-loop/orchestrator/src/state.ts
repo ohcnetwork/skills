@@ -34,6 +34,20 @@ export const STEP_VOCAB = [
 ] as const;
 export type Step = (typeof STEP_VOCAB)[number];
 
+/** Steps a run cannot advance from. The `satisfies` is the point: rename or remove a step in
+ *  STEP_VOCAB above and this stops compiling, rather than silently becoming a set of strings that no
+ *  longer match anything. Single-sourced here because "is this run finished?" is asked by the fleet
+ *  query, the API, and the frontend, and three copies of the answer is how they drift apart. */
+export const TERMINAL_STEPS = [
+  "7",
+  "merged",
+  "aborted",
+] as const satisfies readonly Step[];
+
+export function isTerminalStep(step: string): boolean {
+  return (TERMINAL_STEPS as readonly string[]).includes(step);
+}
+
 export const TIERS = ["trivial", "standard", "complex"] as const;
 export type Tier = (typeof TIERS)[number];
 

@@ -7,11 +7,21 @@ import { cn } from "./ui/primitives";
 export function Pipeline({ step }: { step: string }) {
   const at = pipelineIndex(step);
   const aborted = step === "aborted";
+  // A step the strip does not know (aborted, or one this build predates) shows the step itself rather
+  // than a row of empty pips, which would read as "not started" — a wrong answer told confidently.
+  if (at === null)
+    return (
+      <span
+        className={cn("font-mono text-xs", aborted ? "text-destructive" : "text-muted-foreground")}
+      >
+        {step}
+      </span>
+    );
   return (
     <div
       className="inline-flex gap-[3px]"
       role="img"
-      aria-label={aborted ? "run aborted" : `step ${step} of ${PIPELINE.length}`}
+      aria-label={`step ${step} of ${PIPELINE.length}`}
     >
       {PIPELINE.map((s, i) => (
         <span
@@ -19,13 +29,7 @@ export function Pipeline({ step }: { step: string }) {
           title={`step ${s}`}
           className={cn(
             "h-1.5 w-2.5 rounded-[2px]",
-            aborted
-              ? "bg-destructive"
-              : i < at
-                ? "bg-muted-foreground/50"
-                : i === at
-                  ? "bg-primary"
-                  : "bg-border",
+            i < at ? "bg-muted-foreground/50" : i === at ? "bg-primary" : "bg-border",
           )}
         />
       ))}

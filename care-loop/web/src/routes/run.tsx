@@ -8,7 +8,7 @@ import { AppHeader } from "../components/AppHeader";
 import { Pipeline } from "../components/Pipeline";
 import { Timeline } from "../components/Timeline";
 import { Badge, Card, cn } from "../components/ui/primitives";
-import { cost, duration, isTerminal, shortSha } from "../format";
+import { cost, duration, shortSha } from "../format";
 
 const REFRESH_MS = 5_000;
 
@@ -60,7 +60,7 @@ export function RunPage() {
           <span
             className={cn(
               "font-mono text-xs",
-              isTerminal(r.step) ? "text-muted-foreground" : "font-semibold text-live",
+              r.terminal ? "text-muted-foreground" : "font-semibold text-live",
             )}
           >
             {r.step}

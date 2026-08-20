@@ -7,7 +7,7 @@
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useFacets, useRuns } from "../api/queries";
 import type { RunFilters, RunSummary } from "../api/types";
-import { age, cost, duration, isTerminal } from "../format";
+import { age, cost, duration } from "../format";
 import { Pipeline } from "../components/Pipeline";
 import { AppHeader } from "../components/AppHeader";
 import { FilterBar } from "../components/FilterBar";
@@ -109,7 +109,7 @@ function RunRow({ run }: { run: RunSummary }) {
         <span
           className={cn(
             "font-mono text-xs",
-            isTerminal(run.step) ? "text-muted-foreground" : "font-semibold text-live",
+            run.terminal ? "text-muted-foreground" : "font-semibold text-live",
           )}
         >
           {run.step}

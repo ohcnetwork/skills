@@ -23,6 +23,8 @@ export interface RunSummary {
   durationMs: number;
   parityError: string | null;
   stale: boolean;
+  /** Sent by the server rather than derived here — the step vocabulary is the orchestrator's. */
+  terminal: boolean;
 }
 
 export interface RunRecord extends RunSummary {

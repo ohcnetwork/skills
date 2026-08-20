@@ -205,7 +205,10 @@ test("GET /api/runs/:id returns the run with its detail fields and a queue slot"
     assert.equal(body.run.ticket, "ENG-747");
     assert.equal(body.run.pr, 42);
     assert.equal(body.run.requestedBy, "octocat");
-    assert.equal(body.queue, null, "shape is stable before step 3 populates it");
+    // The frontend renders live-vs-finished from THIS, rather than keeping its own copy of the step
+    // vocabulary — so the field is part of the contract, not an incidental extra.
+    assert.equal(body.run.terminal, false);
+    assert.equal(body.queue, null, "no queue row for a run the CLI made");
   } finally {
     await h.close();
   }
@@ -769,6 +772,29 @@ test("GET /api/stats summarises the fleet and the queue", async () => {
     assert.equal(body.active, 1);
     assert.deepEqual(body.by_step, { "6a": 1, "7": 1 });
     assert.deepEqual(body.queue, { pending: 1, running: 0 });
+  } finally {
+    await h.close();
+  }
+});
+
+test("RunSummary carries `terminal`, so no client needs its own step vocabulary", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-live", { step: "6a" });
+    seed(h.store, "care_fe-done", { step: "7" });
+    seed(h.store, "care_fe-merged", { step: "merged" });
+    seed(h.store, "care_fe-aborted", { step: "aborted" });
+
+    const byStep = new Map(
+      (await h.get("/api/runs")).body.items.map((r: { step: string; terminal: boolean }) => [
+        r.step,
+        r.terminal,
+      ]),
+    );
+    assert.deepEqual(
+      [...byStep.entries()].sort(),
+      [["6a", false], ["7", true], ["aborted", true], ["merged", true]],
+    );
   } finally {
     await h.close();
   }

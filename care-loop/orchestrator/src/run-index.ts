@@ -11,6 +11,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import type { JournalEvent } from "./journal.js";
+import { TERMINAL_STEPS, isTerminalStep } from "./state.js";
 
 /** One row of the fleet list. `runId` is the key; `slug` is a display label — never key off it. */
 export interface RunSummary {
@@ -30,6 +31,10 @@ export interface RunSummary {
   durationMs: number;
   parityError: string | null;
   stale: boolean;
+  /** Whether the run has reached a step it cannot advance from. Sent rather than left for the client
+   *  to derive: the step vocabulary is the orchestrator's, and a frontend recomputing it is a second
+   *  copy that drifts the moment a step is added. */
+  terminal: boolean;
 }
 
 /** A single run: the list row plus the fields only its detail page needs. */
@@ -128,9 +133,6 @@ export interface RunIndex {
   close(): void;
 }
 
-/** Steps a run cannot advance from (state.ts STEP_VOCAB). `active` is the complement. */
-const TERMINAL_STEPS = ["7", "merged", "aborted"] as const;
-
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 200;
 export const DEFAULT_EVENT_LIMIT = 500;
@@ -193,6 +195,7 @@ function rowToSummary(row: RunRow): RunSummary {
     durationMs: row.duration_ms,
     parityError: row.parity_error,
     stale: row.slug.includes(".stale-"),
+    terminal: isTerminalStep(row.step),
   };
 }
 

@@ -30,21 +30,28 @@ export function shortSha(sha: string | null | undefined): string {
   return sha.slice(0, 7);
 }
 
-/** The FSM's step vocabulary in pipeline order, for rendering progress. Mirrors STEP_VOCAB. */
+/** The milestone steps, in order, for the progress strip.
+ *
+ *  This is a PRESENTATION choice, not a copy of the orchestrator's vocabulary: STEP_VOCAB also holds
+ *  sub-states (`3-implementing`, `5-await`, `6b-applying`) that would make ten pips into seventeen
+ *  without telling anyone more. Whether a run is FINISHED is deliberately not derived here — the
+ *  server sends `terminal` on every run, so there is one answer to that question rather than one per
+ *  layer. */
 export const PIPELINE = ["1", "2", "3", "4a", "4b", "4c", "5", "6a", "6b", "7"] as const;
-const TERMINAL = new Set(["7", "merged", "aborted"]);
 
-export function isTerminal(step: string): boolean {
-  return TERMINAL.has(step);
-}
-
-/** Where a step sits in the pipeline, tolerating the sub-states (`3-implementing`, `5-await`, …)
- *  that share a prefix with their parent step. */
-export function pipelineIndex(step: string): number {
+/** Where a step sits in the strip, or null if it is not on it.
+ *
+ *  Returns null rather than -1 for an unknown step so the caller has to handle it. A step this build
+ *  predates (the orchestrator gained one, the frontend has not been redeployed) previously fell
+ *  through as -1 and rendered as a strip of all-future pips — indistinguishable from a run that had
+ *  not started, which is the wrong answer told confidently. */
+export function pipelineIndex(step: string): number | null {
   if (step === "merged") return PIPELINE.length - 1;
-  if (step === "aborted") return -1;
+  if (step === "aborted") return null;
   const exact = PIPELINE.indexOf(step as (typeof PIPELINE)[number]);
   if (exact !== -1) return exact;
+  // Sub-states share their parent's prefix: `5-await` sits at `5`.
   const base = step.split("-")[0] ?? "";
-  return PIPELINE.indexOf(base as (typeof PIPELINE)[number]);
+  const parent = PIPELINE.indexOf(base as (typeof PIPELINE)[number]);
+  return parent === -1 ? null : parent;
 }

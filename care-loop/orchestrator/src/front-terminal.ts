@@ -61,10 +61,18 @@ export interface DerivedPaths {
 /** The (repo, main checkout, worktree, run dir) convention, derived from a branch + optional overrides.
  *  Shared by the terminal front (`plan`/`run`) and `cmdStart` so both stages resolve to the SAME run dir
  *  + worktree for a given branch — the single source of the convention, so it can't drift between them. */
+/** The run-dir / worktree name for a (repo, branch) pair: `<repo name>-<branch with / as ->`.
+ *  Exported because the loop-service supervisor has to derive the SAME directory the child will,
+ *  from a queue row rather than from flags — and two copies of this rule would mean the service
+ *  checking one path's lock while the child takes another's. */
+export function runSlug(repo: string, branch: string): string {
+  const name = repo.split("/")[1] ?? repo;
+  return `${name}-${branch.replace(/\//g, "-")}`;
+}
+
 export function derivePaths(branch: string, flags: Flags): DerivedPaths {
   const repo = typeof flags.repo === "string" ? flags.repo : "ohcnetwork/care_fe";
-  const name = repo.split("/")[1];
-  const slug = `${name}-${branch.replace(/\//g, "-")}`;
+  const slug = runSlug(repo, branch);
   const mainRepoPath = typeof flags.main === "string" ? flags.main : join(homedir(), "Desktop/care_fe");
   const worktree = typeof flags.worktree === "string" ? flags.worktree : join(homedir(), `Desktop/${slug}`);
   const runDir = typeof flags["run-dir"] === "string" ? flags["run-dir"] : join(SKILL_DIR, "runs", slug);

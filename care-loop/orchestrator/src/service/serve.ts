@@ -13,6 +13,7 @@ import { SqliteRunIndex } from "../run-index.js";
 import { applyConnectionPragmas } from "../run-store.js";
 import { SessionStore } from "./auth.js";
 import { QueueStore } from "./queue.js";
+import { Supervisor } from "./supervisor.js";
 import { backupNow, integrityCheck } from "./backup.js";
 
 export interface ServeOptions {
@@ -35,6 +36,18 @@ export interface ServeOptions {
   backupKeep?: number;
   /** Repos a run may be requested against. Defaults to the one this exists for. */
   allowedRepos?: string[];
+  /** Claim queued rows and spawn children (§5). OFF by default: `serve` on a laptop next to someone
+   *  else's `serve` on the same db must not both start claiming, and a read-only dashboard is a
+   *  perfectly good thing to run. `POST /api/runs` refuses while this is off, so the failure mode is
+   *  a clear 503 rather than rows nothing consumes. */
+  supervise?: boolean;
+  /** Max concurrent children. Each is a worktree plus an opencode session plus Copilot credits. */
+  concurrency?: number;
+  /** Where run directories live. Defaults to the db's own directory, which is where `reindex` and the
+   *  CLI already put them. */
+  runsDir?: string;
+  /** The main checkout worktrees branch from, passed to each child as `--main`. */
+  mainRepoPath?: string;
 }
 
 /** The running build, for `/api/health`. A version nobody can read off a live deploy is not much of
@@ -84,10 +97,22 @@ export function startService(o: ServeOptions): Server {
   const here = dirname(fileURLToPath(import.meta.url));
   const defaultStatic = join(here, "../../../web/dist");
   const staticDir = o.staticDir ?? (existsSync(defaultStatic) ? defaultStatic : undefined);
+  const runsDir = o.runsDir ?? dirname(o.dbPath);
+  // Constructed but not started when supervision is off, so `app.ts` sees `running: false` and the
+  // enqueue gate reports the real reason.
+  const supervisor = new Supervisor({
+    queue,
+    runsDir,
+    concurrency: o.concurrency,
+    mainRepoPath: o.mainRepoPath,
+  });
+  if (o.supervise) supervisor.start();
+
   const app = buildApp({
     index,
     sessions,
     queue,
+    supervisor,
     version: o.version ?? packageVersion(),
     secureCookies: o.secureCookies ?? false,
     staticDir,
@@ -134,6 +159,10 @@ export function startService(o: ServeOptions): Server {
     if (shuttingDown) return;
     shuttingDown = true;
     if (timer) clearInterval(timer);
+    // Stop claiming, but do NOT kill the children: they are independent processes holding their own
+    // locks and journals, and a service restart aborting every teammate's run would be a far worse
+    // failure than a few minutes of unsupervised children. `reconcile` re-adopts them at boot.
+    supervisor.stop();
     server.close(() => {
       index.close();
       process.exit(0);

@@ -73,9 +73,13 @@ Usage:
        Writes only service-owned tables (users/sessions); run rows stay the owning child's. Binds
        loopback unless --host says otherwise — there is no authentication, the login is a claim, and
        the trust boundary is the network.
+       Add --supervise to CLAIM queued runs and spawn a care-loopd child per run (concurrency cap,
+       crash reconciliation at boot, cancel via SIGTERM). Without it the API is read+enqueue only —
+       and POST /api/runs refuses, rather than banking work nothing will ever execute.
        flags: --port <n> (default 3142) · --db <path> (default ../runs/loops.db) · --host <addr>
               --secure-cookies (set once TLS terminates in front) · --static <dir> · --repos a/b,c/d
               --backup-dir <path> · --backup-keep <n>
+              --supervise · --concurrency <n> (default 2) · --runs-dir <path> · --main <care_fe path>
 
   care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
        fleet projection that serve and status read (PLAN-sqlite-run-store.md). It clears and rebuilds
@@ -833,6 +837,11 @@ async function main(): Promise<void> {
           typeof sf["backup-keep"] === "string" ? Number.parseInt(sf["backup-keep"], 10) : undefined,
         allowedRepos:
           typeof sf.repos === "string" ? sf.repos.split(",").map((r) => r.trim()).filter(Boolean) : undefined,
+        supervise: sf.supervise === true,
+        concurrency:
+          typeof sf.concurrency === "string" ? Number.parseInt(sf.concurrency, 10) : undefined,
+        runsDir: typeof sf["runs-dir"] === "string" ? resolve(sf["runs-dir"]) : RUNS_ROOT,
+        mainRepoPath: typeof sf.main === "string" ? resolve(sf.main) : undefined,
       });
       break;
     }

@@ -6,6 +6,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { mintRunId } from "../run-id.js";
+import { DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT } from "../run-index.js";
 
 export const QUEUE_STATUSES = ["pending", "running", "done", "failed", "cancelled"] as const;
 export type QueueStatus = (typeof QUEUE_STATUSES)[number];
@@ -28,6 +29,17 @@ export interface QueueRow {
   finishedAt: string | null;
   attempts: number;
   error: string | null;
+}
+
+export interface QueueFilter {
+  status?: QueueStatus[];
+  requestedBy?: string;
+  repo?: string;
+  branch?: string;
+  /** Same defaults as every other list route (50 / max 200). The queue used to carry its own 200/500,
+   *  which is exactly the drift §6's envelope convention exists to prevent. */
+  limit?: number;
+  offset?: number;
 }
 
 export interface EnqueueRequest {
@@ -54,6 +66,16 @@ interface Row {
   finished_at: string | null;
   attempts: number;
   error: string | null;
+}
+
+/** Queue paging on the SAME defaults as `/runs` (50, max 200). One clamp, so a `limit` the client
+ *  asked for and the `limit` the response reports can never disagree. */
+export function resolveQueuePaging(f: QueueFilter = {}): { limit: number; offset: number } {
+  const raw = Math.trunc(f.limit ?? DEFAULT_LIST_LIMIT);
+  return {
+    limit: Number.isFinite(raw) ? Math.min(Math.max(raw, 1), MAX_LIST_LIMIT) : DEFAULT_LIST_LIMIT,
+    offset: Math.max(0, Math.trunc(f.offset ?? 0)),
+  };
 }
 
 const toRow = (r: Row): QueueRow => ({
@@ -101,22 +123,77 @@ export class QueueStore {
     return r ? toRow(r) : null;
   }
 
-  list(filter: { status?: QueueStatus[]; requestedBy?: string; limit?: number } = {}): QueueRow[] {
+  /** The shared WHERE for `list`/`count`, so a page and its `total` can never come from two different
+   *  predicates — the paginated-list bug that only shows up on page two. */
+  private whereFor(f: QueueFilter): { sql: string; params: (string | number)[] } {
     const clauses: string[] = [];
     const params: (string | number)[] = [];
-    if (filter.status?.length) {
-      clauses.push(`status IN (${filter.status.map(() => "?").join(", ")})`);
-      params.push(...filter.status);
+    if (f.status?.length) {
+      clauses.push(`status IN (${f.status.map(() => "?").join(", ")})`);
+      params.push(...f.status);
     }
-    if (filter.requestedBy !== undefined) {
+    if (f.requestedBy !== undefined) {
       clauses.push("requested_by = ?");
-      params.push(filter.requestedBy);
+      params.push(f.requestedBy);
     }
-    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    if (f.repo !== undefined) {
+      clauses.push("repo = ?");
+      params.push(f.repo);
+    }
+    if (f.branch !== undefined) {
+      clauses.push("branch = ?");
+      params.push(f.branch);
+    }
+    return { sql: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  list(filter: QueueFilter = {}): QueueRow[] {
+    const { sql, params } = this.whereFor(filter);
+    const { limit, offset } = resolveQueuePaging(filter);
     const rows = this.db
-      .prepare(`SELECT * FROM queue${where} ORDER BY enqueued_at ASC LIMIT ?`)
-      .all(...params, Math.min(Math.max(filter.limit ?? 200, 1), 500)) as unknown as Row[];
+      .prepare(`SELECT * FROM queue${sql} ORDER BY enqueued_at ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as unknown as Row[];
     return rows.map(toRow);
+  }
+
+  count(filter: QueueFilter = {}): number {
+    const { sql, params } = this.whereFor(filter);
+    const r = this.db.prepare(`SELECT COUNT(*) AS n FROM queue${sql}`).get(...params) as unknown as {
+      n: number;
+    };
+    return r.n;
+  }
+
+  /** Rows per status, in one query. `/stats` used to count a *page* of rows, so the moment the queue
+   *  outgrew one page the dashboard's totals quietly stopped being totals. */
+  statusCounts(): Record<QueueStatus, number> {
+    const out = Object.fromEntries(QUEUE_STATUSES.map((s) => [s, 0])) as Record<QueueStatus, number>;
+    const rows = this.db
+      .prepare("SELECT status, COUNT(*) AS n FROM queue GROUP BY status")
+      .all() as unknown as { status: string; n: number }[];
+    for (const r of rows) if (r.status in out) out[r.status as QueueStatus] = r.n;
+    return out;
+  }
+
+  /**
+   * How many pending rows sit ahead of this one — the answer to "why has my run not started?" in the
+   * common case, which is the concurrency cap and not the branch.
+   *
+   * Counting *pending* rows only (not `running`) makes this a countdown to zero: as rows are claimed
+   * they leave the count, so a caller polling their own row watches it fall. Position 0 means nothing
+   * is queued ahead — it may still be blocked on its branch, which is a separate field.
+   */
+  position(runId: string): number | null {
+    const me = this.byRunId(runId);
+    if (!me) return null;
+    const r = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM queue
+          WHERE status = 'pending'
+            AND (enqueued_at < ? OR (enqueued_at = ? AND id < ?))`,
+      )
+      .get(me.enqueuedAt, me.enqueuedAt, me.id) as unknown as { n: number };
+    return r.n;
   }
 
   /** Is this repo+branch already spoken for? Admission control lives in the SERVICE, not the loop
@@ -147,11 +224,25 @@ export class QueueStore {
    * absorb. The reason it must be skipped at all: `derivePaths` derives the run dir AND the worktree
    * from `${repo}-${branch}`, so a second run on the same branch is not a competing run, it IS the
    * first one — same dir, same journal, same lockfile.
+   *
+   * **`startable` is how the filesystem gets a vote.** The queue table knows about runs the queue
+   * started; it knows nothing about a run someone launched from a terminal, which holds the very same
+   * lockfile. Without this the service claims the row, spawns, and the child dies in `withLock` —
+   * after worktree setup, minutes in, reported as a spawn failure. The supervisor passes a predicate
+   * backed by `inspectLock`, so a live CLI run defers the claim instead of poisoning it.
+   *
+   * The candidate query returns the oldest pending row **per (repo, branch)**, not the oldest rows
+   * overall: a branch with fifty queued rows and a live lock would otherwise fill the whole scan
+   * window and starve every other branch behind it.
    */
-  claim(now: Date = new Date()): QueueRow | null {
+  claim(
+    opts: { now?: Date; startable?: (row: QueueRow) => boolean; scan?: number } = {},
+  ): QueueRow | null {
+    const now = opts.now ?? new Date();
+    const scan = opts.scan ?? 25;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const candidate = this.db
+      const candidates = this.db
         .prepare(
           `SELECT q.* FROM queue q
             WHERE q.status = 'pending'
@@ -160,10 +251,20 @@ export class QueueStore {
                  WHERE r.repo = q.repo AND r.branch = q.branch
                    AND r.status = 'running'
               )
+              AND q.id = (
+                SELECT MIN(p.id) FROM queue p
+                 WHERE p.repo = q.repo AND p.branch = q.branch
+                   AND p.status = 'pending'
+              )
             ORDER BY q.enqueued_at ASC, q.id ASC
-            LIMIT 1`,
+            LIMIT ?`,
         )
-        .get() as unknown as Row | undefined;
+        .all(scan) as unknown as Row[];
+
+      // The predicate runs INSIDE the transaction. It only reads the filesystem, so it cannot
+      // deadlock on the db, and holding the write lock across it is what makes "checked the lock,
+      // then claimed" a single decision rather than a race with the next supervisor tick.
+      const candidate = candidates.find((r) => !opts.startable || opts.startable(toRow(r)));
       if (!candidate) {
         this.db.exec("COMMIT");
         return null;
@@ -187,6 +288,17 @@ export class QueueStore {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  /** Hand a claimed row back to `pending` — the §4 reconciliation action for a row that was claimed
+   *  but never spawned (supervisor died in the gap). `attempts` is deliberately NOT decremented: it
+   *  counts claims, and a row that keeps being claimed and orphaned is exactly what an operator wants
+   *  to see rather than have quietly reset. */
+  release(id: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE queue SET status = 'pending', started_at = NULL WHERE id = ? AND status = 'running'")
+      .run(id);
+    return changes === 1;
   }
 
   /** Record a terminal outcome for a claimed row. */

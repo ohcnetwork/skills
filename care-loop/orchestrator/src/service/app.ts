@@ -18,7 +18,13 @@ import {
   type SessionStore,
 } from "./auth.js";
 import { bool, int, str, strList } from "./query.js";
-import { LIVE_STATUSES, QUEUE_STATUSES, type QueueStatus, type QueueStore } from "./queue.js";
+import {
+  LIVE_STATUSES,
+  QUEUE_STATUSES,
+  resolveQueuePaging,
+  type QueueStatus,
+  type QueueStore,
+} from "./queue.js";
 import { validateSeed } from "../front-terminal.js";
 import { isValidRunId } from "../run-id.js";
 import {
@@ -36,7 +42,12 @@ export interface AppDeps {
   /** Set once a supervisor is running (step 4). Until then `POST /api/runs` refuses rather than
    *  banking work nothing will ever execute — a queued row with no consumer is a silent black hole,
    *  and the person who asked for the run has no way to tell it apart from a slow start. */
-  supervisor?: { running: boolean } | null;
+  supervisor?: {
+    running: boolean;
+    /** `cancelled: false` means the row was already terminal — a finished run cannot be un-run, and
+     *  saying so beats a 202 that did nothing. */
+    cancel(runId: string): { cancelled: boolean; signalled: boolean };
+  } | null;
   /** Repos a run may be requested against. An allowlist rather than free text: `repo` reaches
    *  `git worktree add` and a GitHub API call, and "whatever the client sent" is not a good input to
    *  either. Defaults to the one repo this exists for. */
@@ -247,16 +258,22 @@ export function buildApp(deps: AppDeps): Express {
         summary: seed.summary!,
       });
 
-      // Report what is already on this branch rather than refusing. The row is queued either way and
-      // becomes claimable when the other finishes (§12: queue behind, don't reject) — but the caller
-      // deserves to know their run will not start immediately, and why.
-      // `liveOn` returns the OLDEST live row on this branch, which is our own row when nothing else
-      // holds it — so a different run id is exactly the signal that we are behind someone.
+      // Report why this will not start immediately, rather than refusing. The row is queued either
+      // way and becomes claimable when the blocker clears (§12: queue behind, don't reject) — but the
+      // caller deserves to know, and the two reasons are genuinely different:
+      //
+      //  - `blocked_by_branch` — another live run owns this (repo, branch), so this one waits for THAT
+      //    run specifically. `liveOn` returns the oldest live row on the branch, which is our own when
+      //    nothing else holds it, so a different run id is exactly the signal.
+      //  - `queue_position` — rows ahead of us in line. This is the far more common reason with a
+      //    concurrency cap of 2 and five queued branches, and reporting only the first would tell
+      //    three of those five callers `null` and let them expect an immediate start.
       const ahead = deps.queue.liveOn(repo, seed.branch!);
       res.status(201).json({
         run_id: row.runId,
         queue_id: row.id,
-        queued_behind: ahead && ahead.runId !== row.runId ? ahead.runId : null,
+        blocked_by_branch: ahead && ahead.runId !== row.runId ? ahead.runId : null,
+        queue_position: deps.queue.position(row.runId) ?? 0,
       });
     }),
   );
@@ -269,14 +286,25 @@ export function buildApp(deps: AppDeps): Express {
       for (const st of requested ?? [])
         if (!QUEUE_STATUSES.includes(st as QueueStatus))
           throw badRequest("bad_query", `status must be one of ${QUEUE_STATUSES.join(", ")}`);
+      // Defaults to the live rows: "what is the queue doing" is the question this answers, and a
+      // month of finished rows buries it.
+      const filter = {
+        status: (requested as QueueStatus[] | undefined) ?? [...LIVE_STATUSES],
+        requestedBy: str(q, "requested_by"),
+        repo: str(q, "repo"),
+        branch: str(q, "branch"),
+        limit: int(q, "limit", { min: 1 }),
+        offset: int(q, "offset", { min: 0 }),
+      };
+      // The same `{items, total, limit, offset}` envelope as every other list route (§6): a bare
+      // array cannot grow pagination later without breaking every client, which is the whole reason
+      // the convention exists — and this was the one route that had drifted from it.
+      const applied = resolveQueuePaging(filter);
       res.json({
-        // Defaults to the live rows: "what is the queue doing" is the question this answers, and a
-        // month of finished rows buries it.
-        items: deps.queue.list({
-          status: (requested as QueueStatus[] | undefined) ?? [...LIVE_STATUSES],
-          requestedBy: str(q, "requested_by"),
-          limit: int(q, "limit", { min: 1 }),
-        }),
+        items: deps.queue.list(filter),
+        total: deps.queue.count(filter),
+        limit: applied.limit,
+        offset: applied.offset,
       });
     }),
   );
@@ -286,16 +314,42 @@ export function buildApp(deps: AppDeps): Express {
     route((_req, res) => {
       const byStep: Record<string, number> = {};
       for (const f of deps.index.facets({}).steps) byStep[f.value] = f.count;
-      const live = deps.queue.list({ status: [...LIVE_STATUSES] });
+      // Counted in SQL, not by filtering a page of rows — the previous version silently stopped
+      // being a total the moment the queue outgrew one page.
+      const counts = deps.queue.statusCounts();
       res.json({
         runs: deps.index.count({}),
         active: deps.index.count({ active: true }),
         by_step: byStep,
-        queue: {
-          pending: live.filter((r) => r.status === "pending").length,
-          running: live.filter((r) => r.status === "running").length,
-        },
+        queue: { pending: counts.pending, running: counts.running },
       });
+    }),
+  );
+
+  app.post(
+    "/api/runs/:id/cancel",
+    route((req, res) => {
+      // Attributed, like every write. Not restricted to the requester: this is a shared box with a
+      // shared concurrency cap, and a run wedged on someone's day off has to be stoppable by whoever
+      // is at the keyboard. Authorization arrives with real auth, not before it.
+      requireUser(req);
+      const id = runIdParam(req);
+      if (!deps.supervisor)
+        throw new ApiError(503, "no_supervisor", "no supervisor is running — nothing can be cancelled");
+      const row = deps.queue.byRunId(id);
+      if (!row) throw notFound("run_not_found", `no queued run ${id}`);
+
+      // ONE route for both states (§6). Minting `run_id` at enqueue means a request has a stable id
+      // before it has a process, so the caller never has to know whether it caught the run pending or
+      // running — the distinction it is least able to make without a race.
+      const { cancelled, signalled } = deps.supervisor.cancel(id);
+      if (!cancelled)
+        throw badRequest("not_cancellable", `run ${id} is already ${row.status}`);
+
+      // 202, not 204: the row is cancelled for certain, but a running child exits on its own schedule
+      // after SIGTERM. Claiming completion here would be a lie the FE would render as a finished run
+      // seconds before the process actually stops.
+      res.status(202).json({ run_id: id, cancelled: true, signalled });
     }),
   );
 

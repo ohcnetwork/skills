@@ -166,14 +166,26 @@ run locally** — it has no idea a service exists, and no DB coupling to the que
 If the service dies mid-run, every `running` row survives as a claim nobody holds. On boot, reconcile
 each one:
 
-| `run_id` | lock (`acquireLock`) | meaning | action |
-|---|---|---|---|
-| NULL | — | died between claim and spawn | back to `pending` |
-| set | refused | child is alive | re-adopt the PID |
-| set | acquired | child is dead | `resume` it, stay `running` |
+| lock (`inspectLock`) | meaning | action |
+|---|---|---|
+| held, holder alive | child outlived the service | re-adopt the PID |
+| held, holder dead | child died mid-run | back to `pending` |
+| absent | never spawned, or exited cleanly | back to `pending` |
 
-Same `lock.ts` PID-liveness primitive as §5, now driven from the queue rather than from a directory
-scan.
+Non-destructive `inspectLock`, not `acquireLock`: a caller asking "is anything driving this run?" must
+not answer by *taking the lock*, which is what the acquire-and-see-if-it-refuses formulation does.
+
+**Back to `pending`, not "resume it, stay `running`".** Earlier drafts had a dead child resumed in
+place. Returning it to `pending` reaches the same destination through the path that already exists:
+the claim/spawn cycle re-spawns it with the *same* `CARE_RUN_ID` onto the *same* run dir, and
+`run-context` adopts that id rather than rebinding it. What the draft called resume is what a re-spawn
+already does — and the alternative was a second code path that executes only after a crash, which is
+the least-tested kind there is.
+
+A re-adopted child needs one thing a spawned one does not: there is no exit *event* for a process you
+did not fork, so the supervisor sweeps adopted pids each tick. The exit status is still recoverable —
+the child holds its lock for the whole run and releases it in `withLock`'s `finally`, so a vanished
+process that left no lock unwound cleanly and one whose lock is still there died where it stood.
 
 ### `queue` sits outside the projection invariant
 
@@ -211,11 +223,20 @@ session plus Copilot credits; this is a real resource limit, not a formality.
 reconciliation table — driven by `WHERE status = 'running'` rather than by a directory walk, which is
 the practical payoff of the queue owning the lifecycle. No new recovery machinery.
 
-**Cancel.** A `pending` row cancels as a status write, with nothing to kill. A `running` row needs the
-child: the service sets `queue.status = 'cancelled'`, the child reads its own queue row at each step
-boundary and exits cleanly with a `run.end`, and the supervisor escalates to `SIGTERM` after a
-timeout. No sentinel file — a row the child polls is the same mechanism with one fewer artifact, and
-the DB write is durable, so a killed run is just a resumable one.
+**Cancel.** A `pending` row cancels as a status write, with nothing to kill. A `running` row is sent
+`SIGTERM`, escalating to `SIGKILL` after a grace period.
+
+An earlier draft had the child poll its own queue row at each step boundary and exit cleanly. That
+contradicted §4's "the child never sees the queue" — and §4 wins, because that property is what keeps
+the child **the same binary you run locally**: no DB coupling to a service-owned table, no schema
+knowledge, debuggable by re-running the same command by hand. Signalling costs nothing next to it.
+loopd is crash-only with journal-backed `resume`, so a terminated child is a resumable run travelling
+the same recovery path a power cut would take — one mechanism, already tested, rather than a second
+one that only cancellation exercises.
+
+The status write comes **first**, and it is what the caller's `202` means. Killing is the best-effort
+half: a lost signal or an already-dead process still leaves the row correct, and `reconcile` will not
+resurrect a row that is no longer `running`.
 
 **`CARE_DOCTOR=0`** on the server. The end-of-run doctor opens self-improvement PRs against the skills
 repo; that should stay a deliberate local action, not a side effect of every teammate's run.
@@ -249,10 +270,10 @@ route is `/api/*`, returns JSON, and resolves identity through one middleware. `
 | `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | ✅ |
 | `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | ✅ |
 | `GET` | `/runs/:id/stream` | SSE — live event tail | 2 |
-| `POST` | `/runs` | `201 { run_id, queue_id, queued_behind }` — enqueue | ✅ |
-| `GET` | `/queue` | `{ items: QueueRow[] }` — live rows by default | ✅ |
+| `POST` | `/runs` | `201 { run_id, queue_id, blocked_by_branch, queue_position }` — enqueue | ✅ |
+| `GET` | `/queue` | `{ items: QueueRow[], total, limit, offset }` — live rows by default | ✅ |
 | `GET` | `/stats` | `{ runs, active, by_step, queue }` | ✅ |
-| `POST` | `/runs/:id/cancel` | `202` | 4 |
+| `POST` | `/runs/:id/cancel` | `202 { run_id, cancelled, signalled }` | ✅ |
 | `GET` | `/runs/:id/gate` | `PendingAsk \| null` | 5 |
 | `POST` | `/runs/:id/gate` | `204` | 5 |
 
@@ -278,7 +299,21 @@ Three decisions inside that table are easy to get wrong later:
 - **One `cancel`, not two.** Minting `run_id` at enqueue (§4) means a request has a stable id before
   it has a process, so one route covers both cases: a `pending` row is marked `cancelled` in place, a
   `running` one signals the child. The frontend never has to know which state it caught the run in —
-  the distinction it is least able to make without a race.
+  the distinction it is least able to make without a race. It answers `202`, not `204`: the row is
+  certain, but a signalled child exits on its own schedule, and a `204` would render as a finished run
+  seconds before the process actually stopped.
+
+**Why enqueue reports two blockers, not one.** `blocked_by_branch` names the live run occupying this
+`(repo, branch)`; `queue_position` counts pending rows ahead. Reporting only the first would be
+actively misleading — with a cap of 2 and five queued runs on five branches, three callers would be
+told nothing is in their way while they wait on the cap, which is the *common* reason a run does not
+start. Position counts `pending` rows only, so a caller polling their own row watches it count down to
+zero rather than plateau.
+
+**`/queue` carries the same envelope as every other list route** — `{ items, total, limit, offset }`,
+50 default / 200 max. It was specified as a bare `{ items }` with the queue store keeping its own
+200/500 defaults, which is precisely the drift the convention above exists to prevent, caught while
+the contract was still cheap to change.
 
 ### Auth: the shape now, the verification later
 
@@ -532,11 +567,48 @@ that made bot-authoring worth the trade.
 | 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` — **built 2026-08-20** | done |
 | 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted — **built 2026-08-20** | done |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
-| 4 | Supervisor: claim, spawn, cap, reconcile, cancel | 1.5d |
+| 4 | Supervisor: claim, spawn, cap, reconcile, cancel — **built 2026-08-21** | done |
 | 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
 | 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
 
-**~5.5d.** Steps 0–1 are done. `run-store.ts`, `run-id.ts`, `run-context.ts`, and `reindex.ts` gave
+**~5.5d.** Steps 0–4 are done; 5–6 remain.
+
+Step 4 added `src/service/supervisor.ts` and turned three things that were paper into code:
+
+- **`--supervise` is opt-in.** Two `serve` processes on one db must not both claim, and a read-only
+  dashboard is a perfectly reasonable thing to run. `POST /api/runs` refuses while it is off, so the
+  failure mode is a clear `503` rather than rows nothing consumes.
+- **The claim consults the filesystem.** `QueueStore.claim` takes a `startable` predicate, evaluated
+  *inside* the `BEGIN IMMEDIATE` transaction, and the supervisor backs it with `inspectLock`. Without
+  it the queue is blind to a run someone launched from a terminal — which holds the very same lockfile,
+  since the run dir is `${repo}-${branch}` either way — and the service would claim, spawn, set up a
+  worktree, and die in `withLock` minutes later, reported as a spawn failure. The candidate query
+  returns the oldest pending row *per branch* so fifty rows queued on one blocked branch cannot fill
+  the scan window and starve every branch behind them.
+- **`stop()` does not kill the children.** They are independent processes holding their own locks and
+  journals; a service restart aborting every teammate's run would be far worse than a few unsupervised
+  minutes, and §4's reconciliation re-adopts them at boot. This is what makes the boot table load-bearing
+  rather than decorative.
+
+Spawning the child for real also shook two latent bugs out of the *loop* side — both invisible until
+something ran `care-loopd` non-interactively, which nothing did before this step:
+
+- **The launcher only worked from inside its own package.** `bin/care-loopd.mjs` had the shebang
+  `node --import tsx`, and node resolves that bare specifier against the *working directory* — so it
+  died with "Cannot find package 'tsx'" from anywhere else. That is every `npm link` user, and every
+  child the supervisor spawns, whose cwd is the run directory by design. It now registers tsx
+  programmatically, resolved relative to the launcher itself.
+- **The plan gate hung forever on a closed stdin.** `rl.question` against an ended stream never
+  resolves — not EOF, not an empty string, just a promise that sits there. The child printed the
+  approval prompt and stopped: alive, idle, holding its lock and a concurrency slot, with no error and
+  no exit. Both terminal gates now race the question against the interface's own `close` and fail with
+  a message naming the two places a run *can* be approved. This is a hazard the CLI's advertised
+  non-interactive mode already carried; the service is simply the first caller to hit it every time.
+
+Neither is fixed *by* the supervisor — but a service that spawns children is the thing that made them
+matter, and step 5's `HttpPlanGate` replaces the second one's transport rather than its guard.
+
+Steps 0–1 are done. `run-store.ts`, `run-id.ts`, `run-context.ts`, and `reindex.ts` gave
 step 1 a working store to build on; step 1 then rewrote `run-index.ts` as a **DB-only** port (`get`
 takes a run_id and reads `run_events`, where it used to take a directory slug and read the journal
 file) and added `src/service/` — `app.ts` (routes), `identity.ts`, `query.ts`, `errors.ts`,

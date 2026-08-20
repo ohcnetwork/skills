@@ -59,6 +59,9 @@ interface Res {
 interface Harness {
   store: SqliteRunStore;
   queue: QueueStore;
+  /** Run ids the fake supervisor was asked to cancel, so a route test can assert the CALL rather than
+   *  the process side effect — the route's job is to reach the supervisor, not to kill anything. */
+  cancelled: string[];
   base: string;
   get: (path: string, headers?: Record<string, string>) => Promise<Res>;
   post: (path: string, body?: unknown, headers?: Record<string, string>) => Promise<Res>;
@@ -75,6 +78,10 @@ async function harness(): Promise<Harness> {
   const store = useRealStore();
   const db = (store as unknown as { db: DatabaseSync }).db;
   const queue = new QueueStore(db);
+  // A fake supervisor with the real status-write behaviour and no processes: cancellation's contract
+  // at this layer is "the row moves and the supervisor is told", and the signalling half belongs to
+  // supervisor.test.ts where a fake child can observe it.
+  const cancelled: string[] = [];
   const app = buildApp({
     index: new SqliteRunIndex(db),
     sessions: new SessionStore(db),
@@ -82,7 +89,13 @@ async function harness(): Promise<Harness> {
     version: "test",
     // Enqueue is gated on a supervisor existing; most tests want it present so they can exercise the
     // route. The gate itself has its own test.
-    supervisor: { running: true },
+    supervisor: {
+      running: true,
+      cancel: (runId: string) => {
+        cancelled.push(runId);
+        return { cancelled: queue.cancel(runId), signalled: false };
+      },
+    },
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
@@ -95,6 +108,7 @@ async function harness(): Promise<Harness> {
   return {
     store,
     queue,
+    cancelled,
     base,
     get: async (path, headers) => read(await fetch(base + path, { headers })),
     post: async (path, body, headers) =>
@@ -632,7 +646,8 @@ test("POST /api/runs enqueues and returns the run id it minted", async () => {
     assert.equal(res.status, 201);
     assert.equal(isValidRunId(res.body.run_id), true);
     assert.equal(typeof res.body.queue_id, "number");
-    assert.equal(res.body.queued_behind, null);
+    assert.equal(res.body.blocked_by_branch, null);
+    assert.equal(res.body.queue_position, 0, "first in line");
 
     // and the run is immediately addressable by that id, before any process exists for it
     const queue = await h.get("/api/queue", jar);
@@ -712,11 +727,82 @@ test("a second request on a busy branch is QUEUED and told so, not rejected", as
 
     // Queue behind, don't reject (§12) — the queue exists to absorb exactly this.
     assert.equal(second.status, 201);
-    assert.equal(second.body.queued_behind, first.body.run_id);
+    assert.equal(second.body.blocked_by_branch, first.body.run_id);
+    assert.equal(second.body.queue_position, 1);
 
-    // a different branch is unaffected
+    // a different branch is unaffected by the BRANCH block, but is still behind in line — the two
+    // reasons are independent, which is why reporting only the first told three of five callers
+    // "nothing is ahead of you" while they waited on the concurrency cap.
     const other = await h.post("/api/runs", { ...REQ, branch: "feat-b" }, jar);
-    assert.equal(other.body.queued_behind, null);
+    assert.equal(other.body.blocked_by_branch, null);
+    assert.equal(other.body.queue_position, 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /api/runs/:id/cancel moves the row and tells the supervisor — one route, both states", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+
+    const cancel = await h.post(`/api/runs/${runId}/cancel`, {}, jar);
+    // 202, not 204: the row is certain, the child's exit is not. Reporting completion here would show
+    // a finished run in the UI seconds before the process actually stops.
+    assert.equal(cancel.status, 202);
+    assert.equal(cancel.body.cancelled, true);
+    assert.deepEqual(h.cancelled, [runId], "the route's job is to REACH the supervisor");
+    assert.equal(h.queue.byRunId(runId)?.status, "cancelled");
+
+    // Already terminal — saying so beats a 202 that did nothing.
+    const again = await h.post(`/api/runs/${runId}/cancel`, {}, jar);
+    assert.equal(again.status, 400);
+    assert.equal(again.body.error.code, "not_cancellable");
+  } finally {
+    await h.close();
+  }
+});
+
+test("cancel is attributed and 404s on a run the queue never saw", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    assert.equal((await h.post(`/api/runs/${res.body.run_id}/cancel`)).status, 401);
+
+    // A CLI-started run has no queue row. Permanent and legitimate — the child is the same binary
+    // either way — so this is a 404 about the QUEUE, not about the run.
+    const missing = await h.post(`/api/runs/${mintRunId()}/cancel`, {}, jar);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "run_not_found");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/queue carries the same envelope as every other list route", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    for (const branch of ["feat-a", "feat-b", "feat-c"])
+      await h.post("/api/runs", { ...REQ, branch }, jar);
+
+    const page = await h.get("/api/queue?limit=2", jar);
+    assert.equal(page.body.items.length, 2);
+    // `total` counts the FILTER, not the page — the difference only shows up on page two, which is
+    // why a bare `{items}` array is a breaking change waiting to happen (§6).
+    assert.equal(page.body.total, 3);
+    assert.equal(page.body.limit, 2);
+    assert.equal(page.body.offset, 0);
+
+    const second = await h.get("/api/queue?limit=2&offset=2", jar);
+    assert.equal(second.body.items.length, 1);
+    assert.equal(second.body.offset, 2);
+
+    // Echo the EFFECTIVE limit: a response claiming 999 would make `offset += limit` skip rows.
+    assert.equal((await h.get("/api/queue?limit=999", jar)).body.limit, 200);
   } finally {
     await h.close();
   }

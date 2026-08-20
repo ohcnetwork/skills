@@ -33,7 +33,6 @@ import {
 } from "./ticket-fetch.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
-import { startDashboard } from "./dashboard.js";
 import { OctokitGitHub } from "./github.js";
 import { loadModels } from "./models-config.js";
 import { symlinkProvisioner } from "./provision.js";
@@ -69,16 +68,15 @@ Usage:
        CI-round loop (address bot reviews → push → wait → repeat). Re-invoke after CI re-reviews.
        flags: --repo · --main · --worktree · --run-dir · --models · --max-rounds <n> (1 = one-shot)
 
-  care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
-       flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
-
-  care-loopd serve [flags]       HTTP API over loops.db for the team frontend (PLAN-loop-service §6).
-       Read-only and DB-only: no route touches a run dir. Binds loopback unless --host says otherwise
-       (there is no authentication — the X-Care-User header is a claim, and the boundary is the network).
+  care-loopd serve [flags]       HTTP API + web app over loops.db (PLAN-loop-service §6). DB-only: no
+       route touches a run dir. Serves ../web/dist when built, so the app and the API share one origin.
+       Writes only service-owned tables (users/sessions); run rows stay the owning child's. Binds
+       loopback unless --host says otherwise — there is no authentication, the login is a claim, and
+       the trust boundary is the network.
        flags: --port <n> (default 3142) · --db <path> (default ../runs/loops.db) · --host <addr>
 
   care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
-       fleet projection dashboard/status read (PLAN-sqlite-run-store.md). Safe at any time: it clears
+       fleet projection that serve and status read (PLAN-sqlite-run-store.md). Safe at any time: it clears
        and rebuilds ONLY from the journals, which stay the source of truth. Run it once to backfill an
        existing runs/ tree, or any time you suspect the db has drifted (\`rm runs/loops.db\` first, or
        just re-run — it always fully overwrites).
@@ -792,16 +790,6 @@ async function main(): Promise<void> {
     return;
   }
   switch (cmd) {
-    case "dashboard": {
-      const df = parseFlags(rest);
-      const port = typeof df.port === "string" ? Number(df.port) : 3141;
-      const runsDir =
-        typeof df["runs-dir"] === "string"
-          ? df["runs-dir"]
-          : join(__dirname, "../../runs");
-      startDashboard(runsDir, port);
-      return;
-    }
     case "status":
       if (!rest[0]) usage();
       cmdStatus(resolve(rest[0]));

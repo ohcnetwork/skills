@@ -508,7 +508,7 @@ that made bot-authoring worth the trade.
 |---|------|-----|
 | 0 | [[PLAN-sqlite-run-store]] steps 1–5 — **built as of 2026-08-19** | done |
 | 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` — **built 2026-08-20** | done |
-| 2 | Vite + Router + Query scaffold; React FE at read parity — **built 2026-08-20** | done |
+| 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted — **built 2026-08-20** | done |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join | 0.5d |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel | 1.5d |
 | 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
@@ -524,9 +524,10 @@ before the FE exists.
 
 Two things fell out of building it, both worth keeping in mind at step 2:
 
-- The vanilla `dashboard.html` reads `{name, state}`, which is not the service's shape. `dashboard.ts`
-  now adapts the index rows back into its own shape so the old page keeps working until step 2
-  deletes it. That adapter is the ONLY thing keeping two response shapes alive; it goes with the page.
+- The vanilla `dashboard.html` read `{name, state}`, not the service's shape, so `dashboard.ts`
+  adapted the index rows back into it. **Both are gone as of step 2** — with them went the second
+  response shape, the no-`loops.db` full-journal scan, and `RunIndex.slugOf`, whose only caller was
+  the old detail route. `care-loopd dashboard` no longer exists; `care-loopd serve` replaces it.
 - `serve` opens the db `readOnly: true` and binds loopback by default. Both are deliberate: the
   service has no reason to write (§3, one writer per run), and it has no authentication, so exposing
   it beyond loopback should take an explicit `--host`.

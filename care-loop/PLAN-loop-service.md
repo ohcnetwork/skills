@@ -74,8 +74,18 @@ keeps the child the same binary you run locally (§5). Service-owned tables are 
 tables are the child's; SQLite in WAL arbitrates the file.
 
 Note the service's connection is **read-write** as of the auth work — step 1 opened it read-only,
-which was correct while the API only read. `users`/`sessions` (and later `queue`/`gate_asks`) are
-service-owned writes and do not touch the rule above, which is scoped to the RUN tables.
+which was correct while the API only read. `users`/`sessions`/`queue` are service-owned writes and do
+not touch the rule above, which is scoped to the RUN tables.
+
+⚠️ **Two writers means every connection must configure itself.** `busy_timeout`, `foreign_keys`, and
+`synchronous` are PER-CONNECTION pragmas and are not stored in the database file — only
+`journal_mode = WAL` is. A connection that skips them takes an immediate `SQLITE_BUSY` where a
+configured one waits five seconds. This bit exactly once, and instructively: the pragmas lived inside
+the schema string, which only `SqliteRunStore`'s constructor runs, so the child waited politely while
+the service failed instantly. WAL is what hid it — readers never contend, so a read-only service
+looked healthy right up until sessions and queue rows made it a writer. Both paths now call
+`applyConnectionPragmas`, and `test/concurrency.test.ts` asserts a bare connection really is
+unconfigured, so the helper cannot quietly become decorative.
 
 **One durability change is required before this ships.** `loops.db` runs at `synchronous = NORMAL`,
 justified by `rm loops.db && reindex` being a complete recovery. That justification does not extend to
@@ -104,13 +114,14 @@ id pointed at an occupied dir fails loudly instead of silently forking the run's
 ```sql
 CREATE TABLE queue (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id       TEXT NOT NULL UNIQUE,   -- minted HERE at enqueue (see below); joins to runs.run_id
   status       TEXT NOT NULL,          -- pending | running | done | failed | cancelled
-  requested_by TEXT NOT NULL,          -- GitHub login, from X-Care-User
+  requested_by TEXT NOT NULL,          -- the resolved caller (session, or X-Care-User)
   repo         TEXT NOT NULL,
   branch       TEXT NOT NULL,
-  task         TEXT NOT NULL,          -- the request payload the form collected
-  ticket       TEXT,
-  run_id       TEXT NOT NULL,          -- minted HERE at enqueue (see below); joins to runs.run_id
+  task         TEXT NOT NULL,
+  ticket       TEXT NOT NULL,          -- ENG-###; required, because the PR title assert requires it
+  summary      TEXT NOT NULL,          -- required for the same reason: the loop needs all four seeds
   enqueued_at  TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT,
@@ -473,10 +484,21 @@ motivating benefits are absent — this is a VPN-internal tool with no SEO, no c
 an API that already exists for the CLI's sake. Router without Start is the same DX at the routing
 layer with one fewer server.
 
-**Port order.** Bring `renderPipeline` and `renderEvent` across as-is first and diff against the
-vanilla page before deleting it. `dashboard.html` + `startDashboard` stay until the React app reaches
-parity — the render-diff from [[PLAN-sqlite-run-store]] §12 step 5 is the check that the DB migration
-and the FE rewrite did not mask each other's bugs.
+**Port order — as built, this step was SKIPPED, and the record should say so.** The plan called for a
+render-diff against the vanilla page before deleting it, as the check that the DB migration and the FE
+rewrite had not masked each other's bugs. The React app was written fresh and `dashboard.html` +
+`startDashboard` were deleted in the same session without that diff being run.
+
+What covered the risk instead, and why it is judged sufficient: the concern was specifically
+replica-vs-DB divergence, and that is checked *continuously* rather than once — `assertParity` at
+`run.resume` and `checkParity` at `run.end` diff the two directly ([[PLAN-sqlite-run-store]] §9), the
+`started_at` bug was caught by an independent fold rather than by any rendering, and `reindex` over
+the real fleet was verified deterministic across repeated runs. The React app was then driven against
+that same fleet: 327 events and 61 step dividers on one run, artifact bodies fetched from the db.
+
+The honest residue: nothing compared the two renderings side by side, and it can no longer be done
+without checking out the deleted page. If that matters, `git show 45b9c6c^:care-loop/orchestrator/src/dashboard.html`
+is where it lives.
 
 ## 9. Credentials on the server
 
@@ -621,4 +643,9 @@ preference is the default; the class is the seam a theme picker drives later.
 ## Non-goals
 
 Per-user credentials · multi-machine workers · RBAC · run history retention/GC · public exposure ·
-replacing `cli.ts` (local CLI remains first-class and unchanged).
+replacing `cli.ts` (the local CLI remains first-class).
+
+"Unchanged" was the original wording and is no longer literally true: `cli.ts` gained `serve`,
+`reindex`, and `--requested-by`, and lost `dashboard`. What holds is the part that mattered — a run
+started from the terminal goes through the same code as one started from the service, and the child
+the supervisor will spawn is the same binary a human runs. The CLI is not a compatibility shim.

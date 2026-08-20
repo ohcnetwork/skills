@@ -79,11 +79,28 @@ export interface ArtifactRow {
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
 export const SCHEMA_VERSION = 5;
 
+/**
+ * Pragmas that are PER-CONNECTION and are NOT stored in the database file. Every connection that
+ * opens `loops.db` must apply them for itself — including ones that do not run the schema, which is
+ * exactly where this went wrong: `serve.ts` opened a bare `DatabaseSync`, so the service ran with
+ * `busy_timeout = 0` and took an immediate SQLITE_BUSY the moment the child held the write lock,
+ * while the child (which does run the schema) waited politely for five seconds.
+ *
+ * `journal_mode = WAL` is deliberately NOT here: it IS persisted in the file, and it is also what
+ * masked the bug — WAL lets readers proceed without the write lock, so a read-only service never
+ * contended. The problem only became reachable when the service started writing sessions and queue
+ * rows.
+ */
+export function applyConnectionPragmas(db: DatabaseSync): void {
+  db.exec(`
+    PRAGMA busy_timeout = 5000;
+    PRAGMA foreign_keys = ON;
+    PRAGMA synchronous = FULL;  -- §10 item 4: the DB is the only source Journal.read()/resume trust
+  `);
+}
+
 const SCHEMA = `
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
-PRAGMA synchronous = FULL;      -- §10 item 4: the DB is the only source Journal.read()/resume trust
-PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;      -- persisted in the file; the rest are per-connection, see above
 
 CREATE TABLE IF NOT EXISTS runs (
   run_id       TEXT PRIMARY KEY,
@@ -294,6 +311,7 @@ export class SqliteRunStore implements RunStore {
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    applyConnectionPragmas(this.db);
     this.db.exec(SCHEMA);
     this.migrate();
   }

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { buildApp } from "./app.js";
 import { SqliteRunIndex } from "../run-index.js";
+import { applyConnectionPragmas } from "../run-store.js";
 import { SessionStore } from "./auth.js";
 import { QueueStore } from "./queue.js";
 import { backupNow, integrityCheck } from "./backup.js";
@@ -58,6 +59,10 @@ export function startService(o: ServeOptions): Server {
   // still written only by the child that owns the run. `users`/`sessions` (and later `queue`/
   // `gate_asks`) are service-owned, and WAL arbitrates the file between the two writers.
   const db = new DatabaseSync(o.dbPath);
+  // Per-connection pragmas, applied for THIS connection: `busy_timeout` and friends are not stored in
+  // the file, so opening it without them leaves the service taking an immediate SQLITE_BUSY whenever
+  // a child holds the write lock. WAL hid this while the service was read-only.
+  applyConnectionPragmas(db);
 
   // Integrity BEFORE serving. Reported, not fatal (backup.ts): a database that still answers most
   // queries beats a service that will not start, and the run tables stay rebuildable with `reindex`.

@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { buildApp } from "../src/service/app.ts";
 import {
@@ -14,6 +15,7 @@ import {
   MAX_LIST_LIMIT,
 } from "../src/run-index.ts";
 import { mintRunId } from "../src/run-id.ts";
+import { SessionStore } from "../src/service/auth.ts";
 import { validateState, type CareState } from "../src/state.ts";
 import type { SqliteRunStore } from "../src/run-store.ts";
 import { useRealStore } from "./_store.ts";
@@ -44,27 +46,54 @@ function seed(store: SqliteRunStore, slug: string, over: Partial<CareState> = {}
   return state.run_id;
 }
 
+interface Res {
+  status: number;
+  body: any;
+  cookie: string | null;
+}
+
 interface Harness {
   store: SqliteRunStore;
   base: string;
-  get: (path: string, headers?: Record<string, string>) => Promise<{ status: number; body: any }>;
+  get: (path: string, headers?: Record<string, string>) => Promise<Res>;
+  post: (path: string, body?: unknown, headers?: Record<string, string>) => Promise<Res>;
   close: () => Promise<void>;
+}
+
+/** Pull the session token out of a Set-Cookie so a test can act as that signed-in caller. */
+function cookieValue(setCookie: string | null): string | null {
+  const m = setCookie?.match(/care_session=([^;]*)/);
+  return m ? m[1] : null;
 }
 
 async function harness(): Promise<Harness> {
   const store = useRealStore();
   const db = (store as unknown as { db: DatabaseSync }).db;
-  const app = buildApp({ index: new SqliteRunIndex(db), version: "test" });
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    version: "test",
+  });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const read = async (res: Response): Promise<Res> => ({
+    status: res.status,
+    body: res.status === 204 ? null : await res.json(),
+    cookie: res.headers.get("set-cookie"),
+  });
   return {
     store,
     base,
-    get: async (path, headers) => {
-      const res = await fetch(base + path, { headers });
-      return { status: res.status, body: await res.json() };
-    },
+    get: async (path, headers) => read(await fetch(base + path, { headers })),
+    post: async (path, body, headers) =>
+      read(
+        await fetch(base + path, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify(body ?? {}),
+        }),
+      ),
     close: () => new Promise((r) => server.close(() => r(undefined))),
   };
 }
@@ -83,14 +112,19 @@ test("GET /api/health reports db reachability, not merely process liveness", asy
   }
 });
 
-test("GET /api/me echoes the claimed identity, null when the header is absent or blank", async () => {
+test("GET /api/auth/me echoes the claimed identity, null when nothing identifies the caller", async () => {
   const h = await harness();
   try {
-    assert.equal((await h.get("/api/me", { "X-Care-User": "octocat" })).body.login, "octocat");
-    assert.equal((await h.get("/api/me")).body.login, null);
-    assert.equal((await h.get("/api/me", { "X-Care-User": "   " })).body.login, null);
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "octocat" })).body.login, "octocat");
+    // 200-with-null, not 401 — the frontend makes one unconditional call and branches on the answer.
+    const anon = await h.get("/api/auth/me");
+    assert.equal(anon.status, 200);
+    assert.equal(anon.body.login, null);
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "   " })).body.login, null);
     // Trimmed, so a stray space in a header cannot create a second "user".
-    assert.equal((await h.get("/api/me", { "X-Care-User": " octocat " })).body.login, "octocat");
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": " octocat " })).body.login, "octocat");
+    // The header path has no roster entry — only a real session does.
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "octocat" })).body.account, null);
   } finally {
     await h.close();
   }
@@ -277,6 +311,254 @@ test("the paging envelope reports what was APPLIED, never what was asked for", a
     assert.equal(zero.status, 400);
     assert.equal(zero.body.error.code, "bad_query");
     assert.equal((await h.get(`/api/runs/${seed(h.store, "care_fe-z")}/events?limit=0`)).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+// ── auth ─────────────────────────────────────────────────────────────────────────────────────────
+
+test("login establishes a session cookie that /auth/me then resolves", async () => {
+  const h = await harness();
+  try {
+    const login = await h.post("/api/auth/login", { login: "octocat" });
+    assert.equal(login.status, 201);
+    assert.equal(login.body.user.login, "octocat");
+    assert.equal(typeof login.body.user.id, "number");
+
+    const raw = login.cookie ?? "";
+    assert.match(raw, /HttpOnly/, "the token must not be readable from JS");
+    assert.match(raw, /SameSite=Lax/);
+    assert.doesNotMatch(raw, /Secure/, "plain HTTP on loopback by default");
+
+    const me = await h.get("/api/auth/me", { cookie: `care_session=${cookieValue(raw)}` });
+    assert.equal(me.body.login, "octocat");
+    assert.equal(me.body.account.login, "octocat", "a real session carries the roster entry");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the raw token is never stored — only its hash", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const db = (h.store as unknown as { db: DatabaseSync }).db;
+    const rows = db.prepare("SELECT token_sha256 FROM sessions").all() as { token_sha256: string }[];
+    assert.equal(rows.length, 1);
+    assert.notEqual(rows[0].token_sha256, token, "a leaked db must not be a set of live logins");
+    assert.equal(
+      rows[0].token_sha256,
+      createHash("sha256").update(token, "utf8").digest("hex"),
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("logout revokes the session and clears the cookie, and is idempotent", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const jar = { cookie: `care_session=${token}` };
+
+    const out = await h.post("/api/auth/logout", {}, jar);
+    assert.equal(out.status, 204);
+    assert.match(out.cookie ?? "", /Max-Age=0/);
+
+    // the token no longer identifies anyone
+    assert.equal((await h.get("/api/auth/me", jar)).body.login, null);
+    // revoked, not deleted — "who was signed in when" survives the sign-out
+    const db = (h.store as unknown as { db: DatabaseSync }).db;
+    const row = db.prepare("SELECT revoked_at FROM sessions").get() as { revoked_at: string | null };
+    assert.notEqual(row.revoked_at, null);
+
+    // a second logout, and a logout with no cookie at all, both succeed
+    assert.equal((await h.post("/api/auth/logout", {}, jar)).status, 204);
+    assert.equal((await h.post("/api/auth/logout")).status, 204);
+  } finally {
+    await h.close();
+  }
+});
+
+test("login rejects a value that could not be a GitHub login", async () => {
+  const h = await harness();
+  try {
+    for (const bad of ["", "   ", "-leading", "trailing-", "two--hyphens", "a".repeat(40), "has space"]) {
+      const res = await h.post("/api/auth/login", { login: bad });
+      assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
+      assert.equal(res.body.error.code, "bad_login");
+    }
+    assert.equal((await h.post("/api/auth/login", {})).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("logging in twice reuses the user row and issues a second session", async () => {
+  const h = await harness();
+  try {
+    const a = await h.post("/api/auth/login", { login: "octocat" });
+    const b = await h.post("/api/auth/login", { login: "octocat" });
+    assert.equal(a.body.user.id, b.body.user.id, "the roster must not grow a duplicate");
+    assert.notEqual(cookieValue(a.cookie), cookieValue(b.cookie));
+    // both remain valid — signing in on a second machine must not evict the first
+    for (const c of [a, b])
+      assert.equal(
+        (await h.get("/api/auth/me", { cookie: `care_session=${cookieValue(c.cookie)}` })).body.login,
+        "octocat",
+      );
+  } finally {
+    await h.close();
+  }
+});
+
+test("a session beats the header, and an unresolvable cookie falls back to it", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const both = await h.get("/api/auth/me", {
+      cookie: `care_session=${token}`,
+      "X-Care-User": "someone-else",
+    });
+    assert.equal(both.body.login, "octocat", "the session is the stronger claim");
+
+    // a dead cookie must not lock out a caller who also sent a header — identify, do not gate
+    const stale = await h.get("/api/auth/me", {
+      cookie: "care_session=deadbeef",
+      "X-Care-User": "someone-else",
+    });
+    assert.equal(stale.status, 200);
+    assert.equal(stale.body.login, "someone-else");
+  } finally {
+    await h.close();
+  }
+});
+
+// ── list filters ─────────────────────────────────────────────────────────────────────────────────
+
+test("filters compose across runs and run_detail columns", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { requested_by: "octocat", branch: "feat-a", ticket: "ENG-1", task: "add pagination" });
+    seed(h.store, "care_fe-b", { requested_by: "octocat", branch: "feat-b", ticket: "ENG-2", task: "fix the date format" });
+    seed(h.store, "care_fe-c", { requested_by: "someone", branch: "feat-c", ticket: "ENG-3", task: "add pagination again" });
+
+    assert.equal((await h.get("/api/runs?requested_by=octocat")).body.total, 2);
+    assert.equal((await h.get("/api/runs?ticket=ENG-2")).body.total, 1);
+    assert.equal((await h.get("/api/runs?branch=feat-c")).body.total, 1);
+    // free text reaches the detail table, which the list joins for exactly this
+    assert.equal((await h.get("/api/runs?q=pagination")).body.total, 2);
+    assert.equal((await h.get("/api/runs?q=pagination&requested_by=octocat")).body.total, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("q escapes LIKE wildcards so a literal % is searched for, not matched with", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { task: "handle 100% of cases" });
+    seed(h.store, "care_fe-b", { task: "something else entirely" });
+    assert.equal((await h.get("/api/runs?q=100%25")).body.total, 1, "literal percent");
+    assert.equal((await h.get("/api/runs?q=%25")).body.total, 1, "a bare % must not match everything");
+  } finally {
+    await h.close();
+  }
+});
+
+test("requested_by=me resolves to the caller, and 400s when nobody is signed in", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { requested_by: "octocat" });
+    seed(h.store, "care_fe-b", { requested_by: "someone" });
+
+    const viaHeader = await h.get("/api/runs?requested_by=me", { "X-Care-User": "octocat" });
+    assert.equal(viaHeader.body.total, 1);
+    assert.equal(viaHeader.body.items[0].requestedBy, "octocat");
+
+    const token = cookieValue((await h.post("/api/auth/login", { login: "someone" })).cookie)!;
+    const viaSession = await h.get("/api/runs?requested_by=me", { cookie: `care_session=${token}` });
+    assert.equal(viaSession.body.items[0].requestedBy, "someone");
+
+    // 400 not 401: it is a filter that cannot be expanded, not a permission being refused.
+    const anon = await h.get("/api/runs?requested_by=me");
+    assert.equal(anon.status, 400);
+    assert.equal(anon.body.error.code, "bad_query");
+  } finally {
+    await h.close();
+  }
+});
+
+test("order and dir are whitelisted, never interpolated from the query string", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { started_at: "2026-08-01T00:00:00.000Z" });
+    seed(h.store, "care_fe-b", { started_at: "2026-08-02T00:00:00.000Z" });
+
+    const desc = await h.get("/api/runs");
+    assert.deepEqual(desc.body.items.map((r: { slug: string }) => r.slug), ["care_fe-b", "care_fe-a"]);
+    const asc = await h.get("/api/runs?dir=asc");
+    assert.deepEqual(asc.body.items.map((r: { slug: string }) => r.slug), ["care_fe-a", "care_fe-b"]);
+
+    assert.equal((await h.get("/api/runs?order=updated_at")).status, 200);
+    const bad = await h.get("/api/runs?order=cost_usd;DROP+TABLE+runs");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_query");
+    assert.equal((await h.get("/api/runs?dir=sideways")).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("since/until bound started_at as a half-open range", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { started_at: "2026-08-01T00:00:00.000Z" });
+    seed(h.store, "care_fe-b", { started_at: "2026-08-02T00:00:00.000Z" });
+    seed(h.store, "care_fe-c", { started_at: "2026-08-03T00:00:00.000Z" });
+    assert.equal((await h.get("/api/runs?since=2026-08-02T00:00:00.000Z")).body.total, 2);
+    assert.equal((await h.get("/api/runs?until=2026-08-02T00:00:00.000Z")).body.total, 1);
+    assert.equal(
+      (await h.get("/api/runs?since=2026-08-02T00:00:00.000Z&until=2026-08-03T00:00:00.000Z")).body.total,
+      1,
+      "half-open: since is inclusive, until is not",
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("facets honour the active filter, so narrowing does not offer dead options", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { repo: "ohcnetwork/care_fe", branch: "x", requested_by: "octocat" });
+    seed(h.store, "care_fe-b", { repo: "ohcnetwork/care_fe", branch: "y", requested_by: "octocat" });
+    seed(h.store, "care_fe-c", { repo: "ohcnetwork/care", branch: "z", requested_by: "someone" });
+
+    const all = await h.get("/api/runs/facets");
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.body.repos, [
+      { value: "ohcnetwork/care_fe", count: 2 },
+      { value: "ohcnetwork/care", count: 1 },
+    ]);
+
+    // filtered to one repo, only that repo's branches are offered
+    const narrowed = await h.get("/api/runs/facets?repo=ohcnetwork/care");
+    assert.deepEqual(narrowed.body.branches, [{ value: "z", count: 1 }]);
+    assert.deepEqual(narrowed.body.users, [{ value: "someone", count: 1 }]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/runs/facets is not swallowed by the /runs/:id route", async () => {
+  const h = await harness();
+  try {
+    // "facets" is a plausible path segment; declared after :id it would 400 as a bad run id.
+    const res = await h.get("/api/runs/facets");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.repos));
   } finally {
     await h.close();
   }

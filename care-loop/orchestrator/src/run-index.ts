@@ -42,17 +42,43 @@ export interface RunRecord extends RunSummary {
   lastReviewedSha: string | null;
 }
 
+export type ListOrder = "started_at" | "updated_at" | "cost_usd" | "duration_ms";
+export const LIST_ORDERS: readonly ListOrder[] = [
+  "started_at",
+  "updated_at",
+  "cost_usd",
+  "duration_ms",
+];
+
 export interface ListFilter {
   requestedBy?: string;
   repo?: string;
   branch?: string;
   step?: string;
+  ticket?: string;
+  pr?: number;
+  /** Free text over task / summary / branch / ticket — the fleet view's search box. */
+  q?: string;
+  /** ISO bounds on `started_at`, half-open: `[since, until)`. */
+  since?: string;
+  until?: string;
   /** Only runs that have not reached a terminal step (`7`/`merged`/`aborted`). */
   active?: boolean;
   /** Include archived `.stale-` dirs. Defaults to false — they are noise in a fleet view. */
   includeStale?: boolean;
+  order?: ListOrder;
+  dir?: "asc" | "desc";
   limit?: number;
   offset?: number;
+}
+
+/** Distinct values with counts, for building filter controls without loading the fleet to derive
+ *  them client-side. Cheap: four grouped scans of a table with one row per run. */
+export interface Facets {
+  repos: { value: string; count: number }[];
+  branches: { value: string; count: number }[];
+  users: { value: string; count: number }[];
+  steps: { value: string; count: number }[];
 }
 
 export interface EventFilter {
@@ -87,6 +113,9 @@ export interface ArtifactBody extends ArtifactSummary {
 export interface RunIndex {
   list(filter?: ListFilter): RunSummary[];
   count(filter?: ListFilter): number;
+  /** Distinct values with counts, honouring the same filter — so narrowing to one repo shows only the
+   *  branches that repo actually has, rather than every branch in the fleet. */
+  facets(filter?: ListFilter): Facets;
   get(runId: string): RunRecord | null;
   events(runId: string, filter?: EventFilter): EventPage;
   /** Artifact metadata for a run, body excluded — listing a timeline must not stream 1 MB of skill
@@ -208,30 +237,71 @@ function whereFor(f: ListFilter): { sql: string; params: (string | number)[] } {
   const clauses: string[] = [];
   const params: (string | number)[] = [];
   if (f.requestedBy !== undefined) {
-    clauses.push("requested_by = ?");
+    clauses.push("r.requested_by = ?");
     params.push(f.requestedBy);
   }
   if (f.repo !== undefined) {
-    clauses.push("repo = ?");
+    clauses.push("r.repo = ?");
     params.push(f.repo);
   }
   if (f.branch !== undefined) {
-    clauses.push("branch = ?");
+    clauses.push("r.branch = ?");
     params.push(f.branch);
   }
   if (f.step !== undefined) {
-    clauses.push("step = ?");
+    clauses.push("r.step = ?");
     params.push(f.step);
   }
+  if (f.ticket !== undefined) {
+    clauses.push("d.ticket = ?");
+    params.push(f.ticket);
+  }
+  if (f.pr !== undefined) {
+    clauses.push("r.pr = ?");
+    params.push(f.pr);
+  }
+  if (f.q !== undefined) {
+    // LIKE with escaped wildcards: a user typing "100%" must search for that, not for everything.
+    const needle = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    clauses.push(
+      "(d.task LIKE ? ESCAPE '\\' OR d.summary LIKE ? ESCAPE '\\'" +
+        " OR r.branch LIKE ? ESCAPE '\\' OR d.ticket LIKE ? ESCAPE '\\')",
+    );
+    params.push(needle, needle, needle, needle);
+  }
+  if (f.since !== undefined) {
+    clauses.push("r.started_at >= ?");
+    params.push(f.since);
+  }
+  if (f.until !== undefined) {
+    clauses.push("r.started_at < ?");
+    params.push(f.until);
+  }
   if (f.active === true) {
-    clauses.push(`step NOT IN (${TERMINAL_STEPS.map(() => "?").join(", ")})`);
+    clauses.push(`r.step NOT IN (${TERMINAL_STEPS.map(() => "?").join(", ")})`);
     params.push(...TERMINAL_STEPS);
   } else if (f.active === false) {
-    clauses.push(`step IN (${TERMINAL_STEPS.map(() => "?").join(", ")})`);
+    clauses.push(`r.step IN (${TERMINAL_STEPS.map(() => "?").join(", ")})`);
     params.push(...TERMINAL_STEPS);
   }
-  if (!f.includeStale) clauses.push("slug NOT LIKE '%.stale-%'");
+  if (!f.includeStale) clauses.push("r.slug NOT LIKE '%.stale-%'");
   return { sql: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", params };
+}
+
+/** `runs` LEFT JOIN `run_detail` — the shape both `list` and `count` query through, so a filter on a
+ *  detail column (ticket, task, summary) means the same thing in the page and in its total. LEFT, not
+ *  INNER: a run whose detail row is missing must still be listed, not silently dropped from the
+ *  fleet. */
+const FROM = "FROM runs r LEFT JOIN run_detail d ON d.run_id = r.run_id";
+
+/** Whitelisted ORDER BY. The column name is chosen from a fixed set rather than interpolated from the
+ *  query string — the one place in this file where user input would otherwise reach SQL as syntax. */
+function orderFor(f: ListFilter): string {
+  const col: ListOrder = LIST_ORDERS.includes(f.order as ListOrder)
+    ? (f.order as ListOrder)
+    : "started_at";
+  const dir = f.dir === "asc" ? "ASC" : "DESC";
+  return `ORDER BY r.${col} ${dir}`;
 }
 
 export class SqliteRunIndex implements RunIndex {
@@ -241,7 +311,7 @@ export class SqliteRunIndex implements RunIndex {
     const { sql, params } = whereFor(filter);
     const { limit, offset } = resolvePaging(filter);
     const rows = this.db
-      .prepare(`SELECT * FROM runs${sql} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT r.* ${FROM}${sql} ${orderFor(filter)} LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as unknown as RunRow[];
     return rows.map(rowToSummary);
   }
@@ -249,9 +319,31 @@ export class SqliteRunIndex implements RunIndex {
   count(filter: ListFilter = {}): number {
     const { sql, params } = whereFor(filter);
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM runs${sql}`)
+      .prepare(`SELECT COUNT(*) AS n ${FROM}${sql}`)
       .get(...params) as { n: number } | undefined;
     return row?.n ?? 0;
+  }
+
+  facets(filter: ListFilter = {}): Facets {
+    const { sql, params } = whereFor(filter);
+    const group = (col: string): { value: string; count: number }[] => {
+      // `whereFor` returns either "" or a leading " WHERE ..."; the NULL guard has to join on
+      // whichever it was. Building the clause explicitly beats patching the string afterwards.
+      const where = sql ? `${sql} AND ${col} IS NOT NULL` : ` WHERE ${col} IS NOT NULL`;
+      return this.db
+        .prepare(
+          `SELECT ${col} AS value, COUNT(*) AS count ${FROM}${where}` +
+            ` GROUP BY ${col} ORDER BY count DESC, value ASC`,
+        )
+        .all(...params) as unknown as { value: string; count: number }[];
+    };
+    // Column names are literals from this file, never query-string input — see `orderFor`.
+    return {
+      repos: group("r.repo"),
+      branches: group("r.branch"),
+      users: group("r.requested_by"),
+      steps: group("r.step"),
+    };
   }
 
   get(runId: string): RunRecord | null {

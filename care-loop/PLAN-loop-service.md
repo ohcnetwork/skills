@@ -73,6 +73,10 @@ written only by the child that owns it. The service reads them and never writes 
 keeps the child the same binary you run locally (§5). Service-owned tables are the service's; run
 tables are the child's; SQLite in WAL arbitrates the file.
 
+Note the service's connection is **read-write** as of the auth work — step 1 opened it read-only,
+which was correct while the API only read. `users`/`sessions` (and later `queue`/`gate_asks`) are
+service-owned writes and do not touch the rule above, which is scoped to the RUN tables.
+
 **One durability change is required before this ships.** `loops.db` runs at `synchronous = NORMAL`,
 justified by `rm loops.db && reindex` being a complete recovery. That justification does not extend to
 `queue` and `gate_asks`, which have no journal behind them — under `NORMAL` a power loss can drop a
@@ -217,18 +221,22 @@ serve" below.
 
 ### The full surface
 
-Every route is `/api/*`, returns JSON, and takes `X-Care-User`. `:id` is always a **run_id** (ULID);
-the directory slug appears in responses as a display label and is never a key.
+**Settled before the frontend starts** — that is the whole reason the FE is sequenced third. Every
+route is `/api/*`, returns JSON, and resolves identity through one middleware. `:id` is always a
+**run_id** (ULID); the directory slug appears in responses as a display label and is never a key.
 
 | Method | Route | Returns | Step |
 |---|---|---|---|
-| `GET` | `/health` | `{ ok, db, supervisor, version }` | 1 |
-| `GET` | `/me` | `{ login }` — the resolved identity, echoed back | 1 |
-| `GET` | `/runs` | `{ items: RunSummary[], total, limit, offset }` | 1 |
-| `GET` | `/runs/:id` | `{ run, detail, queue }` — `runs` + `run_detail` + its queue row | 1 |
-| `GET` | `/runs/:id/events` | `{ items: JournalEvent[], next_seq }` — paginated timeline | 1 |
-| `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | 1 |
-| `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | 1 |
+| `GET` | `/health` | `{ ok, db, supervisor, version }` | ✅ |
+| `POST` | `/auth/login` | `201 { user }` + session cookie | ✅ |
+| `POST` | `/auth/logout` | `204`, clears the cookie | ✅ |
+| `GET` | `/auth/me` | `{ login, account }` — `login: null` when anonymous | ✅ |
+| `GET` | `/runs` | `{ items: RunSummary[], total, limit, offset }` | ✅ |
+| `GET` | `/runs/facets` | `{ repos, branches, users, steps }` with counts | ✅ |
+| `GET` | `/runs/:id` | `{ run, queue }` — `runs` + `run_detail` + its queue row | ✅ |
+| `GET` | `/runs/:id/events` | `{ items: JournalEvent[], next_seq }` | ✅ |
+| `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | ✅ |
+| `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | ✅ |
 | `GET` | `/runs/:id/stream` | SSE — live event tail | 2 |
 | `POST` | `/runs` | `201 { run_id, queue_id }` — enqueue | 3 |
 | `GET` | `/queue` | `{ items: QueueRow[] }` — pending + running | 3 |
@@ -237,16 +245,64 @@ the directory slug appears in responses as a display label and is never a key.
 | `GET` | `/runs/:id/gate` | `PendingAsk \| null` | 5 |
 | `POST` | `/runs/:id/gate` | `204` | 5 |
 
-`GET /runs` filters: `requested_by`, `repo`, `branch`, `step`, `active` (non-terminal step), `stale`,
-`limit` (default 50, max 200), `offset`. All are optional and all compose.
+**`GET /runs` filters**, all optional and all composing: `requested_by` (the literal `me` resolves to
+the caller), `repo`, `branch`, `step`, `ticket`, `pr`, `q` (free text over task / summary / branch /
+ticket), `since` / `until` (half-open on `started_at`), `active` (non-terminal step), `stale`,
+`order` (`started_at` · `updated_at` · `cost_usd` · `duration_ms`), `dir`, `limit` (default 50, max
+200), `offset`.
 
-`GET /runs/:id/events` filters: `after_seq` (the pagination cursor — `seq` is dense and monotonic per
-run, so it beats an offset), `event` (repeatable type filter), `limit` (default 500, max 2000).
+`/runs/facets` accepts the same filters and answers with what is left, so narrowing to one repo offers
+only that repo's branches rather than the whole fleet's.
 
-**One `cancel`, not two.** Minting `run_id` at enqueue (§4) means a request has a stable id before it
-has a process, so a single route covers both cases: a `pending` row is marked `cancelled` in place,
-a `running` one signals the child. The FE never has to know which state it caught the run in — which
-is exactly the distinction it is least able to make without a race.
+`GET /runs/:id/events` filters: `after_seq` (the cursor — `seq` is dense and monotonic per run, so it
+beats an offset), `event` (repeatable), `limit` (default 500, max 2000).
+
+Three decisions inside that table are easy to get wrong later:
+
+- **`order` is whitelisted, never interpolated.** It is the one parameter that would otherwise reach
+  SQL as syntax rather than as a bound value. An unrecognised value is a 400.
+- **`/runs/facets` is declared BEFORE `/runs/:id`.** Express matches in order and `facets` is a
+  plausible path segment; declared after, it would be caught by `:id` and rejected as a malformed run
+  id.
+- **One `cancel`, not two.** Minting `run_id` at enqueue (§4) means a request has a stable id before
+  it has a process, so one route covers both cases: a `pending` row is marked `cancelled` in place, a
+  `running` one signals the child. The frontend never has to know which state it caught the run in —
+  the distinction it is least able to make without a race.
+
+### Auth: the shape now, the verification later
+
+`POST /auth/login` takes a GitHub login and starts a session. **Nothing verifies it** — the boundary
+is still the network (below), and anyone can claim any login. What exists now is the STRUCTURE real
+auth needs, so adding GitHub OAuth replaces one handler's body and leaves `/auth/me`, `/auth/logout`,
+the middleware, and every other route untouched.
+
+- **Sessions are cookie-borne** (`care_session`, `HttpOnly`, `SameSite=Lax`, 30 days, `Secure`
+  wherever TLS terminates). Cookies rather than a bearer token because OAuth's redirect flow lands on
+  a cookie anyway; choosing tokens now would mean changing the client later.
+- **The db stores a hash of the token, never the token.** The cookie is the only copy, so a leaked
+  database is not a set of live logins. Nothing here is secret yet — the point is that it is three
+  lines now and awkward to retrofit.
+- **Logout revokes, it does not delete.** Consistent with the standing preference for soft deletes on
+  domain rows, and "who was signed in when" survives the sign-out.
+- **`users` accumulates the roster** as people log in. `login` is the GitHub login and is MUTABLE — a
+  rename orphans history — which is why `github_id` sits there unpopulated: real auth brings it, and
+  the migration then points `requested_by` at `users.id` rather than rewriting rows.
+- **`X-Care-User` still works**, for curl, scripts, and the CLI, which have no cookie jar. A session
+  wins when both are present. This header is exactly the thing to delete when real auth lands — a
+  trusted header beside a verified session is a bypass, not a convenience — and it is confined to the
+  one middleware so that removal is a one-line change.
+- **`/auth/me` answers 200-with-null when nobody is signed in**, rather than 401. "Who am I" is
+  answerable when the answer is "nobody", and it lets the frontend make one unconditional call and
+  branch on the result instead of treating an error as a state.
+- **An unresolvable cookie falls through to the header rather than 401ing.** The middleware
+  identifies; it does not gate. A revoked or expired cookie must not lock out a caller who also sent
+  a header.
+
+**This is still not authorization, and no route may add any.** `?requested_by=me` is a convenience
+that expands to a value the caller could have typed — which is why it 400s as an unexpandable filter
+when nobody is signed in, rather than 401ing as a refused permission. Keeping authorization entirely
+absent means adding it later is additive rather than a hunt through routes that quietly assumed a
+trusted header.
 
 ### Conventions
 

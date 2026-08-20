@@ -77,7 +77,7 @@ export interface ArtifactRow {
 }
 
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -174,6 +174,35 @@ CREATE TABLE IF NOT EXISTS run_artifacts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON run_artifacts(run_id, sha256);
+
+-- SERVICE-OWNED tables ([[PLAN-loop-service]] §3, §6). Unlike everything above, these have no journal
+-- behind them and reindex must never touch them: a deleted queue row is unrecoverable where a deleted
+-- runs row is not. They are written by the service; the run tables are written by the child.
+--
+-- users is the roster, accumulated as people log in. login is the GitHub login and is MUTABLE — a
+-- rename orphans history — which is why the numeric github_id column exists unpopulated: real auth
+-- brings it, and the future migration points runs.requested_by at users.id rather than rewriting rows.
+CREATE TABLE IF NOT EXISTS users (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  login        TEXT NOT NULL UNIQUE,
+  github_id    INTEGER,           -- NULL until real auth supplies it
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+-- sessions holds a HASH of each token, never the token: the cookie value is the only copy, so a
+-- leaked database cannot be replayed as a live login. Cheap now, awkward to retrofit later.
+-- revoked_at rather than DELETE, per the standing preference for soft deletes on domain rows.
+CREATE TABLE IF NOT EXISTS sessions (
+  token_sha256 TEXT PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  revoked_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_runs_mine   ON runs(requested_by, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_recent ON runs(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON run_events(event, ts DESC);
@@ -249,8 +278,9 @@ export class SqliteRunStore implements RunStore {
     if (!cols.some((c) => c.name === "parity_error")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN parity_error TEXT");
     }
-    // v3 (`run_artifacts`) needs no step here: it is a NEW table, so the `CREATE TABLE IF NOT EXISTS`
-    // in SCHEMA already created it on this connection. Only altering an EXISTING table needs code.
+    // v3 (`run_artifacts`) and v4 (`users`/`sessions`) need no step here: they are NEW tables, so the
+    // `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on this connection. Only altering an
+    // EXISTING table needs code.
     // An upgraded db has the table but no rows until the next `reindex` backfills them from the
     // sidecars on disk — which is why artifacts stay rebuildable rather than joining `queue` and
     // `gate_asks` as data a reindex cannot restore.

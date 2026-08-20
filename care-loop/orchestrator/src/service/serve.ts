@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { buildApp } from "./app.js";
 import { SqliteRunIndex } from "../run-index.js";
+import { SessionStore } from "./auth.js";
 
 export interface ServeOptions {
   dbPath: string;
@@ -18,6 +19,8 @@ export interface ServeOptions {
    *  all interfaces must be a deliberate act, not the default. */
   host?: string;
   version?: string;
+  /** Mark session cookies `Secure` — set wherever TLS terminates in front of this. */
+  secureCookies?: boolean;
 }
 
 /** The running build, for `/api/health`. A version nobody can read off a live deploy is not much of
@@ -39,11 +42,19 @@ export function startService(o: ServeOptions): Server {
     throw new Error(
       `no database at ${o.dbPath} — run \`care-loopd reindex\` first to build it from the journals`,
     );
-  // Read-only at the connection level, not merely by convention: this process serves a whole team
-  // and has no reason to write. The child that owns a run is the only writer (§3).
-  const db = new DatabaseSync(o.dbPath, { readOnly: true });
+  // READ-WRITE, deliberately — step 1 opened this read-only, which was right while the API only read.
+  // Sessions changed that. It does not weaken §3's rule, which is scoped to the RUN tables: those are
+  // still written only by the child that owns the run. `users`/`sessions` (and later `queue`/
+  // `gate_asks`) are service-owned, and WAL arbitrates the file between the two writers.
+  const db = new DatabaseSync(o.dbPath);
   const index = new SqliteRunIndex(db);
-  const app = buildApp({ index, version: o.version ?? packageVersion() });
+  const sessions = new SessionStore(db);
+  const app = buildApp({
+    index,
+    sessions,
+    version: o.version ?? packageVersion(),
+    secureCookies: o.secureCookies ?? false,
+  });
   const host = o.host ?? "127.0.0.1";
   const server = app.listen(o.port, host, () => {
     console.log(`care-loop service: http://${host}:${o.port}  (db: ${o.dbPath}, read-only)`);

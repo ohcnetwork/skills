@@ -8,16 +8,32 @@
 // an in-memory database with no server, no port, and no fixture directory.
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { ApiError, notFound, sendError } from "./errors.js";
+import { ApiError, badRequest, notFound, sendError } from "./errors.js";
 import { identity } from "./identity.js";
+import {
+  clearedCookie,
+  isValidLogin,
+  sessionCookie,
+  type SessionStore,
+} from "./auth.js";
 import { bool, int, str, strList } from "./query.js";
 import { isValidRunId } from "../run-id.js";
-import { resolvePaging, type RunIndex } from "../run-index.js";
+import {
+  resolvePaging,
+  LIST_ORDERS,
+  type ListFilter,
+  type ListOrder,
+  type RunIndex,
+} from "../run-index.js";
 
 export interface AppDeps {
   index: RunIndex;
+  sessions: SessionStore;
   /** Reported by `/api/health` so a deploy can be identified without shelling into the box. */
   version?: string;
+  /** Mark the session cookie `Secure`. Off by default because the service binds loopback over plain
+   *  HTTP; turn it on wherever TLS terminates. */
+  secureCookies?: boolean;
 }
 
 /** Wrap a handler so a thrown ApiError becomes its response. Express 5 forwards rejected promises to
@@ -35,6 +51,47 @@ function route(fn: (req: Request, res: Response) => void) {
 /** Every `:id` in this API is a run_id. Validating the SHAPE here means an obviously-malformed id is
  *  a 400 (the caller's mistake) while a well-formed unknown one is a 404 (a real lookup that missed)
  *  — a distinction the frontend needs in order to tell a broken link from a deleted run. */
+/** Read every list filter off the query string, in one place, so `/runs` and `/runs/facets` cannot
+ *  drift apart in what they accept. */
+function listFilterFrom(req: Request): ListFilter {
+  const q = req.query as Record<string, unknown>;
+  const order = str(q, "order");
+  if (order !== undefined && !LIST_ORDERS.includes(order as ListOrder))
+    throw badRequest("bad_query", `order must be one of ${LIST_ORDERS.join(", ")}`);
+  const dir = str(q, "dir");
+  if (dir !== undefined && dir !== "asc" && dir !== "desc")
+    throw badRequest("bad_query", "dir must be asc or desc");
+
+  // `requested_by=me` resolves to the caller. A CONVENIENCE, not a permission — §6 is explicit that
+  // no route may make an authorization decision, and this one does not: it expands to a filter value
+  // the caller could have typed themselves. Requiring a session for it would be a gate, so when
+  // nobody is signed in it 400s as a malformed filter rather than 401ing.
+  let requestedBy = str(q, "requested_by");
+  if (requestedBy === "me") {
+    if (!req.user)
+      throw badRequest("bad_query", "requested_by=me needs a signed-in caller or an X-Care-User header");
+    requestedBy = req.user;
+  }
+
+  return {
+    requestedBy,
+    repo: str(q, "repo"),
+    branch: str(q, "branch"),
+    step: str(q, "step"),
+    ticket: str(q, "ticket"),
+    pr: int(q, "pr"),
+    q: str(q, "q"),
+    since: str(q, "since"),
+    until: str(q, "until"),
+    active: bool(q, "active"),
+    includeStale: bool(q, "stale") ?? false,
+    order: order as ListOrder | undefined,
+    dir: dir as "asc" | "desc" | undefined,
+    limit: int(q, "limit", { min: 1 }),
+    offset: int(q, "offset"),
+  };
+}
+
 function runIdParam(req: Request): string {
   const raw = req.params.id;
   const id = Array.isArray(raw) ? raw[0] : raw;
@@ -47,7 +104,7 @@ export function buildApp(deps: AppDeps): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
-  app.use(identity());
+  app.use(identity(deps.sessions));
 
   app.get(
     "/api/health",
@@ -70,27 +127,52 @@ export function buildApp(deps: AppDeps): Express {
     }),
   );
 
-  app.get(
-    "/api/me",
+  // ── auth ────────────────────────────────────────────────────────────────────────────────────
+  // Not authentication yet: logging in means CLAIMING a login, and nothing verifies it (§6). The
+  // shape is what matters — swapping in GitHub OAuth replaces the body of this one handler and
+  // leaves /auth/me, /auth/logout, the middleware, and every other route untouched.
+
+  app.post(
+    "/api/auth/login",
     route((req, res) => {
-      res.json({ login: req.user });
+      const body = (req.body ?? {}) as { login?: unknown };
+      const login = typeof body.login === "string" ? body.login.trim() : "";
+      if (!login) throw badRequest("bad_login", "login is required");
+      if (!isValidLogin(login))
+        throw badRequest(
+          "bad_login",
+          `'${login}' is not a valid GitHub login (1-39 chars, alphanumeric or single hyphens)`,
+        );
+      const { user, token } = deps.sessions.login(login);
+      res.setHeader("Set-Cookie", sessionCookie(token, { secure: deps.secureCookies ?? false }));
+      res.status(201).json({ user });
+    }),
+  );
+
+  app.post(
+    "/api/auth/logout",
+    route((req, res) => {
+      // Idempotent: signing out twice, or with a stale cookie, succeeds. Clearing the cookie matters
+      // more than whether a row was updated — the client must not keep sending a dead token.
+      if (req.sessionToken) deps.sessions.revoke(req.sessionToken);
+      res.setHeader("Set-Cookie", clearedCookie({ secure: deps.secureCookies ?? false }));
+      res.status(204).end();
+    }),
+  );
+
+  app.get(
+    "/api/auth/me",
+    route((req, res) => {
+      // 200-with-null rather than 401: "who am I" is answerable when the answer is "nobody", and it
+      // lets the frontend decide between a login screen and a dashboard from one unconditional call.
+      res.json({ login: req.user, account: req.account });
     }),
   );
 
   app.get(
     "/api/runs",
     route((req, res) => {
-      const q = req.query as Record<string, unknown>;
-      const filter = {
-        requestedBy: str(q, "requested_by"),
-        repo: str(q, "repo"),
-        branch: str(q, "branch"),
-        step: str(q, "step"),
-        active: bool(q, "active"),
-        includeStale: bool(q, "stale") ?? false,
-        limit: int(q, "limit", { min: 1 }),
-        offset: int(q, "offset"),
-      };
+      const filter = listFilterFrom(req);
       // Echo the EFFECTIVE paging, not what was asked for: `?limit=999` serves 200 rows, and a
       // response claiming 999 would make `offset += limit` skip 799 of them without erroring.
       const applied = resolvePaging(filter);
@@ -100,6 +182,15 @@ export function buildApp(deps: AppDeps): Express {
         limit: applied.limit,
         offset: applied.offset,
       });
+    }),
+  );
+
+  app.get(
+    "/api/runs/facets",
+    route((req, res) => {
+      // Declared BEFORE /api/runs/:id — Express matches in order, and "facets" is a valid-looking
+      // path segment that would otherwise be caught by the :id route and rejected as a bad run id.
+      res.json(deps.index.facets(listFilterFrom(req)));
     }),
   );
 

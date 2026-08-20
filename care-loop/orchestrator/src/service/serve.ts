@@ -21,6 +21,9 @@ export interface ServeOptions {
   version?: string;
   /** Mark session cookies `Secure` — set wherever TLS terminates in front of this. */
   secureCookies?: boolean;
+  /** Built frontend to serve. Defaults to `../web/dist` when it exists, so a built app is served
+   *  automatically and a dev checkout without one simply runs API-only. */
+  staticDir?: string;
 }
 
 /** The running build, for `/api/health`. A version nobody can read off a live deploy is not much of
@@ -49,15 +52,22 @@ export function startService(o: ServeOptions): Server {
   const db = new DatabaseSync(o.dbPath);
   const index = new SqliteRunIndex(db);
   const sessions = new SessionStore(db);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const defaultStatic = join(here, "../../../web/dist");
+  const staticDir = o.staticDir ?? (existsSync(defaultStatic) ? defaultStatic : undefined);
   const app = buildApp({
     index,
     sessions,
     version: o.version ?? packageVersion(),
     secureCookies: o.secureCookies ?? false,
+    staticDir,
   });
   const host = o.host ?? "127.0.0.1";
   const server = app.listen(o.port, host, () => {
-    console.log(`care-loop service: http://${host}:${o.port}  (db: ${o.dbPath}, read-only)`);
+    console.log(
+      `care-loop service: http://${host}:${o.port}  (db: ${o.dbPath})` +
+        (staticDir ? `  serving ${staticDir}` : "  API only — no web/dist built"),
+    );
   });
   const shutdown = (): void => {
     server.close(() => {

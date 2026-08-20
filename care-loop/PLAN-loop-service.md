@@ -298,6 +298,28 @@ the middleware, and every other route untouched.
   identifies; it does not gate. A revoked or expired cookie must not lock out a caller who also sent
   a header.
 
+**Hosting does not block GitHub auth, and a public domain is not required.** Recorded because the
+instinct is to assume otherwise and defer the whole thing. GitHub never connects INBOUND — that is
+webhooks. The OAuth web flow only needs the user's browser to reach the callback URL and the box to
+have outbound HTTPS:
+
+| Step | Direction |
+|---|---|
+| authorize | browser → github.com |
+| callback | github.com 302s the **browser** → us |
+| token exchange / user fetch | **our box** → github.com (outbound) |
+
+The box lives on the office LAN and teammates reach it there, so a callback of
+`http://<box>:<port>/api/auth/github/callback` is all GitHub needs — to it, that is just a string it
+redirects to. Three things to settle before step 5 leans on it: **verify GitHub accepts the URL**
+(five minutes with a throwaway OAuth App; the fallback if not is the OAuth **device flow**, which has
+no callback URL at all); **register a hostname, not a DHCP IP**, since the callback is a fixed string
+and a moved address breaks auth with a confusing mismatch; and note that plain HTTP means no `Secure`
+cookie, so session tokens cross the LAN in cleartext — consistent with the network already being the
+trust boundary, and reversible by putting Tailscale in front, which gives real HTTPS with no public
+exposure and flips `secureCookies` on. An OAuth App has ONE callback URL, so localhost dev plus the
+office host means two apps (or a GitHub App, which allows several).
+
 **This is still not authorization, and no route may add any.** `?requested_by=me` is a convenience
 that expands to a value the caller could have typed — which is why it 400s as an unexpandable filter
 when nobody is signed in, rather than 401ing as a refused permission. Keeping authorization entirely
@@ -486,7 +508,7 @@ that made bot-authoring worth the trade.
 |---|------|-----|
 | 0 | [[PLAN-sqlite-run-store]] steps 1–5 — **built as of 2026-08-19** | done |
 | 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` — **built 2026-08-20** | done |
-| 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted | 1.5d |
+| 2 | Vite + Router + Query scaffold; React FE at read parity — **built 2026-08-20** | done |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join | 0.5d |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel | 1.5d |
 | 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
@@ -513,6 +535,31 @@ Steps 1–2 ship a read-only team dashboard before any spawn code exists, which 
 ratio is best. The [[PLAN-sqlite-run-store]] §10 cutover is **not** a prerequisite for any step here
 (§3); it can land before, during, or after, and the only thing it changes for this plan is that
 backups get more valuable.
+
+### Design system: Care UI
+
+[careui.ohc.network](https://careui.ohc.network) is the design system of record — React 19, Tailwind
+v4 CSS-first, components published as a shadcn registry.
+
+**The registry could not be used, and this is worth recording rather than rediscovering.** Every
+`https://careui.ohc.network/r/<name>.json` endpoint returns the docs SPA's HTML with
+`content-type: text/html`, so `npx shadcn@latest add …` fails on `Unexpected token '<'`. Verified
+against the real CLI, not inferred.
+
+What was adopted instead is the substance: the **tokens**, read directly off the live docs site's
+computed styles and transcribed into `web/src/styles.css` — the full semantic set for both themes
+(`--background`, `--card`, `--primary`, `--muted-foreground`, `--destructive`, `--border`, `--ring`,
+`--radius: .625rem`, the chart ramp), plus Figtree and Geist Mono. Note Care UI's `--primary` is
+**emerald**, not blue.
+
+`web/src/components/ui/primitives.tsx` holds the few primitives this app needs (Button, Input, Select,
+Badge, Card), written against exactly the token names Care UI's own components consume. When the
+registry is fixed, the real components replace that one file and nothing else changes — that is the
+whole reason it is one file.
+
+Dark mode is a `.dark` CLASS, not `prefers-color-scheme`: Care UI ships five modes (light, dark,
+high-contrast, protanopia, tritanopia) and a media query can only express two. Following the system
+preference is the default; the class is the seam a theme picker drives later.
 
 ## 12. Risks
 

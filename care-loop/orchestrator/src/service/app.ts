@@ -7,6 +7,7 @@
 // `buildApp` takes its dependencies rather than opening them, so tests drive a real Express app over
 // an in-memory database with no server, no port, and no fixture directory.
 
+import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { ApiError, badRequest, notFound, sendError } from "./errors.js";
 import { identity } from "./identity.js";
@@ -34,6 +35,9 @@ export interface AppDeps {
   /** Mark the session cookie `Secure`. Off by default because the service binds loopback over plain
    *  HTTP; turn it on wherever TLS terminates. */
   secureCookies?: boolean;
+  /** Built frontend to serve (`web/dist`). When set, the API and the app share ONE origin and one
+   *  port — which is what lets the session cookie be plain same-origin with no CORS anywhere. */
+  staticDir?: string;
 }
 
 /** Wrap a handler so a thrown ApiError becomes its response. Express 5 forwards rejected promises to
@@ -250,6 +254,28 @@ export function buildApp(deps: AppDeps): Express {
       res.json(found);
     }),
   );
+
+  // Unmatched /api paths are a 404 in the API's own envelope. Scoped to /api so it cannot swallow
+  // the frontend's client-side routes below.
+  app.use("/api", (_req, res) => {
+    sendError(res, notFound("not_found", "no such route"));
+  });
+
+  if (deps.staticDir) {
+    app.use(express.static(deps.staticDir, { index: false }));
+    // SPA fallback: `/runs/<id>` is a client-side route, so a direct hit or a refresh must return
+    // index.html rather than 404.
+    //
+    // Anything that LOOKS like a file (has an extension) is excluded, and that exclusion is the whole
+    // point: without it a missing `/assets/main.js` answers 200-with-HTML, the browser tries to
+    // execute a document as JavaScript, and the resulting MIME error says nothing about the actual
+    // problem — a stale asset reference after a redeploy. Client routes have no extension; assets
+    // always do.
+    app.get(/.*/, (req, res, next) => {
+      if (/\.[a-zA-Z0-9]+$/.test(req.path)) return next();
+      res.sendFile(join(deps.staticDir!, "index.html"));
+    });
+  }
 
   app.use((_req, res) => {
     sendError(res, notFound("not_found", "no such route"));

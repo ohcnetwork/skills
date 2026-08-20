@@ -7,6 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { buildApp } from "../src/service/app.ts";
 import {
@@ -561,5 +564,41 @@ test("/runs/facets is not swallowed by the /runs/:id route", async () => {
     assert.ok(Array.isArray(res.body.repos));
   } finally {
     await h.close();
+  }
+});
+
+// ── static frontend ──────────────────────────────────────────────────────────────────────────────
+
+test("the SPA fallback serves client routes but never disguises a missing asset", async () => {
+  const store = useRealStore();
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-static-"));
+  writeFileSync(join(dir, "index.html"), "<!doctype html><title>app</title>");
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    staticDir: dir,
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    // a client-side route resolves to the app shell
+    const route = await fetch(`${base}/runs/${mintRunId()}`);
+    assert.equal(route.status, 200);
+    assert.match(route.headers.get("content-type") ?? "", /text\/html/);
+
+    // REGRESSION: a missing asset must 404 as an asset. Answering 200-with-HTML makes the browser
+    // execute a document as JavaScript, and the MIME error it then reports says nothing about the
+    // real problem — a stale asset reference after a redeploy.
+    const missing = await fetch(`${base}/assets/nope.js`);
+    assert.equal(missing.status, 404);
+
+    // and /api keeps its own envelope rather than being swallowed by the fallback
+    const api = await fetch(`${base}/api/nope`);
+    assert.equal(api.status, 404);
+    assert.equal((await api.json()).error.code, "not_found");
+  } finally {
+    await new Promise((r) => server.close(() => r(undefined)));
   }
 });

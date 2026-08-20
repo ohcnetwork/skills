@@ -2,10 +2,11 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "dashboard",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["--yes", "tsx", "care-loop/orchestrator/src/cli.ts", "dashboard"],
-      "port": 3141
+      "name": "care-loop-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173,
+      "cwd": "care-loop/web"
     }
   ]
 }

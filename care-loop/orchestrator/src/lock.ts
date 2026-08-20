@@ -3,7 +3,7 @@
 // Atomic `mkdir` is the mutex; the holder's pid is recorded so a STALE lock (holder process dead)
 // is safely stolen, while a live holder is refused.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export class LockError extends Error {}
@@ -32,6 +32,34 @@ function readPid(pidFile: string): number | null {
   } catch {
     return null;
   }
+}
+
+export interface LockStatus {
+  /** The lock directory exists. */
+  held: boolean;
+  /** Holder pid, or null if absent/unreadable. */
+  pid: number | null;
+  /** The holder is a live process. A held lock with a dead holder is stale, not active. */
+  alive: boolean;
+}
+
+/**
+ * Inspect a run's lock WITHOUT acquiring or stealing it.
+ *
+ * `acquireLock` already computes liveness, but only reachable by taking the lock — which is exactly
+ * what a caller asking "is anything driving this run?" must not do. Needed because a `running` row in
+ * the service's queue is a claim on a process, and after a crash that process is gone: the row is a
+ * lie until something reconciles it. The lock is the ground truth ([[PLAN-loop-service]] §12).
+ */
+export function inspectLock(
+  runDir: string,
+  opts: { isAlive?: (pid: number) => boolean } = {},
+): LockStatus {
+  const isAlive = opts.isAlive ?? defaultIsAlive;
+  const dir = join(runDir, ".orchestrator.lock");
+  if (!existsSync(dir)) return { held: false, pid: null, alive: false };
+  const pid = readPid(join(dir, "pid"));
+  return { held: true, pid, alive: pid !== null && isAlive(pid) };
 }
 
 /**

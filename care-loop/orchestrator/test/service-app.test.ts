@@ -80,6 +80,9 @@ async function harness(): Promise<Harness> {
     sessions: new SessionStore(db),
     queue,
     version: "test",
+    // Enqueue is gated on a supervisor existing; most tests want it present so they can exercise the
+    // route. The gate itself has its own test.
+    supervisor: { running: true },
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
@@ -114,7 +117,7 @@ test("GET /api/health reports db reachability, not merely process liveness", asy
     assert.equal(body.ok, true);
     assert.equal(body.db, true);
     assert.equal(body.version, "test");
-    assert.equal(body.supervisor, null, "no supervisor until step 4");
+    assert.equal(body.supervisor, true, "reports whether work would actually be picked up");
   } finally {
     await h.close();
   }
@@ -795,6 +798,72 @@ test("RunSummary carries `terminal`, so no client needs its own step vocabulary"
       [...byStep.entries()].sort(),
       [["6a", false], ["7", true], ["aborted", true], ["merged", true]],
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test("enqueue refuses when no supervisor would ever run the row", async () => {
+  const store = useRealStore();
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  // No `supervisor` — the deployed-today state, where the route was live and nothing consumed it.
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    queue: new QueueStore(db),
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Care-User": "octocat" },
+      body: JSON.stringify({ branch: "feat-a", task: "t", ticket: "ENG-1", summary: "s" }),
+    });
+    // A queued row nobody will execute is a silent black hole: the requester cannot tell it from a
+    // slow start, and the run never happens.
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error.code, "no_supervisor");
+
+    // and health says so rather than leaving it to be discovered
+    const health = await (await fetch(`${base}/api/health`)).json();
+    assert.equal(health.supervisor, false);
+  } finally {
+    await new Promise((r) => server.close(() => r(undefined)));
+  }
+});
+
+test("a malformed JSON body is the caller's fault (400), not the server's (500)", async () => {
+  const h = await harness();
+  try {
+    const res = await fetch(`${h.base}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error.code, "bad_json");
+  } finally {
+    await h.close();
+  }
+});
+
+test("X-Care-User is held to the same rule as /auth/login — they write the same column", async () => {
+  const h = await harness();
+  try {
+    const bad = await h.get("/api/auth/me", { "X-Care-User": "<script>alert(1)</script> not a login" });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_user");
+
+    // junk must not be able to reach requested_by, where it becomes a facet and a filter value
+    const enqueued = await h.post(
+      "/api/runs",
+      { branch: "feat-a", task: "t", ticket: "ENG-1", summary: "s" },
+      { "X-Care-User": "not a login" },
+    );
+    assert.equal(enqueued.status, 400);
+    assert.equal((await h.get("/api/queue", { "X-Care-User": "octocat" })).body.items.length, 0);
   } finally {
     await h.close();
   }

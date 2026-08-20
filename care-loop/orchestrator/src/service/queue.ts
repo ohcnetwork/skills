@@ -168,16 +168,16 @@ export class QueueStore {
         this.db.exec("COMMIT");
         return null;
       }
-      this.db
+      // `.run()` already reports what it changed; a follow-up `SELECT changes()` was reading a global
+      // that happens to still hold this statement's count, which is one refactor away from reading
+      // someone else's — on the hot claim path, for an extra round trip.
+      const { changes } = this.db
         .prepare(
           `UPDATE queue SET status = 'running', started_at = ?, attempts = attempts + 1
             WHERE id = ? AND status = 'pending'`,
         )
         .run(now.toISOString(), candidate.id);
-      const changed = (
-        this.db.prepare("SELECT changes() AS n").get() as { n: number }
-      ).n;
-      if (changed !== 1) {
+      if (changes !== 1) {
         this.db.exec("ROLLBACK");
         return null;
       }
@@ -199,13 +199,13 @@ export class QueueStore {
   /** Cancel a row. Returns false when it is already terminal — a finished run cannot be un-run, and
    *  saying so is more useful than silently succeeding. */
   cancel(runId: string, now: Date = new Date()): boolean {
-    this.db
+    const { changes } = this.db
       .prepare(
         `UPDATE queue SET status = 'cancelled', finished_at = ?
           WHERE run_id = ? AND status IN ('pending','running')`,
       )
       .run(now.toISOString(), runId);
-    return (this.db.prepare("SELECT changes() AS n").get() as { n: number }).n === 1;
+    return changes === 1;
   }
 
   /** Rows left `running` by a supervisor that died. A `running` row is a claim on a process, and

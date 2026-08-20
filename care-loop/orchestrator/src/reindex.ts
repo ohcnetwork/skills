@@ -14,12 +14,47 @@ import { join } from "node:path";
 import { Journal, type JournalEvent } from "./journal.js";
 import { projectState } from "./state.js";
 import { rollupsFromEvents } from "./run-store.js";
+import { inspectLock } from "./lock.js";
 import type { SqliteRunStore } from "./run-store.js";
 
 export interface ReindexResult {
   runsIndexed: number;
   runsSkipped: { slug: string; error: string }[];
   artifactsIndexed: number;
+}
+
+export class ReindexUnsafeError extends Error {}
+
+/**
+ * Runs that would be destroyed by a rebuild.
+ *
+ * `clearAll()` is `DELETE FROM runs`, cascading to `run_events`. A child that is mid-run then appends
+ * an event whose FK parent no longer exists — a violation, and fatal by design (§2's "both writes are
+ * fatal"), so the run dies hours in with an error about foreign keys.
+ *
+ * This was harmless when runs were driven one at a time by the person typing the command. With an
+ * always-on service and N children it is a foot-gun, and `usage()` described reindex as "safe at any
+ * time" — which was true of the design it was written for and stopped being true at the cutover.
+ */
+function liveRuns(store: SqliteRunStore, runsDir: string): string[] {
+  const live: string[] = [];
+
+  // The service's own claim on a process.
+  const claimed = store
+    .raw()
+    .prepare("SELECT run_id FROM queue WHERE status = 'running'")
+    .all() as unknown as { run_id: string }[];
+  live.push(...claimed.map((r) => r.run_id));
+
+  // And the ground truth, which covers CLI-started runs the queue knows nothing about. Deliberately
+  // NOT `runs.step NOT IN (terminal)`: a run abandoned a month ago sits at a non-terminal step
+  // forever, and refusing to rebuild because of it would make the guard useless noise. A held lock
+  // with a LIVE holder is the only thing that means "something is driving this right now".
+  for (const slug of discoverRunDirs(runsDir)) {
+    const status = inspectLock(join(runsDir, slug));
+    if (status.held && status.alive) live.push(slug);
+  }
+  return [...new Set(live)];
 }
 
 function discoverRunDirs(runsDir: string): string[] {
@@ -88,7 +123,20 @@ function reindexArtifacts(store: SqliteRunStore, runDir: string, runId: string):
 /** Rebuild `runs` / `run_detail` / `run_events` / `run_artifacts` from every run dir under `runsDir`.
  *  Clears existing rows first, so the result reflects ONLY what the journals say. Best-effort per
  *  run: a corrupt/unreadable/empty journal is skipped and reported, never fatal to the rebuild. */
-export function reindexRuns(store: SqliteRunStore, runsDir: string): ReindexResult {
+export function reindexRuns(
+  store: SqliteRunStore,
+  runsDir: string,
+  opts: { force?: boolean } = {},
+): ReindexResult {
+  if (!opts.force) {
+    const live = liveRuns(store, runsDir);
+    if (live.length > 0)
+      throw new ReindexUnsafeError(
+        `refusing to rebuild: ${live.length} run(s) may be live (${live.slice(0, 3).join(", ")}` +
+          `${live.length > 3 ? ", …" : ""}). A rebuild deletes run_events out from under a running ` +
+          `child and kills it with a foreign-key error. Wait, or pass --force if you are sure.`,
+      );
+  }
   store.clearAll();
 
   const slugs = discoverRunDirs(runsDir);

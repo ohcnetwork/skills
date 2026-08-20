@@ -24,7 +24,16 @@ export interface BackupOptions {
 const PREFIX = "loops-";
 const SUFFIX = ".db";
 
-/** Take one snapshot. Returns its path. */
+/** Take one snapshot. Returns its path.
+ *
+ *  `node:sqlite` is SYNCHRONOUS, so this blocks the event loop for the duration of the vacuum — the
+ *  whole service is unresponsive while it runs. At the current 1.3 MB that is single-digit
+ *  milliseconds and irrelevant. Stated so it is not rediscovered as a mystery latency spike: if
+ *  `loops.db` reaches the tens of megabytes, move this to a worker thread or a child process.
+ *
+ *  Snapshots default to `<db dir>/backups`, which sits inside the tree `reindex` scans — harmless,
+ *  because `discoverRunDirs` skips non-run directories, but worth knowing before anything starts
+ *  archiving the run tree wholesale. */
 export function backupNow(db: DatabaseSync, o: BackupOptions, now: Date = new Date()): string {
   mkdirSync(o.dir, { recursive: true });
   const stamp = now.toISOString().replace(/[:.]/g, "-");

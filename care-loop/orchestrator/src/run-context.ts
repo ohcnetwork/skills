@@ -14,9 +14,10 @@
 // supervisor mints at enqueue so its `POST /api/runs` can answer `{ run_id }` synchronously. It only
 // ever names a FRESH run dir; pointing it at an established one throws rather than rebinding.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Journal } from "./journal.js";
+import { inspectLock } from "./lock.js";
 import { projectState } from "./state.js";
 import { isValidRunId, mintRunId } from "./run-id.js";
 
@@ -53,20 +54,46 @@ function readPinnedRunId(): string | null {
   return raw;
 }
 
-/** A pinned id may only ever NAME a fresh run, never REBIND an established one. Silently preferring
- *  either side would be worse than failing: taking the pin hijacks an existing run's identity
- *  mid-flight, and taking the existing id makes the service's `POST` response a lie. */
-function assertNoConflict(
+/**
+ * Reconcile a pinned id against a run dir that already has one.
+ *
+ * The original rule was "established beats pinned, always throw" — which protected the case it was
+ * written for (a stale `CARE_RUN_ID` aimed at a run in flight) but made the service's NORMAL case
+ * impossible. Run dirs are keyed by `${repo}-${branch}` (`derivePaths`), so the second run of any
+ * branch lands on the first run's directory. With ids minted at enqueue that is a guaranteed throw,
+ * not a rare one: every branch was runnable exactly once, ever, and it would have surfaced as three
+ * failed spawn attempts and an error about run ids to whoever asked for the run.
+ *
+ * The distinction that was missing is whether anything is ACTUALLY DRIVING the old run. A live lock
+ * means rebinding would hijack a run in flight — still refused. A finished or crashed run holds no
+ * live lock, and its directory is simply in the way: archive it as `<dir>.stale-<ts>` and let the new
+ * run start clean.
+ *
+ * Archiving at START rather than on exit is deliberate: a crashed run never reaches an exit path, and
+ * that is exactly the run whose directory would otherwise block its own retry. It also makes
+ * `.stale-` a convention that code actually produces — the read-side filters in `run-index.ts` were
+ * matching a naming scheme nothing wrote.
+ */
+function reconcilePinnedId(
   established: string,
   pinned: string | null,
   runDir: string,
   source: string,
-): void {
-  if (pinned && pinned !== established)
+): "keep" | "archived" {
+  if (!pinned || pinned === established) return "keep";
+
+  const lock = inspectLock(runDir);
+  if (lock.held && lock.alive)
     throw new RunIdConflictError(
-      `CARE_RUN_ID is ${pinned} but ${runDir} is already run ${established} (from its ${source}) — ` +
-        `refusing to rebind an established run`,
+      `CARE_RUN_ID is ${pinned} but ${runDir} is run ${established} (from its ${source}) and is ` +
+        `LIVE — held by pid ${lock.pid}. Refusing to rebind a run in flight.`,
     );
+
+  const archived = `${runDir}.stale-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  renameSync(runDir, archived);
+  mkdirSync(runDir, { recursive: true });
+  console.error(`run dir already held ${established}; archived to ${archived}`);
+  return "archived";
 }
 
 /** Resolve (and cache) the stable run id for a run directory: the cache file if present, else the
@@ -80,8 +107,10 @@ export function resolveRunId(runDir: string): string {
 
   const cached = readCache(runDir);
   if (cached) {
-    assertNoConflict(cached, pinned, runDir, "cache");
-    return cached;
+    if (reconcilePinnedId(cached, pinned, runDir, "cache") === "keep") return cached;
+    // archived: the dir is empty again, so fall through and adopt the pinned id.
+    writeCache(runDir, pinned!);
+    return pinned!;
   }
 
   const journalPath = join(runDir, "journal.jsonl");
@@ -92,8 +121,9 @@ export function resolveRunId(runDir: string): string {
     // parsed directly instead, independent of any run_id.
     const { events } = new Journal(journalPath, "unresolved").readReplica();
     if (events.length > 0) {
-      runId = projectState(events).run_id;
-      assertNoConflict(runId, pinned, runDir, "journal");
+      const established = projectState(events).run_id;
+      runId =
+        reconcilePinnedId(established, pinned, runDir, "journal") === "keep" ? established : pinned!;
     } else {
       runId = pinned ?? mintRunId();
     }

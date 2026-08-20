@@ -33,6 +33,8 @@ export interface ServeOptions {
   backupIntervalMs?: number;
   /** Snapshots to retain. Default 7. */
   backupKeep?: number;
+  /** Repos a run may be requested against. Defaults to the one this exists for. */
+  allowedRepos?: string[];
 }
 
 /** The running build, for `/api/health`. A version nobody can read off a live deploy is not much of
@@ -89,8 +91,11 @@ export function startService(o: ServeOptions): Server {
     version: o.version ?? packageVersion(),
     secureCookies: o.secureCookies ?? false,
     staticDir,
+    allowedRepos: o.allowedRepos,
   });
   const host = o.host ?? "127.0.0.1";
+  // EADDRINUSE arrives as an 'error' EVENT, not a throw: without a handler it surfaces as an
+  // unhandled event and a stack trace, where "port 3142 is in use" is the entire useful content.
   const server = app.listen(o.port, host, () => {
     console.log(
       `care-loop service: http://${host}:${o.port}  (db: ${o.dbPath})` +
@@ -117,14 +122,30 @@ export function startService(o: ServeOptions): Server {
   // unref so a pending backup timer cannot hold the process open at shutdown.
   timer?.unref();
 
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE")
+      console.error(`care-loop service: port ${o.port} is already in use on ${host}`);
+    else console.error("care-loop service: listen failed:", err);
+    process.exit(1);
+  });
+
+  let shuttingDown = false;
   const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     if (timer) clearInterval(timer);
     server.close(() => {
       index.close();
       process.exit(0);
     });
+    // `server.close` waits for IDLE keep-alive sockets too, so one dashboard left open on a second
+    // monitor is enough for SIGTERM never to complete and for systemd to SIGKILL on every restart.
+    // This gets worse with SSE, where connections stay open by design.
+    server.closeAllConnections();
+    // Backstop for anything that still refuses to let go.
+    setTimeout(() => process.exit(1), 10_000).unref();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
   return server;
 }

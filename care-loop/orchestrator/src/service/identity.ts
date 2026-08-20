@@ -16,7 +16,7 @@
 
 import type { NextFunction, Request, Response } from "express";
 import { ApiError } from "./errors.js";
-import { readCookie, SESSION_COOKIE, type SessionStore, type User } from "./auth.js";
+import { isValidLogin, readCookie, SESSION_COOKIE, type SessionStore, type User } from "./auth.js";
 
 export const USER_HEADER = "x-care-user";
 
@@ -55,7 +55,15 @@ export function identity(sessions: SessionStore) {
 
     const raw = req.header(USER_HEADER);
     const trimmed = typeof raw === "string" ? raw.trim() : "";
-    if (trimmed !== "") req.user = trimmed;
+    if (trimmed !== "") {
+      // The SAME rule `/auth/login` enforces. They write the same column, so two standards meant a
+      // login rejected at the form could walk in through the header and become a permanent
+      // `requested_by` value, a facet entry, and a filter option. React escapes it in the DOM, but it
+      // is still junk in the data and a needless injection surface for any future non-React consumer.
+      if (!isValidLogin(trimmed))
+        throw new ApiError(400, "bad_user", `X-Care-User '${trimmed}' is not a valid login`);
+      req.user = trimmed;
+    }
     next();
   };
 }

@@ -18,6 +18,14 @@ import type { DatabaseSync } from "node:sqlite";
 export const SESSION_COOKIE = "care_session";
 /** 30 days. Long because this is a team dashboard on a VPN, not a bank. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** How stale `last_seen_at` may get before `resolve` bothers to refresh it.
+ *
+ *  This exists because `resolve` runs on EVERY request — including `/api/health` and every static
+ *  asset — and an unconditional UPDATE made every authenticated request a writer. Under a child's
+ *  write lock that cost the full `busy_timeout` and then threw, turning a read-only dashboard poll
+ *  into a 5-second hang and an HTTP 500. `last_seen_at` is a liveness hint, not an audit trail;
+ *  minute-granularity is more than it is ever read at. */
+export const SESSION_TOUCH_INTERVAL_MS = 60_000;
 
 export interface User {
   id: number;
@@ -93,16 +101,33 @@ export class SessionStore {
    *  costs nothing, and a sweep is one more thing to run and get wrong. */
   resolve(token: string, now: Date = new Date()): User | null {
     const iso = now.toISOString();
+    const digest = hash(token);
     const row = this.db
       .prepare(
-        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+        `SELECT u.*, s.last_seen_at AS session_seen FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_sha256 = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
       )
-      .get(hash(token), iso) as unknown as UserRow | undefined;
+      .get(digest, iso) as unknown as (UserRow & { session_seen: string }) | undefined;
     if (!row) return null;
-    this.db
-      .prepare("UPDATE sessions SET last_seen_at = ? WHERE token_sha256 = ?")
-      .run(iso, hash(token));
+
+    // Throttled, and deliberately AFTER the identity is already decided. Two separate problems were
+    // being caused by the unconditional version:
+    //   • every request became a write, so a read-only dashboard poll contended with a running child;
+    //   • a SQLITE_BUSY on this bookkeeping write propagated out of the identity middleware, which is
+    //     not wrapped by `route()`, and 500'd the whole request — costing the caller their identity
+    //     over a timestamp nobody reads at second granularity.
+    const age = now.getTime() - Date.parse(row.session_seen);
+    if (!Number.isFinite(age) || age >= SESSION_TOUCH_INTERVAL_MS) {
+      try {
+        this.db
+          .prepare("UPDATE sessions SET last_seen_at = ? WHERE token_sha256 = ?")
+          .run(iso, digest);
+      } catch (err) {
+        // Non-fatal by design: failing to record when someone was last seen must never fail their
+        // request. Logged so a persistently locked db is still visible.
+        console.error("[service] session touch failed (identity is unaffected):", err);
+      }
+    }
     return toUser(row);
   }
 

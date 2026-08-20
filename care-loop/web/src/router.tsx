@@ -29,9 +29,13 @@ const rootRoute = createRootRoute({
 const fleetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  // Search params are the filter state. Validated here so a hand-edited URL degrades to a sane view
-  // instead of sending garbage to the API — the server would 400, but a blank screen with an error
-  // is a worse answer than simply ignoring an unparseable sort order.
+  // Search params are the filter state. This NORMALISES the keys it knows about, so an unparseable
+  // `order` or `dir` degrades to the default rather than blanking the screen on a 400.
+  //
+  // It is not a whitelist: TanStack Router merges validated output over the raw search rather than
+  // replacing it, so keys not named here (e.g. `offset`, which the pager writes) survive into
+  // `useSearch()` and are forwarded by `qs`. That is load-bearing — pagination depends on it — and is
+  // safe because the API validates every parameter itself and 400s on anything malformed.
   validateSearch: (raw: Record<string, unknown>): RunFilters => {
     const s = (k: string): string | undefined => {
       const v = raw[k];

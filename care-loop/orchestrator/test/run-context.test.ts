@@ -1,14 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  unlinkSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import {
   openRun,
   resolveRunId,
@@ -253,19 +247,23 @@ test("CARE_RUN_ID matching the established id is a no-op (supervisor restart is 
   assert.equal(withPinnedRunId(established, () => resolveRunId(dir)), established);
 });
 
-test("CARE_RUN_ID conflicting with a cached id throws rather than rebinding the run", () => {
+test("a conflicting pin resolves via the CACHE path: not live, so archive and adopt", () => {
   const dir = tmpRunDir();
-  const established = resolveRunId(dir); // caches .run_id
-  assert.throws(
-    () => withPinnedRunId(mintRunId(), () => resolveRunId(dir)),
-    (err: unknown) =>
-      err instanceof RunIdConflictError && (err as Error).message.includes(established),
+  const established = resolveRunId(dir); // caches .run_id, no journal
+  const pinned = mintRunId();
+  assert.equal(withPinnedRunId(pinned, () => resolveRunId(dir)), pinned);
+  // the old run is set aside, not overwritten
+  const archived = readdirSync(dirname(dir)).filter(
+    (d) => d.startsWith(basename(dir)) && d.includes(".stale-"),
   );
-  // the established id survives the failed attempt
-  assert.equal(withPinnedRunId(undefined, () => resolveRunId(dir)), established);
+  assert.equal(archived.length, 1);
+  assert.equal(
+    readFileSync(join(dirname(dir), archived[0]!, ".run_id"), "utf8").trim(),
+    established,
+  );
 });
 
-test("CARE_RUN_ID conflicting with an existing journal throws (cache deleted, run still established)", () => {
+test("a conflicting pin resolves via the JOURNAL path too, when the cache is gone", () => {
   const dir = tmpRunDir();
   const { journal, runId } = openRun(dir);
   journal.append({
@@ -292,9 +290,65 @@ test("CARE_RUN_ID conflicting with an existing journal throws (cache deleted, ru
     },
   });
   unlinkSync(join(dir, ".run_id")); // force the journal-fold branch, not the cache branch
+
+  const pinned = mintRunId();
+  assert.equal(withPinnedRunId(pinned, () => resolveRunId(dir)), pinned);
+  // and the journal that established the old id went with the archived dir
+  const archived = readdirSync(dirname(dir)).filter(
+    (d) => d.startsWith(basename(dir)) && d.includes(".stale-"),
+  );
+  assert.equal(archived.length, 1);
+  assert.equal(existsSync(join(dirname(dir), archived[0]!, "journal.jsonl")), true);
+});
+
+test("a branch can be run again once the first run is no longer live", () => {
+  const dir = tmpRunDir();
+  const first = withPinnedRunId(mintRunId(), () => resolveRunId(dir));
+
+  // Second request on the same branch: the service mints a fresh id and the dir is in the way.
+  const second = mintRunId();
+  const got = withPinnedRunId(second, () => resolveRunId(dir));
+
+  assert.equal(got, second, "the new run must start, not inherit the finished run's identity");
+  assert.notEqual(got, first);
+
+  // the previous run is preserved beside it rather than destroyed
+  const archived = readdirSync(dirname(dir)).filter(
+    (d) => d.startsWith(basename(dir)) && d.includes(".stale-"),
+  );
+  assert.equal(archived.length, 1, "the finished run dir is archived, not deleted");
+  assert.equal(
+    readFileSync(join(dirname(dir), archived[0]!, ".run_id"), "utf8").trim(),
+    first,
+    "and it still holds the run it belonged to",
+  );
+});
+
+test("a LIVE run is still protected — archiving must not hijack a run in flight", () => {
+  const dir = tmpRunDir();
+  const established = withPinnedRunId(mintRunId(), () => resolveRunId(dir));
+
+  // Something is driving it: a lock held by a process that exists.
+  mkdirSync(join(dir, ".orchestrator.lock"), { recursive: true });
+  writeFileSync(join(dir, ".orchestrator.lock", "pid"), `${process.pid}\n`);
+
   assert.throws(
     () => withPinnedRunId(mintRunId(), () => resolveRunId(dir)),
-    (err: unknown) =>
-      err instanceof RunIdConflictError && (err as Error).message.includes("journal"),
+    (err: unknown) => err instanceof RunIdConflictError && /LIVE/.test((err as Error).message),
+    "rebinding a run in flight is the case the original guard existed for",
   );
+  // and it is untouched
+  assert.equal(withPinnedRunId(undefined, () => resolveRunId(dir)), established);
+});
+
+test("a crashed run's dir does not block its own retry", () => {
+  const dir = tmpRunDir();
+  withPinnedRunId(mintRunId(), () => resolveRunId(dir));
+  // A crash leaves the lock behind with a pid that is gone. Refusing here would mean the one run
+  // that most needs retrying is the one that cannot be.
+  mkdirSync(join(dir, ".orchestrator.lock"), { recursive: true });
+  writeFileSync(join(dir, ".orchestrator.lock", "pid"), "999999\n");
+
+  const retry = mintRunId();
+  assert.equal(withPinnedRunId(retry, () => resolveRunId(dir)), retry);
 });

@@ -7,10 +7,11 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reindexRuns } from "../src/reindex.ts";
+import { reindexRuns, ReindexUnsafeError } from "../src/reindex.ts";
 import { SqliteRunStore, setActiveRunStore, NullRunStore } from "../src/run-store.ts";
 import { openRun } from "../src/run-context.ts";
 import { projectAndWrite } from "../src/state.ts";
+import { QueueStore } from "../src/service/queue.ts";
 import { useRealStore } from "./_store.ts";
 
 function tmpRunsDir(): string {
@@ -242,4 +243,62 @@ test("appending to a reindexed legacy run keeps the replica chain valid", () => 
   assert.equal(replica.events.length, 4);
   assert.equal(replica.truncatedTail, false);
   assert.equal(j.read().events.length, 4);
+});
+
+// ── the live-run guard ───────────────────────────────────────────────────────────────────────────
+
+test("reindex refuses while a run is actually being driven, and --force overrides", () => {
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-guard-"));
+  const store = new SqliteRunStore(join(dir, "loops.db"));
+  setActiveRunStore(store);
+
+  const runDir = join(dir, "care_fe-live");
+  mkdirSync(join(runDir, ".orchestrator.lock"), { recursive: true });
+  // OUR pid: a lock held by a live process is the only thing that means "something is driving this
+  // right now". `runs.step NOT IN (terminal)` was tried and is wrong — a run abandoned a month ago
+  // sits non-terminal forever and would block every rebuild.
+  writeFileSync(join(runDir, ".orchestrator.lock", "pid"), `${process.pid}\n`);
+
+  assert.throws(
+    () => reindexRuns(store, dir),
+    ReindexUnsafeError,
+    "a rebuild deletes run_events out from under a live child and kills it with an FK error",
+  );
+  // the escape hatch still works
+  assert.equal(reindexRuns(store, dir, { force: true }).runsIndexed, 0);
+  store.close();
+});
+
+test("a stale lock from a dead process does not block a rebuild", () => {
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-stale-"));
+  const store = new SqliteRunStore(join(dir, "loops.db"));
+  setActiveRunStore(store);
+
+  const runDir = join(dir, "care_fe-crashed");
+  mkdirSync(join(runDir, ".orchestrator.lock"), { recursive: true });
+  // pid 1 is init and will never be a care-loopd; a plausible dead pid without racing a real one.
+  writeFileSync(join(runDir, ".orchestrator.lock", "pid"), "999999\n");
+
+  // A crashed run left its lock behind. Refusing forever because of it would make the guard noise,
+  // and `reindex` is exactly what you reach for after a crash.
+  assert.equal(reindexRuns(store, dir).runsIndexed, 0);
+  store.close();
+});
+
+test("a running queue row blocks a rebuild even with no lock on disk", () => {
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-qguard-"));
+  const store = new SqliteRunStore(join(dir, "loops.db"));
+  setActiveRunStore(store);
+  const q = new QueueStore(store.raw());
+  q.enqueue({
+    requestedBy: "svc",
+    repo: "ohcnetwork/care_fe",
+    branch: "b",
+    task: "t",
+    ticket: "ENG-1",
+    summary: "s",
+  });
+  q.claim(); // → running: the supervisor has spawned, the lock may not exist yet
+  assert.throws(() => reindexRuns(store, dir), ReindexUnsafeError);
+  store.close();
 });

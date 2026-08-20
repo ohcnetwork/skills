@@ -74,13 +74,14 @@ Usage:
        loopback unless --host says otherwise — there is no authentication, the login is a claim, and
        the trust boundary is the network.
        flags: --port <n> (default 3142) · --db <path> (default ../runs/loops.db) · --host <addr>
+              --secure-cookies (set once TLS terminates in front) · --static <dir> · --repos a/b,c/d
+              --backup-dir <path> · --backup-keep <n>
 
   care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
-       fleet projection that serve and status read (PLAN-sqlite-run-store.md). Safe at any time: it clears
-       and rebuilds ONLY from the journals, which stay the source of truth. Run it once to backfill an
-       existing runs/ tree, or any time you suspect the db has drifted (\`rm runs/loops.db\` first, or
-       just re-run — it always fully overwrites).
-       flags: --runs-dir <path> (default ../runs)
+       fleet projection that serve and status read (PLAN-sqlite-run-store.md). It clears and rebuilds
+       ONLY from the journals. REFUSES while any run looks live, because the rebuild deletes run_events
+       out from under a running child and kills it — wait, or --force if you are sure.
+       flags: --runs-dir <path> (default ../runs) · --force
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
   care-loopd resume <run-dir>    Resume a crashed run. If a PR is open, reconcile it (probePr: head ·
@@ -813,10 +814,25 @@ async function main(): Promise<void> {
       break;
     case "serve": {
       const sf = parseFlags(rest);
+      const port = typeof sf.port === "string" ? Number.parseInt(sf.port, 10) : 3142;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        console.error(`serve: --port must be 1-65535, got '${String(sf.port)}'`);
+        process.exit(2);
+      }
       startService({
         dbPath: typeof sf.db === "string" ? resolve(sf.db) : DB_PATH,
-        port: typeof sf.port === "string" ? Number.parseInt(sf.port, 10) : 3142,
+        port,
         host: typeof sf.host === "string" ? sf.host : undefined,
+        // Reachable configuration: these existed on ServeOptions but nothing could set them, which
+        // would have been discovered at deploy — `--secure-cookies` in particular is what
+        // PLAN-loop-service §6 tells you to turn on once TLS terminates in front.
+        secureCookies: sf["secure-cookies"] === true,
+        staticDir: typeof sf.static === "string" ? resolve(sf.static) : undefined,
+        backupDir: typeof sf["backup-dir"] === "string" ? resolve(sf["backup-dir"]) : undefined,
+        backupKeep:
+          typeof sf["backup-keep"] === "string" ? Number.parseInt(sf["backup-keep"], 10) : undefined,
+        allowedRepos:
+          typeof sf.repos === "string" ? sf.repos.split(",").map((r) => r.trim()).filter(Boolean) : undefined,
       });
       break;
     }
@@ -826,7 +842,7 @@ async function main(): Promise<void> {
         typeof df["runs-dir"] === "string" ? resolve(df["runs-dir"]) : RUNS_ROOT;
       const dbPath = join(runsDir, "loops.db");
       const store = new SqliteRunStore(dbPath);
-      const result = reindexRuns(store, runsDir);
+      const result = reindexRuns(store, runsDir, { force: df.force === true });
       store.close();
       console.log(
         `reindex: ${result.runsIndexed} run(s), ${result.artifactsIndexed} artifact(s) indexed` +

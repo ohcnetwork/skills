@@ -180,3 +180,60 @@ test("racing connections drain a queue without double-claiming any row", () => {
   assert.equal(a.list({ status: ["pending"] }).length, 0);
   owner.close();
 });
+
+// §10 "Concurrent writers", the case the interleaved test does NOT cover: a transaction held OPEN
+// across the other connection's requests. This is what a running child looks like from the service's
+// side, and it is the scenario that turned every signed-in request into a 5-second stall and an
+// HTTP 500 — because identity resolution wrote to `sessions` on every single request.
+test("a held write lock does not stall identity resolution", () => {
+  const p = dbPath();
+  const child = new SqliteRunStore(p);
+  const serviceDb = new DatabaseSync(p);
+  applyConnectionPragmas(serviceDb);
+  const sessions = new SessionStore(serviceDb);
+  const { token } = sessions.login("octocat");
+
+  // The child takes the write lock and keeps it, as it would mid-step.
+  child.raw().exec("BEGIN IMMEDIATE");
+  child
+    .raw()
+    .prepare("INSERT INTO users (login, created_at, last_seen_at) VALUES (?,?,?)")
+    .run("holder", new Date().toISOString(), new Date().toISOString());
+
+  const t0 = Date.now();
+  const who = sessions.resolve(token);
+  const elapsed = Date.now() - t0;
+
+  child.raw().exec("ROLLBACK");
+
+  assert.equal(who?.login, "octocat", "identity must survive a contended bookkeeping write");
+  // Before the throttle this burned the full 5s busy_timeout and then threw `database is locked`,
+  // which reached the error handler as an unmodelled error and 500'd the request.
+  assert.ok(elapsed < 1000, `identity resolution took ${elapsed}ms — it must not wait on the lock`);
+
+  child.close();
+  serviceDb.close();
+});
+
+test("reads are unaffected by a held write lock — WAL doing its job", () => {
+  const p = dbPath();
+  const child = new SqliteRunStore(p);
+  const serviceDb = new DatabaseSync(p);
+  applyConnectionPragmas(serviceDb);
+
+  child.raw().exec("BEGIN IMMEDIATE");
+  child
+    .raw()
+    .prepare("INSERT INTO users (login, created_at, last_seen_at) VALUES (?,?,?)")
+    .run("holder", new Date().toISOString(), new Date().toISOString());
+
+  const t0 = Date.now();
+  const n = (serviceDb.prepare("SELECT COUNT(*) AS n FROM runs").get() as { n: number }).n;
+  const elapsed = Date.now() - t0;
+
+  child.raw().exec("ROLLBACK");
+  assert.equal(n, 0);
+  assert.ok(elapsed < 500, "a pure read must never contend");
+  child.close();
+  serviceDb.close();
+});

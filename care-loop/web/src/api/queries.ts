@@ -5,6 +5,7 @@
 // instant: the previous filter's results are still cached under their own key.
 
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -90,10 +91,22 @@ export function useRun(runId: string, opts: { refetch?: number } = {}) {
   });
 }
 
+/** Page size for the timeline. The API caps at 2000; asking for that in one shot and ignoring
+ *  `next_seq` meant a long run's timeline simply STOPPED at 2000 with nothing saying so. The live
+ *  fleet already has a 327-event run. */
+const EVENTS_PAGE = 500;
+
 export function useRunEvents(runId: string, opts: { refetch?: number } = {}) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ["run-events", runId],
-    queryFn: () => api.get<EventPage>(`/api/runs/${runId}/events${qs({ limit: 2000 })}`),
+    queryFn: ({ pageParam }) =>
+      api.get<EventPage>(
+        `/api/runs/${runId}/events${qs({ limit: EVENTS_PAGE, after_seq: pageParam })}`,
+      ),
+    initialPageParam: undefined as number | undefined,
+    // `next_seq` is null on the last page — the API returns it precisely so the client does not have
+    // to guess from a short page.
+    getNextPageParam: (last) => last.next_seq ?? undefined,
     refetchInterval: opts.refetch,
   });
 }

@@ -7,7 +7,7 @@ import { useRun, useRunArtifacts, useRunEvents } from "../api/queries";
 import { AppHeader } from "../components/AppHeader";
 import { Pipeline } from "../components/Pipeline";
 import { Timeline } from "../components/Timeline";
-import { Badge, Card, cn } from "../components/ui/primitives";
+import { Badge, Button, Card, cn } from "../components/ui/primitives";
 import { cost, duration, shortSha } from "../format";
 
 const REFRESH_MS = 5_000;
@@ -105,7 +105,28 @@ export function RunPage() {
       {events.isPending && <p className="text-muted-foreground">loading timeline…</p>}
       {events.isError && <p className="text-sm text-destructive">{(events.error as Error).message}</p>}
       {events.data && (
-        <Timeline runId={runId} events={events.data.items} artifacts={artifacts.data?.items ?? []} />
+        <>
+          <Timeline
+            runId={runId}
+            events={events.data.pages.flatMap((p) => p.items)}
+            artifacts={artifacts.data?.items ?? []}
+          />
+          {events.hasNextPage && (
+            <div className="mt-3 flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void events.fetchNextPage()}
+                disabled={events.isFetchingNextPage}
+              >
+                {events.isFetchingNextPage ? "loading…" : "Load more events"}
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                showing {events.data.pages.reduce((n, p) => n + p.items.length, 0)} of {r.eventCount}
+              </span>
+            </div>
+          )}
+        </>
       )}
     </Shell>
   );

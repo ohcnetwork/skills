@@ -33,6 +33,10 @@ export interface AppDeps {
   index: RunIndex;
   sessions: SessionStore;
   queue: QueueStore;
+  /** Set once a supervisor is running (step 4). Until then `POST /api/runs` refuses rather than
+   *  banking work nothing will ever execute — a queued row with no consumer is a silent black hole,
+   *  and the person who asked for the run has no way to tell it apart from a slow start. */
+  supervisor?: { running: boolean } | null;
   /** Repos a run may be requested against. An allowlist rather than free text: `repo` reaches
    *  `git worktree add` and a GitHub API call, and "whatever the client sent" is not a good input to
    *  either. Defaults to the one repo this exists for. */
@@ -115,8 +119,10 @@ export function buildApp(deps: AppDeps): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
-  app.use(identity(deps.sessions));
-
+  // /api/health is registered BEFORE identity() on purpose: health is precisely the route that must
+  // answer when the database is unhappy, and identity touches the db. With it behind the middleware,
+  // a dead db plus a cookie produced `500 internal` where a dead db alone correctly produced
+  // `503 {ok:false}` — the diagnostic route failing in the manner it exists to report.
   app.get(
     "/api/health",
     route((_req, res) => {
@@ -132,11 +138,13 @@ export function buildApp(deps: AppDeps): Express {
       res.status(db ? 200 : 503).json({
         ok: db,
         db,
-        supervisor: null, // populated at step 4, when there is one
+        supervisor: deps.supervisor?.running ?? false,
         version: deps.version ?? null,
       });
     }),
   );
+
+  app.use(identity(deps.sessions));
 
   // ── auth ────────────────────────────────────────────────────────────────────────────────────
   // Not authentication yet: logging in means CLAIMING a login, and nothing verifies it (§6). The
@@ -203,6 +211,12 @@ export function buildApp(deps: AppDeps): Express {
       // would be a request nobody can be asked about. Still not authorization: it asks that the
       // caller said who they are, never what they are allowed to do.
       const requestedBy = requireUser(req);
+      if (!deps.supervisor?.running)
+        throw new ApiError(
+          503,
+          "no_supervisor",
+          "no supervisor is running, so a queued run would never start — enqueueing is disabled",
+        );
       const body = (req.body ?? {}) as Record<string, unknown>;
 
       const allowed = deps.allowedRepos ?? ["ohcnetwork/care_fe"];

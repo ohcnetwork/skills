@@ -238,9 +238,9 @@ route is `/api/*`, returns JSON, and resolves identity through one middleware. `
 | `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | ✅ |
 | `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | ✅ |
 | `GET` | `/runs/:id/stream` | SSE — live event tail | 2 |
-| `POST` | `/runs` | `201 { run_id, queue_id }` — enqueue | 3 |
-| `GET` | `/queue` | `{ items: QueueRow[] }` — pending + running | 3 |
-| `GET` | `/stats` | `{ active, by_step, cost_usd, runs_today }` | 3 |
+| `POST` | `/runs` | `201 { run_id, queue_id, queued_behind }` — enqueue | ✅ |
+| `GET` | `/queue` | `{ items: QueueRow[] }` — live rows by default | ✅ |
+| `GET` | `/stats` | `{ runs, active, by_step, queue }` | ✅ |
 | `POST` | `/runs/:id/cancel` | `202` | 4 |
 | `GET` | `/runs/:id/gate` | `PendingAsk \| null` | 5 |
 | `POST` | `/runs/:id/gate` | `204` | 5 |
@@ -509,7 +509,7 @@ that made bot-authoring worth the trade.
 | 0 | [[PLAN-sqlite-run-store]] steps 1–5 — **built as of 2026-08-19** | done |
 | 1 | Express skeleton + read routes over `RunIndex` + `X-Care-User` — **built 2026-08-20** | done |
 | 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted — **built 2026-08-20** | done |
-| 3 | `queue` table + `POST /api/runs` enqueue + the list join | 0.5d |
+| 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel | 1.5d |
 | 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
 | 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
@@ -593,10 +593,18 @@ preference is the default; the class is the seam a theme picker drives later.
   make two runs on one branch genuinely independent and retire the queue-behind rule, leaving only
   git's own "one branch, one worktree" constraint. Not blocking; the cheaper rule buys time.
 - **`loops.db` holds unrebuildable service state.** Run tables survive a `reindex`; `queue` and
-  `gate_asks` do not. Mitigation: `synchronous = FULL` (§3), plus a periodic
-  `VACUUM INTO backups/loops-<ts>.db` and `PRAGMA integrity_check` on service boot. This gets
-  strictly more important at the §10 cutover, when the run tables join them — but it is needed
-  before that, not after.
+  `gate_asks` do not. **Addressed at step 3, with the queue** — which is the right moment, because
+  before `queue` existed, losing the database cost nothing at all. `synchronous = FULL` was already
+  set at the §10 cutover; step 3 added `VACUUM INTO backups/loops-<ts>.db` (at boot, then every 6h,
+  keeping 7) and `PRAGMA integrity_check` before the first request is served.
+
+  `VACUUM INTO` rather than copying the file: it snapshots a live database through SQLite itself, so
+  it is safe with WAL and with readers and writers connected — `cp loops.db` can catch a torn page or
+  miss the WAL. Pruning orders by the ISO stamp in the filename rather than mtime, which a copy or a
+  restore would rewrite. The integrity check REPORTS rather than refusing to start: a database that
+  still answers most queries beats a service that will not boot, and the run tables remain
+  rebuildable — what matters is that someone learns, since corruption found weeks later, after
+  backups have rotated past the last good snapshot, is the failure this exists to prevent.
 - **Nothing is soft-deleted yet, and one thing should be.** Agreed direction: user-initiated removal
   should set a flag rather than delete a row. There is no call site today — no delete route, no delete
   method — so nothing is built. Two carve-outs when it lands: `clearAll()` and the `ON DELETE CASCADE`

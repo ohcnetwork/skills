@@ -10,7 +10,7 @@
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { ApiError, badRequest, notFound, sendError } from "./errors.js";
-import { identity } from "./identity.js";
+import { identity, requireUser } from "./identity.js";
 import {
   clearedCookie,
   isValidLogin,
@@ -18,6 +18,8 @@ import {
   type SessionStore,
 } from "./auth.js";
 import { bool, int, str, strList } from "./query.js";
+import { LIVE_STATUSES, QUEUE_STATUSES, type QueueStatus, type QueueStore } from "./queue.js";
+import { validateSeed } from "../front-terminal.js";
 import { isValidRunId } from "../run-id.js";
 import {
   resolvePaging,
@@ -30,6 +32,11 @@ import {
 export interface AppDeps {
   index: RunIndex;
   sessions: SessionStore;
+  queue: QueueStore;
+  /** Repos a run may be requested against. An allowlist rather than free text: `repo` reaches
+   *  `git worktree add` and a GitHub API call, and "whatever the client sent" is not a good input to
+   *  either. Defaults to the one repo this exists for. */
+  allowedRepos?: string[];
   /** Reported by `/api/health` so a deploy can be identified without shelling into the box. */
   version?: string;
   /** Mark the session cookie `Secure`. Off by default because the service binds loopback over plain
@@ -189,6 +196,95 @@ export function buildApp(deps: AppDeps): Express {
     }),
   );
 
+  app.post(
+    "/api/runs",
+    route((req, res) => {
+      // The first route that needs to know WHO — every run is attributed, and an unattributed row
+      // would be a request nobody can be asked about. Still not authorization: it asks that the
+      // caller said who they are, never what they are allowed to do.
+      const requestedBy = requireUser(req);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+
+      const allowed = deps.allowedRepos ?? ["ohcnetwork/care_fe"];
+      const repo = typeof body.repo === "string" && body.repo.trim() ? body.repo.trim() : allowed[0]!;
+      if (!allowed.includes(repo))
+        throw badRequest("bad_repo", `repo must be one of ${allowed.join(", ")}`);
+
+      // Validated with the LOOP's own rules (front-terminal.ts#validateSeed), not a second copy of
+      // them. A ticket that would fail the [ENG-###] PR-title assert, or a branch `git worktree add`
+      // would reject, fails here — while a human is looking at the form — instead of hours later
+      // inside a spawned child.
+      const seed: Record<string, string> = {};
+      for (const key of ["task", "ticket", "branch", "summary"] as const) {
+        const raw = body[key];
+        if (typeof raw !== "string" || raw.trim() === "")
+          throw badRequest("bad_request", `${key} is required`);
+        const parsed = validateSeed(key, raw);
+        if ("error" in parsed) throw badRequest(`bad_${key}`, parsed.error);
+        seed[key] = parsed.value;
+      }
+
+      const row = deps.queue.enqueue({
+        requestedBy,
+        repo,
+        branch: seed.branch!,
+        task: seed.task!,
+        ticket: seed.ticket!,
+        summary: seed.summary!,
+      });
+
+      // Report what is already on this branch rather than refusing. The row is queued either way and
+      // becomes claimable when the other finishes (§12: queue behind, don't reject) — but the caller
+      // deserves to know their run will not start immediately, and why.
+      // `liveOn` returns the OLDEST live row on this branch, which is our own row when nothing else
+      // holds it — so a different run id is exactly the signal that we are behind someone.
+      const ahead = deps.queue.liveOn(repo, seed.branch!);
+      res.status(201).json({
+        run_id: row.runId,
+        queue_id: row.id,
+        queued_behind: ahead && ahead.runId !== row.runId ? ahead.runId : null,
+      });
+    }),
+  );
+
+  app.get(
+    "/api/queue",
+    route((req, res) => {
+      const q = req.query as Record<string, unknown>;
+      const requested = strList(q, "status");
+      for (const st of requested ?? [])
+        if (!QUEUE_STATUSES.includes(st as QueueStatus))
+          throw badRequest("bad_query", `status must be one of ${QUEUE_STATUSES.join(", ")}`);
+      res.json({
+        // Defaults to the live rows: "what is the queue doing" is the question this answers, and a
+        // month of finished rows buries it.
+        items: deps.queue.list({
+          status: (requested as QueueStatus[] | undefined) ?? [...LIVE_STATUSES],
+          requestedBy: str(q, "requested_by"),
+          limit: int(q, "limit", { min: 1 }),
+        }),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/stats",
+    route((_req, res) => {
+      const byStep: Record<string, number> = {};
+      for (const f of deps.index.facets({}).steps) byStep[f.value] = f.count;
+      const live = deps.queue.list({ status: [...LIVE_STATUSES] });
+      res.json({
+        runs: deps.index.count({}),
+        active: deps.index.count({ active: true }),
+        by_step: byStep,
+        queue: {
+          pending: live.filter((r) => r.status === "pending").length,
+          running: live.filter((r) => r.status === "running").length,
+        },
+      });
+    }),
+  );
+
   app.get(
     "/api/runs/facets",
     route((req, res) => {
@@ -204,9 +300,9 @@ export function buildApp(deps: AppDeps): Express {
       const id = runIdParam(req);
       const run = deps.index.get(id);
       if (!run) throw notFound("run_not_found", `no run ${id}`);
-      // `queue` is null until step 3 builds the table. Present in the shape from day one so the
-      // frontend's type does not change when it starts arriving.
-      res.json({ run, queue: null });
+      // The queue row is null for a run started from the CLI, which never went through the service.
+      // That is a real and permanent case, not a gap — the child is the same binary either way.
+      res.json({ run, queue: deps.queue.byRunId(id) });
     }),
   );
 

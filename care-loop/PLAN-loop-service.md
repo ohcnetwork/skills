@@ -470,30 +470,116 @@ Two things make the later migration cheap, and both are free now:
 future Jira-comment / PR-comment adapter that posts the questions and POLLS for replies." HTTP is that
 adapter with a different poll target; `PlanQuestion.id` is already stable for correlation.
 
-With the DB authoritative, the ask and the answer are both rows:
+**The child polls SQLite directly, not the HTTP API.** It already opens the database — that is how
+every run event is written — so the gate needs no HTTP client, no service URL, and no credentials in
+the child. The property this buys is worth stating plainly: **a gate survives the service being
+restarted, redeployed, or crashed.** The ask and the answer are both committed rows, and the two sides
+never talk to each other, only to the table.
 
 ```sql
 CREATE TABLE gate_asks (
-  run_id      TEXT NOT NULL,
-  ask_id      TEXT NOT NULL,        -- PlanQuestion.id, or 'approve' for the consolidated ask
-  kind        TEXT NOT NULL,        -- interview | approve
-  payload     TEXT NOT NULL,        -- JSON: PlanQuestion[] or ConsolidatedAsk
-  answer      TEXT,                 -- JSON: PlanAnswer[] or ApprovalDecision; NULL while pending
-  answered_by TEXT,
-  asked_at    TEXT NOT NULL,
-  answered_at TEXT,
+  run_id       TEXT NOT NULL,
+  ask_id       TEXT NOT NULL,        -- 'interview:<n>' | 'approve:<n>' — see "per attempt" below
+  kind         TEXT NOT NULL,        -- interview | approve
+  payload      TEXT NOT NULL,        -- JSON: PlanQuestion[] or ConsolidatedAsk
+  answer       TEXT,                 -- JSON: PlanAnswer[] or ApprovalDecision; NULL while pending
+  answered_by  TEXT,
+  asked_at     TEXT NOT NULL,
+  answered_at  TEXT,
+  cancelled_at TEXT,                 -- the service revoking the ask (see "Cancel" below)
+  expires_at   TEXT NOT NULL,        -- a parked run holds a concurrency slot; it cannot park forever
   PRIMARY KEY (run_id, ask_id)
 );
+CREATE INDEX idx_gate_pending ON gate_asks(run_id) WHERE answer IS NULL AND cancelled_at IS NULL;
 ```
 
-1. `HttpPlanGate.interview()` / `.approve()` insert a row and poll it for `answer IS NOT NULL`.
+1. `HttpPlanGate.interview()` / `.approve()` insert a row and poll it.
 2. `GET /api/runs/:run_id/gate` returns the pending row.
 3. The human answers; the service writes `answer` + `answered_by`.
 4. The child's poll returns, it deserialises, and `runPlan` continues.
 
-Every step survives a restart on either side, because every step is a committed row. `answered_by` is
-worth having separately from `queue.requested_by` — the person who approves a plan is not always the
-person who requested it, and at a gate that distinction is the interesting one.
+`answered_by` is worth having separately from `queue.requested_by` — the person who approves a plan is
+not always the person who requested it, and at a gate that distinction is the interesting one. Any
+authenticated caller may answer, on the same reasoning as cancel (§6): a shared box with a shared
+concurrency cap needs whoever is at the keyboard to be able to unblock it.
+
+### `ask_id` is per ATTEMPT, not per kind
+
+An earlier draft used the literal `'approve'` as the ask id. That is an infinite loop: `amend`
+re-drafts the plan and asks again, the second ask finds the *first* ask's row — already answered
+`amend` — and returns it immediately, so the planner amends forever against an answer nobody re-gave.
+`plan.ts:134` is a bare `for (;;)` whose own comment says amend re-drafts **unbounded**, and every
+iteration is a real planner call, so this spends credits until someone notices.
+
+So the id carries the attempt, and `runPlan` already has the counter: `spawn` (`plan.ts:87`) is
+monotonic across the stage — interview 1, drafts 2, 3, 4 — so the ask for a draft is `approve:<that
+draft's round>`. Stable, already journalled, and tied to the exact draft the human is looking at
+rather than to a second counter that could drift from it. `interview:1` likewise carries the whole
+batch in one row rather than one row per `PlanQuestion`: the frontend renders one form and the child
+wants one round-trip, so a row per question would be three representations of one interaction.
+
+Keying by attempt also makes re-asking **idempotent for free**, which is what a crash-only loop needs:
+a child that dies after the ask and is re-spawned re-derives the same `spawn` counter, asks the same
+id, finds the row it already wrote, and picks up the answer if the human gave one in the meantime.
+Same id, same question, no duplicate prompt.
+
+One caveat to keep honest: this only holds while the re-spawn reproduces the same sequence of drafts.
+It does not today — `resume` refuses a pre-plan crash outright, so a crashed plan stage restarts from
+scratch and re-drafts from the planner, which may or may not land on the same content for the same
+`spawn`. The id is still *correct* (a fresh draft deserves a fresh ask); it simply does not yet buy
+back the human's earlier answer in that case. Worth revisiting only if plan-stage crashes turn out to
+be common — the loop-service makes them cheaper to observe, which is the prerequisite for knowing.
+
+### Cancel travels the channel the child is already blocked on
+
+A run parked at its gate is the one moment in the loop where the child is definitionally idle *and*
+definitionally already polling a row the service can write. Cancelling it with `SIGTERM` would work —
+crash-only makes that safe — but it is strictly worse than saying so in the row: a signalled child
+skips its `finally`, so it leaves its lockfile behind, writes no `run.end`, and the run's last journal
+event is a question nobody will ever answer. The FE then shows a run cancelled in the queue and still
+"planning" in its timeline.
+
+So cancellation of a parked run is **cooperative first, signalled second**:
+
+| the run is… | what cancel does |
+|---|---|
+| `pending` | status write; nothing to kill |
+| parked at a gate | stamp `cancelled_at`, wait a short grace, then escalate to `SIGTERM`/`SIGKILL` |
+| running, no pending ask | `SIGTERM` immediately, then `SIGKILL` — the crash-only path |
+
+Which branch is a single indexed query for a pending ask, so a non-parked run pays nothing for the
+parked run's grace. The child's poll returns `cancelled`, `HttpPlanGate` raises, and `runPlan` unwinds
+through its normal path: `run.end` with `outcome: "aborted"`, `reason_code: "cancelled"`, lock released
+by the `finally` that a signal would have skipped, exit 0.
+
+**This does not breach §4's "the child never sees the queue."** The child reads *its own gate row for
+its own run* — the very table it is already blocked on, and the transport it was handed. It never
+reads `queue`, never learns a queue exists, and gains no coupling to service scheduling. What §4
+protects is the child's independence from the *scheduler*, not an embargo on the gate transport
+talking about its own gate. The terminal gate has always had a cancel channel too; it is called
+ctrl-C.
+
+The poll interval is short (2s) because it is a local SQLite read against a WAL database — the cost
+that made `pollPr` wait 60s between rounds is a GitHub API call, and none of that applies here.
+
+### A parked run cannot park forever
+
+A run waiting at its gate holds a run directory, a worktree, an opencode session, and — the one that
+bites — a **concurrency slot**. With the cap at 2, one plan forgotten overnight halves the fleet's
+capacity and two stop it completely. That is not a hypothetical for a shared office box where the
+person who requested the run may simply have gone home.
+
+Hence `expires_at`, default 24h: long enough that "I'll approve it in the morning" works, short enough
+that a forgotten run frees its slot within a day. An expired ask ends the run with
+`reason_code: "gate_timeout"` — honest, and re-requestable, which matters because `resume` explicitly
+refuses a pre-plan crash (the interview is not re-entrant). The FE surfaces pending gates prominently
+for the same reason: the fix for an expiring gate is answering it.
+
+The alternative — letting a parked run release its slot and be re-admitted when answered — is better
+resource behaviour and considerably more machinery: the supervisor would have to distinguish parked
+from working children, over-subscribe deliberately, and re-admit against a cap that may since have
+filled. Not for v1. Revisit if gates routinely sit long enough that the cap, and not the gate, is what
+people complain about.
 
 ## 8. Frontend
 
@@ -568,7 +654,7 @@ that made bot-authoring worth the trade.
 | 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted — **built 2026-08-20** | done |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel — **built 2026-08-21** | done |
-| 5 | `HttpPlanGate`/`HttpPlanFront` + new-run form + gate view | 1d |
+| 5 | `gate_asks` (schema v6) + `HttpPlanGate` + gate routes + new-run form + gate view | 1.5d |
 | 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
 
 **~5.5d.** Steps 0–4 are done; 5–6 remain.

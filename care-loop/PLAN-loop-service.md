@@ -115,7 +115,7 @@ id pointed at an occupied dir fails loudly instead of silently forking the run's
 CREATE TABLE queue (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id       TEXT NOT NULL UNIQUE,   -- minted HERE at enqueue (see below); joins to runs.run_id
-  status       TEXT NOT NULL,          -- pending | running | done | failed | cancelled
+  status       TEXT NOT NULL,          -- pending | running | awaiting_gate | done | failed | cancelled
   requested_by TEXT NOT NULL,          -- the resolved caller (session, or X-Care-User)
   repo         TEXT NOT NULL,
   branch       TEXT NOT NULL,
@@ -134,7 +134,11 @@ CREATE INDEX idx_queue_mine    ON queue(requested_by, enqueued_at DESC);
 
 ### `status` is about supervision, not about the loop
 
-`done` means *the child exited*. Whether the loop merged, aborted, or deferred lives in `runs.step`,
+`awaiting_gate` means the child exited on purpose, at a gate, with nothing wrong (§7): live, not
+claimable, and re-admitted to `pending` by the human's answer. It is the one status a *human*, rather
+than the fleet, is the bottleneck for — which is why it is not folded into `pending`.
+
+`done` means *the child exited* having finished. Whether the loop merged, aborted, or deferred lives in `runs.step`,
 and it stays there — duplicating outcome into `queue` is the wide-table mistake again. `failed` means
 the spawn or the supervision failed, which is a different thing from a loop that concluded badly.
 
@@ -217,6 +221,11 @@ durable copy, so a service restart loses nothing but the map (and §4 reconciles
 
 **Concurrency cap.** `CARE_SERVICE_CONCURRENCY`, default 2. Each run is a worktree plus an opencode
 session plus Copilot credits; this is a real resource limit, not a formality.
+
+Which is exactly why a run waiting on a human must not hold a slot. §7's gate is a suspend point: the
+child waits ~10 minutes, then exits `75`, and the supervisor moves the row to `awaiting_gate` rather
+than `done`. A cap of 2 that two unanswered plans can exhaust is not a cap, it is a deadlock with a
+countdown.
 
 **Orphan recovery is nearly free.** loopd is already crash-only with journal-backed `resume`, and
 `lock.ts` already does PID-liveness (`defaultIsAlive`, `lock.ts:18`). The boot scan is the §4
@@ -544,7 +553,8 @@ So cancellation of a parked run is **cooperative first, signalled second**:
 | the run is… | what cancel does |
 |---|---|
 | `pending` | status write; nothing to kill |
-| parked at a gate | stamp `cancelled_at`, wait a short grace, then escalate to `SIGTERM`/`SIGKILL` |
+| `awaiting_gate` (suspended) | status write; there is no process — see "suspend point" below |
+| live at a gate (inside `wait_ms`) | stamp `cancelled_at`, short grace, then escalate to `SIGTERM`/`SIGKILL` |
 | running, no pending ask | `SIGTERM` immediately, then `SIGKILL` — the crash-only path |
 
 Which branch is a single indexed query for a pending ask, so a non-parked run pays nothing for the
@@ -562,24 +572,62 @@ ctrl-C.
 The poll interval is short (2s) because it is a local SQLite read against a WAL database — the cost
 that made `pollPr` wait 60s between rounds is a GitHub API call, and none of that applies here.
 
-### A parked run cannot park forever
+### A gate is a SUSPEND point, not a blocking wait
 
-A run waiting at its gate holds a run directory, a worktree, an opencode session, and — the one that
-bites — a **concurrency slot**. With the cap at 2, one plan forgotten overnight halves the fleet's
-capacity and two stop it completely. That is not a hypothetical for a shared office box where the
-person who requested the run may simply have gone home.
+**"Parked" means the plan is finished and waiting on a human.** Not waiting to start — that is
+`pending`, and no process exists yet. Not waiting to plan — recon, the interview, and the draft have
+all already run. The child has done every expensive thing it is going to do before approval, and is
+sitting on the answer.
 
-Hence `expires_at`, default 24h: long enough that "I'll approve it in the morning" works, short enough
-that a forgotten run frees its slot within a day. An expired ask ends the run with
-`reason_code: "gate_timeout"` — honest, and re-requestable, which matters because `resume` explicitly
-refuses a pre-plan crash (the interview is not re-entrant). The FE surfaces pending gates prominently
-for the same reason: the fix for an expiring gate is answering it.
+The first draft of this section had it hold that position for 24h and called the slot it consumes an
+acceptable cost. It is not. With the cap at 2, one plan left unanswered overnight halves the fleet and
+two stop it — on a shared office box where the requester may simply have gone home.
 
-The alternative — letting a parked run release its slot and be re-admitted when answered — is better
-resource behaviour and considerably more machinery: the supervisor would have to distinguish parked
-from working children, over-subscribe deliberately, and re-admit against a cap that may since have
-filled. Not for v1. Revisit if gates routinely sit long enough that the cap, and not the gate, is what
-people complain about.
+So the child **waits briefly, then exits**, and the run resumes at the gate when the answer arrives:
+
+| timer | default | what it bounds |
+|---|---|---|
+| `wait_ms` | 10 min | how long the child stays alive polling — "a human is probably looking at it right now" |
+| `expires_at` | 7 days | how long the ask stays answerable at all |
+
+These bound different things, and separating them is the whole trick. The first was expensive, so it
+is short. The second is now free — a suspended run holds no process, no slot, no opencode session, and
+**no worktree**, because `runStart` provisions the worktree *after* the gate (`cli.ts` cmdRun) — so it
+can be generous.
+
+**Resuming costs no model calls, because everything the approval path needs is already durable.**
+This is not a lucky accident; it is what the table was already going to hold:
+
+- `writeArtifacts` runs **before** the ask (`plan.ts`), so `criteria.md` / `baseline.md` /
+  `decisions.md` are on disk before the human ever sees the question.
+- `gate_asks.payload` **is** the `ConsolidatedAsk`, and the two fields `plan.approved` reads off the
+  draft — `plannedBy` and `classification` — are both in it.
+- `ticket` and `summary` arrive as seed flags the supervisor passes on every spawn anyway.
+
+So an `approve` resume journals `plan.approved` and advances to step 2 having called no model at all.
+A `reject` resume is a single journal write. Only `amend` re-invokes the planner — which is precisely
+the work the human just asked for — and it reconstructs its inputs from the `interview:1` row.
+
+**The lifecycle gains one status, `awaiting_gate`**, between `running` and terminal. It is live but
+not claimable, so the cap ignores it. The answer is what re-admits the run: `POST /api/runs/:id/gate`
+writes `answer` + `answered_by` and flips `awaiting_gate → pending` in one transaction, and the
+supervisor claims it on the next tick. A distinct status rather than parking it back in `pending` for
+an honest reason — "waiting on a human" and "waiting on capacity" are different states, the FE must
+render them differently, and `queue_position` is meaningless for the first.
+
+**The child still never sees the queue.** It signals suspension the only way a child ever talks to the
+supervisor: an exit code. `75` (`EX_TEMPFAIL`) means "I am not done, and nothing is wrong" — the
+supervisor writes `awaiting_gate` instead of `done`. A run started from a terminal uses the readline
+gate, never suspends, and never emits it.
+
+This makes cancel simpler too: the row in §7's table for "parked" only applies during the 10-minute
+live window. After suspension there is no process at all, so cancelling is a status write, exactly
+like a `pending` row.
+
+**What this does not solve.** A suspended run re-enters through `runPlan`, so the loop needs one new
+re-entry point: journal head at `gate.suspended` ⇒ skip recon/interview/draft, read the ask and its
+answer, act. `resume` today refuses a pre-plan crash outright, and that stays true — this is a narrower
+door than `resume`, opened only by a gate suspension, which is a clean state rather than a crash.
 
 ## 8. Frontend
 

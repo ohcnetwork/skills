@@ -274,7 +274,7 @@ route is `/api/*`, returns JSON, and resolves identity through one middleware. `
 | `GET` | `/auth/me` | `{ login, account }` — `login: null` when anonymous | ✅ |
 | `GET` | `/runs` | `{ items: RunSummary[], total, limit, offset }` | ✅ |
 | `GET` | `/runs/facets` | `{ repos, branches, users, steps }` with counts | ✅ |
-| `GET` | `/runs/:id` | `{ run, queue }` — `runs` + `run_detail` + its queue row | ✅ |
+| `GET` | `/runs/:id` | `{ run, queue }` — BOTH nullable; 404 only when neither exists | ✅ |
 | `GET` | `/runs/:id/events` | `{ items: JournalEvent[], next_seq }` | ✅ |
 | `GET` | `/runs/:id/artifacts` | `{ items: ArtifactSummary[] }` — metadata, no bodies | ✅ |
 | `GET` | `/runs/:id/artifacts/:sha` | one artifact, `content` parsed | ✅ |
@@ -283,8 +283,9 @@ route is `/api/*`, returns JSON, and resolves identity through one middleware. `
 | `GET` | `/queue` | `{ items: QueueRow[], total, limit, offset }` — live rows by default | ✅ |
 | `GET` | `/stats` | `{ runs, active, by_step, queue }` | ✅ |
 | `POST` | `/runs/:id/cancel` | `202 { run_id, cancelled, signalled }` | ✅ |
-| `GET` | `/runs/:id/gate` | `PendingAsk \| null` | 5 |
-| `POST` | `/runs/:id/gate` | `204` | 5 |
+| `GET` | `/runs/:id/gate` | `{ ask: GateAsk \| null }` | ✅ |
+| `POST` | `/runs/:id/gate` | `202 { run_id, ask_id, readmitted }` | ✅ |
+| `GET` | `/gates` | `{ items: GateAsk[], total }` — every run waiting on a human | ✅ |
 
 **`GET /runs` filters**, all optional and all composing: `requested_by` (the literal `me` resolves to
 the caller), `repo`, `branch`, `step`, `ticket`, `pr`, `q` (free text over task / summary / branch /
@@ -702,10 +703,24 @@ that made bot-authoring worth the trade.
 | 2 | Vite + Router + Query scaffold; React FE at read parity, vanilla page deleted — **built 2026-08-20** | done |
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel — **built 2026-08-21** | done |
-| 5 | `gate_asks` (schema v6) + `HttpPlanGate` + gate routes + new-run form + gate view | 1.5d |
+| 5 | `gate_asks` (schema v6) + the gate transport + gate routes + new-run form + gate view — **built 2026-08-25** | done |
 | 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
 
-**~5.5d.** Steps 0–4 are done; 5–6 remain.
+**~5.5d.** Steps 0–5 are done; only deploy remains.
+
+Step 5 landed as designed, with two corrections that only showed up once the FE drove it:
+
+- **`GET /runs/:id` 404'd for a queued run.** Minting the id at enqueue is what lets `POST /runs`
+  answer synchronously, so the id is addressable before any process exists to write a journal — and
+  the new-run form navigates straight to it. Both halves of `{run, queue}` are nullable now, which is
+  the honest shape; 404 is reserved for an id where neither exists.
+- **The timeline and artifact queries fired for runs with no journal**, 404ing on every poll of a
+  perfectly healthy queued run. Both are gated on the run existing.
+
+The gate view renders in every run state, above everything else, and a "waiting on a human" badge
+sits in the header on every page. That is not decoration: `expires_at` is the one outcome here that
+throws away planning work already finished and paid for, and the fix for an expiring gate is someone
+noticing it.
 
 Step 4 added `src/service/supervisor.ts` and turned three things that were paper into code:
 

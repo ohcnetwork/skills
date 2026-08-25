@@ -709,28 +709,38 @@ world-readable, so `pkgs.writeText` on a token publishes it to every user on the
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel — **built 2026-08-21** | done |
 | 5 | `gate_asks` (schema v6) + the gate transport + gate routes + new-run form + gate view — **built 2026-08-25** | done |
-| 6 | Deploy: NixOS module, `.env`, Tailscale — **built 2026-08-25** | done |
+| 6 | Deploy: systemd unit + NixOS module, `.env`, Tailscale — **built 2026-08-25** | done |
 
 **~5.5d.** All six steps are done.
 
-**The box is NixOS**, which changes step 6 from what this row said. A hand-written
-`/etc/systemd/system/care-loopd.service` is not merely unidiomatic there — it is outside the
-generation, so it survives no rebuild, appears in no rollback, and is invisible to anyone reading
-`configuration.nix` to find out what the machine runs. `deploy/care-loopd.nix` is a normal NixOS
-module instead. Three things it has to get right that a ported unit would not:
+**What is deployed is ONE process.** Worth stating plainly, because the config files look bigger than
+the job: `care-loopd serve --supervise` serves the API, serves the built web app from the same origin
+and port, and runs the supervisor that spawns a `care-loopd run` child per queued run. No second
+daemon, no worker pool, no queue broker — the queue is a table in the same SQLite file. A deployment
+is one command, one env file, one port.
 
-- **`path` must be explicit.** There is no `/usr/bin`. The loop shells out to `git` for every worktree
-  and the opencode SDK launches a bare `opencode` from `PATH` for every judgment spawn — both fail at
-  *first use* rather than at startup, which is the worst time to find out.
-- **`opencode` must come from nixpkgs.** The upstream install script drops a dynamically-linked ELF in
-  `~/.opencode/bin` that cannot run on NixOS without an FHS shim.
-- **The secrets file must live outside the Nix store.** `/nix/store` is world-readable, so a token
-  written from a Nix expression is a token published to every user on the box. The module asserts
-  against a store path rather than trusting the reader to know that.
+The one non-obvious consequence is that **the children inherit the service's environment**, which is
+why a unit mentions tools the service never calls. The service does not run `git` or spawn `opencode`;
+every child does, and they take their `PATH`, credentials, and sandbox from the parent.
 
-`KillMode=process` is the one setting worth calling out. The default kills the whole cgroup on
-restart, which would abort every teammate's run and leave a stale lockfile and no `run.end` behind on
-every deploy — undoing §4's reconciliation exactly when it is needed.
+So the artifacts are a generic `deploy/care-loopd.service` — the reference, usable on any systemd
+distro and readable as documentation anywhere else — plus `deploy/care-loopd.nix` for the box we
+actually have. Copying a unit into `/etc/systemd/system` on NixOS puts it *outside the generation*: it
+survives no rebuild, appears in no rollback, and is invisible to anyone reading `configuration.nix` to
+find out what the machine runs.
+
+Only two settings genuinely differ on NixOS, and both fail late rather than loudly:
+
+- **`PATH` must be built from packages** — there is no `/usr/bin` — and `opencode` must come from
+  nixpkgs, because the upstream install script drops a dynamically-linked ELF that cannot run there
+  without an FHS shim.
+- **The secrets file must not be a store path.** `/nix/store` is world-readable, so a token written
+  from a Nix expression is published to every user on the box. The module asserts against it.
+
+`KillMode=process` is the most important line in either file, and it is not NixOS-specific at all. The
+systemd default kills the whole cgroup on restart, which would abort every teammate's run and leave a
+stale lockfile and no `run.end` behind on every deploy — undoing §4's reconciliation at exactly the
+moment it is needed.
 
 **Exposure is LAN now, Tailscale next** — `--host 0.0.0.0` with the firewall port open, which is plain
 HTTP over an unverified login and is the accepted trade to unblock the team. The Tailscale path is

@@ -1,0 +1,78 @@
+# care-loopd.service — the whole deployment, on any systemd system.
+#
+# There is exactly ONE long-lived process. `care-loopd serve --supervise` serves the API, serves the
+# built web app from the same origin and port, and runs the supervisor that spawns a `care-loopd run`
+# child per queued run. Keeping this alive is the entire job.
+#
+# Install:
+#   sudo cp care-loopd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now care-loopd
+# (On NixOS, do NOT do this — it lands outside the generation. Use care-loopd.nix, which declares the
+#  same unit natively.)
+#
+# Adjust the four paths below and nothing else.
+
+[Unit]
+Description=care-loop orchestration service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=care-loopd
+Group=care-loopd
+WorkingDirectory=/srv/skills/care-loop/orchestrator
+
+# GitHub token, the opencode provider key, Jira creds. chmod 600, owned by the service user.
+EnvironmentFile=/var/lib/care-loopd/.env
+
+# The layout of THIS MACHINE, as opposed to of a run. Without them the loop derives `~/Desktop/...`,
+# which is a fine guess on a laptop and nonsense on a server whose service user's home is a state
+# directory. The supervisor passes seed flags; it has no business knowing filesystem layout.
+Environment=CARE_MAIN_REPO=/srv/care_fe
+Environment=CARE_WORKTREE_ROOT=/var/lib/care-loopd/worktrees
+Environment=HOME=/var/lib/care-loopd
+# The end-of-run doctor opens self-improvement PRs against the skills repo. A deliberate local
+# action, never a side effect of a teammate's run.
+Environment=CARE_DOCTOR=0
+
+# The CHILDREN inherit this process's environment, and it is they — not the service — that shell out
+# to `git` and spawn `opencode` (the SDK launches a bare `opencode` from PATH). If your distro does
+# not have both on the default PATH for a system user, add them here.
+# Environment=PATH=/usr/bin:/bin:/usr/local/bin
+
+ExecStart=/usr/bin/node /srv/skills/care-loop/orchestrator/bin/care-loopd.mjs serve \
+  --supervise \
+  --port 3142 \
+  --host 0.0.0.0 \
+  --concurrency 2 \
+  --db /var/lib/care-loopd/runs/loops.db \
+  --runs-dir /var/lib/care-loopd/runs \
+  --main /srv/care_fe
+
+# THE setting to get right. The default (KillMode=control-group) kills every child too, so a restart
+# would abort every teammate's run and leave a stale lockfile and no `run.end` behind — on every
+# single deploy. Children are independent processes holding their own locks and journals; SIGTERM
+# stops the supervisor CLAIMING, and it re-adopts the survivors at boot.
+KillMode=process
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+
+StateDirectory=care-loopd
+StateDirectoryMode=0750
+
+# Kept to what does not break the workload: the service forks children that run git and talk to the
+# network, so this is the honest ceiling.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/care-loopd /srv/care_fe
+
+[Install]
+WantedBy=multi-user.target

@@ -1,95 +1,98 @@
-# Deploying care-loopd on NixOS
+# Deploying care-loopd
 
-Step 6 of [[PLAN-loop-service]]. The service is always on: it holds the queue, supervises children,
-serves the API and the web app, and is where teammates answer plan gates.
+## What you are deploying
 
-## Why a module and not a unit file
+**One process.** That is the whole shape, and it is worth being concrete because the config files look
+bigger than the job:
 
-On NixOS a hand-written `/etc/systemd/system/care-loopd.service` plus `systemctl enable` is outside
-the generation. It survives no rebuild, appears in no rollback, and is invisible to anyone reading
-`configuration.nix` to find out what the box runs. `care-loopd.nix` is a normal NixOS module —
-import it and set options.
+```
+care-loopd serve --supervise            ← the only long-lived process
+├── GET/POST /api/*                     ← the API
+├── static web/dist                     ← the web app, same origin, same port
+└── supervisor
+    └── spawns: care-loopd run --gate service --repo … --branch … --run-dir …
+```
 
-Three things it gets right that a ported unit gets wrong:
+The children are the same binary you run by hand at a terminal, given the same flags a person would
+type. There is no second daemon, no worker pool, and no queue broker — the queue is a table in the
+same SQLite file everything else uses.
 
-1. **`path` is explicit.** There is no `/usr/bin` here. The loop shells out to `git` for every
-   worktree, and the opencode SDK launches a bare `opencode` from `PATH` for every judgment spawn
-   (`opencode-runner.ts` → `@opencode-ai/sdk` → `cross-spawn("opencode", …)`). Both fail at *first
-   use* rather than at startup, which is the worst time to discover them.
-2. **`opencode` comes from nixpkgs.** The upstream install script drops a dynamically-linked ELF in
-   `~/.opencode/bin`, which will not run on NixOS without an FHS shim. If `pkgs.opencode` is not in
-   your channel yet, pin it with an overlay — do not fall back to the install script.
-3. **The secrets file is outside the Nix store.** `/nix/store` is world-readable, so a GitHub token
-   written from a Nix expression is a token published to every user on the machine. The module
-   asserts against a store path for `environmentFile`.
+**The children inherit the service's environment.** This is the one non-obvious consequence, and it
+explains why the unit mentions tools the service never calls: the *service* does not run `git` or
+spawn `opencode`, but every child does, and they get their `PATH`, their credentials, and their
+sandbox from the parent.
+
+So a deployment is three decisions:
+
+| | |
+|---|---|
+| **One command** | `care-loopd serve --supervise --port … --db … --runs-dir … --main …` |
+| **One env file** | GitHub token, opencode provider key, Jira creds — `chmod 600` (see `env.example`) |
+| **One port** | API and web app share it, which is why the session cookie needs no CORS |
+
+Everything below is per-platform glue over exactly that.
+
+## Pick your platform
+
+- **Any systemd distro** — `care-loopd.service`. Adjust four paths, `cp` to
+  `/etc/systemd/system/`, `systemctl enable --now care-loopd`.
+- **NixOS** — `care-loopd.nix`. Do *not* copy the unit file; on NixOS that lands outside the
+  generation, so it survives no rebuild and appears in no rollback.
+- **macOS / anything else** — there is no file for it, because there does not need to be. Keep the one
+  command alive with whatever the platform uses (a launchd `.plist`, `supervisord`, a `tmux` session
+  while you are trying it out) and give it the env file. The unit file is the reference for what to
+  set.
+
+### The two NixOS-specific differences
+
+Everything else in `care-loopd.nix` means what it means in `care-loopd.service`. These two do not:
+
+1. **`PATH` must be built from packages.** There is no `/usr/bin`. And `opencode` must come from
+   nixpkgs — the upstream install script drops a dynamically-linked ELF in `~/.opencode/bin` that
+   cannot run on NixOS without an FHS shim. If `pkgs.opencode` is not in your channel yet, pin it with
+   an overlay rather than falling back to the script.
+2. **The secrets file must not be a store path.** `/nix/store` is world-readable, so a token written
+   from a Nix expression is a token published to every user on the box. The module asserts against
+   this rather than trusting the reader to know it.
 
 ## Setup
 
-```nix
-# configuration.nix
-imports = [ /srv/skills/care-loop/deploy/care-loopd.nix ];
-
-services.care-loopd = {
-  enable      = true;
-  src         = "/srv/skills/care-loop";
-  mainRepo    = "/srv/care_fe";
-  host        = "0.0.0.0";   # LAN for now — see "Exposure" below
-  openFirewall = true;
-  concurrency = 2;
-};
-```
-
-Then, out of band:
-
 ```bash
-# the checkout the module points at
 sudo git clone https://github.com/<you>/skills /srv/skills
 sudo git clone https://github.com/ohcnetwork/care_fe /srv/care_fe
 sudo chown -R care-loopd:care-loopd /srv/care_fe
 
-# dependencies + the built web app. No native modules to compile — node:sqlite is built into Node.
+# deps + the built web app. No native modules — node:sqlite is built into Node.
 cd /srv/skills/care-loop/orchestrator && sudo -u care-loopd npm ci
 cd /srv/skills/care-loop/web         && sudo -u care-loopd npm ci && sudo -u care-loopd npm run build
 
-# secrets — 0600, owned by the service user, NEVER in the Nix store
+# secrets: 0600, owned by the service user
 sudo install -m600 -o care-loopd -g care-loopd \
   /srv/skills/care-loop/deploy/env.example /var/lib/care-loopd/.env
 sudo -e /var/lib/care-loopd/.env
 
-# the database the service refuses to start without
-sudo -u care-loopd care-loopd-ctl reindex --runs-dir /var/lib/care-loopd/runs
+# the database the service refuses to start without (creates the directory too)
+sudo -u care-loopd care-loopd reindex --runs-dir /var/lib/care-loopd/runs
 ```
 
-`care-loopd-ctl` is installed by the module — the CLI with the right `PATH` and working directory
-already set, so `reindex`, `status`, and a manual `run` do not need any of that reconstructed by
-hand.
+On NixOS the module installs `care-loopd-ctl`, which is the CLI with the right `PATH` and working
+directory already set — use it in place of `care-loopd` above.
 
 ## Exposure
 
-**Today: LAN.** `host = "0.0.0.0"` and `openFirewall = true`. This is plain HTTP with no
-authentication — the login is an unverified claim, and anything on the office network can act as
-anyone. That is the accepted trade to unblock the team, and it is precisely the reason to do the next
-part.
+**Today: LAN.** `--host 0.0.0.0`, firewall port open. Plain HTTP with no authentication — the login
+is an unverified claim and anything on the office network can act as anyone. That is the accepted
+trade to unblock the team, and it is exactly why the next part exists.
 
-**Next: Tailscale.** Real HTTPS, no public exposure, and it works from outside the office.
-
-```nix
-services.tailscale.enable = true;
-
-services.care-loopd = {
-  host         = "127.0.0.1";   # back to loopback
-  openFirewall = false;         # nothing on the LAN port any more
-};
-```
+**Next: Tailscale.** Real HTTPS, nothing public, works from outside the office.
 
 ```bash
 sudo tailscale up
 sudo tailscale serve --bg 3142
 ```
 
-`tailscale serve` terminates TLS, so flip `--secure-cookies` on at the same time — the session cookie
-should be marked `Secure` the moment there is TLS in front of it. It is wired as a `serve` flag; add
-it to the module's `ExecStart` when you make the switch.
+Then set `--host 127.0.0.1`, close the firewall port, and add `--secure-cookies` — the session cookie
+should be marked `Secure` the moment TLS is in front of it.
 
 ## Operating it
 
@@ -98,20 +101,20 @@ systemctl status care-loopd
 journalctl -u care-loopd -f
 ```
 
-**Restarts do not kill running loops.** `KillMode=process` is deliberate: children are independent
-processes holding their own locks and journals, and a deploy aborting every teammate's run would be
-far worse than a few unsupervised minutes. The supervisor re-adopts live children at boot and returns
-dead ones to `pending` (§4). Without `KillMode=process`, systemd would kill the whole cgroup and
-leave a stale lockfile and no `run.end` on every single deploy.
+**Restarts do not kill running loops.** `KillMode=process` is deliberate and is the single most
+important line in either file. The systemd default kills the whole cgroup, so a restart would abort
+every teammate's run and leave a stale lockfile and no `run.end` behind — on every deploy. Children
+are independent processes holding their own locks and journals; the supervisor re-adopts the
+survivors at boot and returns the dead ones to `pending`.
 
 **Backups matter more than they look.** `reindex` rebuilds the run tables from the journals, but
 `queue`, `gate_asks`, `users`, and `sessions` have no journal behind them. Losing `gate_asks` means
 someone re-approves a plan; losing `queue` means re-submitting a request. The service snapshots the
-database (`VACUUM INTO`) at boot and every six hours into `<stateDir>/runs/backups`, keeping seven.
+database (`VACUUM INTO`) at boot and every six hours into `<runs-dir>/backups`, keeping seven.
 
 **A run parked at a gate holds nothing.** It suspends after ~10 minutes, exits, and releases its
-concurrency slot; the answer puts it back in the queue (§7). So a plan left unanswered overnight
-costs nothing but the ask's 7-day expiry — and the header badge exists so it does not get that far.
+concurrency slot; the answer puts it back in the queue. A plan left unanswered overnight costs
+nothing but the ask's 7-day expiry — and the header badge exists so it does not get that far.
 
 ## Updating
 
@@ -122,5 +125,5 @@ cd ../web && sudo -u care-loopd npm ci && sudo -u care-loopd npm run build
 sudo systemctl restart care-loopd
 ```
 
-A schema bump is applied on the next open — migrations are keyed off `PRAGMA user_version` and are
-idempotent. Take a backup first anyway; the copy is a single file.
+Schema bumps apply on the next open — migrations key off `PRAGMA user_version` and are idempotent.
+Take a backup first anyway; it is a single file.

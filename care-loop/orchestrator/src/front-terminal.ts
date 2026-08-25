@@ -70,11 +70,29 @@ export function runSlug(repo: string, branch: string): string {
   return `${name}-${branch.replace(/\//g, "-")}`;
 }
 
+/**
+ * Where worktrees are created, and where the main checkout lives.
+ *
+ * Flag, then environment, then a laptop-shaped default. The middle rung exists for the deployed
+ * service: `~/Desktop` is a reasonable guess on the machine a person is sitting at and nonsense on a
+ * headless box, where the service user's home is a state directory. Setting it declaratively in the
+ * unit beats passing two more flags on every spawn — these are properties of the MACHINE, not of the
+ * run, and the supervisor has no business knowing them.
+ */
+function pathRoots(): { main: string; worktrees: string } {
+  const desktop = join(homedir(), "Desktop");
+  return {
+    main: process.env.CARE_MAIN_REPO?.trim() || join(desktop, "care_fe"),
+    worktrees: process.env.CARE_WORKTREE_ROOT?.trim() || desktop,
+  };
+}
+
 export function derivePaths(branch: string, flags: Flags): DerivedPaths {
   const repo = typeof flags.repo === "string" ? flags.repo : "ohcnetwork/care_fe";
   const slug = runSlug(repo, branch);
-  const mainRepoPath = typeof flags.main === "string" ? flags.main : join(homedir(), "Desktop/care_fe");
-  const worktree = typeof flags.worktree === "string" ? flags.worktree : join(homedir(), `Desktop/${slug}`);
+  const roots = pathRoots();
+  const mainRepoPath = typeof flags.main === "string" ? flags.main : roots.main;
+  const worktree = typeof flags.worktree === "string" ? flags.worktree : join(roots.worktrees, slug);
   const runDir = typeof flags["run-dir"] === "string" ? flags["run-dir"] : join(SKILL_DIR, "runs", slug);
   return { repo, mainRepoPath, worktree, runDir };
 }

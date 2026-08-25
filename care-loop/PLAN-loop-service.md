@@ -676,6 +676,11 @@ One `.env` on the box, bot-owned: GitHub token (`resolveToken`, `github.ts:136`)
 provider key, Jira creds. Children inherit. Nothing per-user is stored anywhere, which is the property
 that made bot-authoring worth the trade.
 
+On NixOS this carries one hard constraint: the file must be placed **out of band** — by hand, or with
+agenix/sops-nix — and never written from a Nix expression. Everything in `/nix/store` is
+world-readable, so `pkgs.writeText` on a token publishes it to every user on the machine. See
+`deploy/README.md`.
+
 ## 10. Testing
 
 - **Queue:** enqueue 5 with cap 2 ⇒ exactly 2 spawn; one finishes ⇒ exactly 1 more.
@@ -704,9 +709,32 @@ that made bot-authoring worth the trade.
 | 3 | `queue` table + `POST /api/runs` enqueue + the list join — **built 2026-08-20** | done |
 | 4 | Supervisor: claim, spawn, cap, reconcile, cancel — **built 2026-08-21** | done |
 | 5 | `gate_asks` (schema v6) + the gate transport + gate routes + new-run form + gate view — **built 2026-08-25** | done |
-| 6 | Deploy: systemd unit, `.env`, Tailscale | 0.5d |
+| 6 | Deploy: NixOS module, `.env`, Tailscale — **built 2026-08-25** | done |
 
-**~5.5d.** Steps 0–5 are done; only deploy remains.
+**~5.5d.** All six steps are done.
+
+**The box is NixOS**, which changes step 6 from what this row said. A hand-written
+`/etc/systemd/system/care-loopd.service` is not merely unidiomatic there — it is outside the
+generation, so it survives no rebuild, appears in no rollback, and is invisible to anyone reading
+`configuration.nix` to find out what the machine runs. `deploy/care-loopd.nix` is a normal NixOS
+module instead. Three things it has to get right that a ported unit would not:
+
+- **`path` must be explicit.** There is no `/usr/bin`. The loop shells out to `git` for every worktree
+  and the opencode SDK launches a bare `opencode` from `PATH` for every judgment spawn — both fail at
+  *first use* rather than at startup, which is the worst time to find out.
+- **`opencode` must come from nixpkgs.** The upstream install script drops a dynamically-linked ELF in
+  `~/.opencode/bin` that cannot run on NixOS without an FHS shim.
+- **The secrets file must live outside the Nix store.** `/nix/store` is world-readable, so a token
+  written from a Nix expression is a token published to every user on the box. The module asserts
+  against a store path rather than trusting the reader to know that.
+
+`KillMode=process` is the one setting worth calling out. The default kills the whole cgroup on
+restart, which would abort every teammate's run and leave a stale lockfile and no `run.end` behind on
+every deploy — undoing §4's reconciliation exactly when it is needed.
+
+**Exposure is LAN now, Tailscale next** — `--host 0.0.0.0` with the firewall port open, which is plain
+HTTP over an unverified login and is the accepted trade to unblock the team. The Tailscale path is
+written down and is a three-line change plus `--secure-cookies`.
 
 Step 5 landed as designed, with two corrections that only showed up once the FE drove it:
 

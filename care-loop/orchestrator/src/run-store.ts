@@ -77,7 +77,7 @@ export interface ArtifactRow {
 }
 
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Pragmas that are PER-CONNECTION and are NOT stored in the database file. Every connection that
@@ -250,6 +250,28 @@ CREATE TABLE IF NOT EXISTS queue (
   error        TEXT
 );
 
+-- v6 — the plan gate ([[PLAN-loop-service]] §7). Ask and answer are both ROWS, so a gate survives the
+-- service restarting AND the child exiting: the two sides never talk to each other, only to this table.
+CREATE TABLE IF NOT EXISTS gate_asks (
+  run_id       TEXT NOT NULL,
+  ask_id       TEXT NOT NULL,   -- 'interview:<n>' | 'approve:<n>' — PER ATTEMPT, never bare 'approve'
+  kind         TEXT NOT NULL,   -- interview | approve
+  payload      BLOB NOT NULL,   -- jsonb: PlanQuestion[] or ConsolidatedAsk
+  answer       BLOB,            -- jsonb: PlanAnswer[] or ApprovalDecision; NULL while pending
+  answered_by  TEXT,
+  asked_at     TEXT NOT NULL,
+  answered_at  TEXT,
+  cancelled_at TEXT,            -- the service revoking the ask; the child's poll raises on it
+  expires_at   TEXT NOT NULL,
+  PRIMARY KEY (run_id, ask_id)
+);
+
+-- "Does this run have an open question?" — asked by the claim path, the cancel path, and the FE's
+-- needs-you list. Partial, because a pending ask is a tiny minority of rows the moment the fleet has
+-- any history at all.
+CREATE INDEX IF NOT EXISTS idx_gate_pending ON gate_asks(run_id)
+  WHERE answer IS NULL AND cancelled_at IS NULL;
+
 -- The claim scan reads pending rows oldest-first and checks for a live row on the same branch.
 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status, enqueued_at);
 CREATE INDEX IF NOT EXISTS idx_queue_target ON queue(repo, branch, status);
@@ -329,8 +351,9 @@ export class SqliteRunStore implements RunStore {
     if (!cols.some((c) => c.name === "parity_error")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN parity_error TEXT");
     }
-    // v3 (`run_artifacts`), v4 (`users`/`sessions`) and v5 (`queue`) need no step here: they are NEW
-    // tables, so the `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on this connection.
+    // v3 (`run_artifacts`), v4 (`users`/`sessions`), v5 (`queue`) and v6 (`gate_asks`) need no step
+    // here: they are NEW tables, so the `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on
+    // this connection.
     // Only altering an EXISTING table needs code.
     // An upgraded db has the table but no rows until the next `reindex` backfills them from the
     // sidecars on disk — which is why artifacts stay rebuildable rather than joining `queue` and
@@ -490,10 +513,12 @@ export class SqliteRunStore implements RunStore {
    *  first step of `care-loopd reindex`'s rebuild-from-journals guarantee (PLAN-sqlite-run-store.md
    *  §8). Not part of the `RunStore` write-path interface: only reindex tooling needs a full clear.
    *
-   *  Scoped to the RUN tables on purpose. `queue`, `users`, and `sessions` are service-owned and have
-   *  no journal behind them, so deleting a queue row is unrecoverable where deleting a runs row is
-   *  not. They survive a reindex by not being named here, and `queue.run_id` is deliberately not a
-   *  foreign key, so the cascade cannot reach them either. */
+   *  Scoped to the RUN tables on purpose. `queue`, `gate_asks`, `users`, and `sessions` are
+   *  service-owned and have no journal behind them, so deleting one of their rows is unrecoverable
+   *  where deleting a runs row is not — losing `gate_asks` means a human re-approves a plan, and
+   *  losing `queue` means a request is re-submitted. They survive a reindex by not being named here,
+   *  and neither `queue.run_id` nor `gate_asks.run_id` is a foreign key, so the cascade cannot reach
+   *  them either. */
   clearAll(): void {
     this.db.exec("DELETE FROM runs");
   }

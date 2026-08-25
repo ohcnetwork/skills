@@ -14,6 +14,11 @@ import {
 import { api, qs } from "./client";
 import type {
   ArtifactBody,
+  EnqueueResult,
+  GateAnswer,
+  GateAsk,
+  NewRunRequest,
+  QueueRow,
   ArtifactSummary,
   EventPage,
   Facets,
@@ -86,7 +91,10 @@ export function useFacets(filters: RunFilters) {
 export function useRun(runId: string, opts: { refetch?: number } = {}) {
   return useQuery({
     queryKey: ["run", runId],
-    queryFn: () => api.get<{ run: RunRecord; queue: unknown }>(`/api/runs/${runId}`),
+    // Both halves are nullable: `run` is absent until a process writes a journal, `queue` is absent
+    // for a CLI-started run. A queued run is addressable before either exists, because the id is
+    // minted at enqueue.
+    queryFn: () => api.get<{ run: RunRecord | null; queue: QueueRow | null }>(`/api/runs/${runId}`),
     refetchInterval: opts.refetch,
   });
 }
@@ -96,8 +104,11 @@ export function useRun(runId: string, opts: { refetch?: number } = {}) {
  *  fleet already has a 327-event run. */
 const EVENTS_PAGE = 500;
 
-export function useRunEvents(runId: string, opts: { refetch?: number } = {}) {
+export function useRunEvents(runId: string, opts: { refetch?: number; enabled?: boolean } = {}) {
   return useInfiniteQuery({
+    // A queued run has an id but no journal, so this route 404s until a process writes one. Asking
+    // anyway would 404 on every poll of a perfectly healthy run.
+    enabled: opts.enabled ?? true,
     queryKey: ["run-events", runId],
     queryFn: ({ pageParam }) =>
       api.get<EventPage>(
@@ -111,10 +122,11 @@ export function useRunEvents(runId: string, opts: { refetch?: number } = {}) {
   });
 }
 
-export function useRunArtifacts(runId: string) {
+export function useRunArtifacts(runId: string, opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["run-artifacts", runId],
     queryFn: () => api.get<{ items: ArtifactSummary[] }>(`/api/runs/${runId}/artifacts`),
+    enabled: opts.enabled ?? true,
   });
 }
 
@@ -127,5 +139,77 @@ export function useArtifact(runId: string, sha: string | null) {
       api.get<ArtifactBody>(`/api/runs/${runId}/artifacts/${(sha ?? "").replace(/^sha256:/, "")}`),
     enabled: sha !== null,
     staleTime: Infinity, // content-addressed: a given sha never changes
+  });
+}
+
+// ── Queue + gate ─────────────────────────────────────────────────────────────────────────────────
+
+export function useQueue(opts: { refetch?: number } = {}) {
+  return useQuery({
+    queryKey: ["queue"],
+    queryFn: () => api.get<Page<QueueRow>>("/api/queue"),
+    refetchInterval: opts.refetch,
+  });
+}
+
+/** Every run with an open question. Polled, because the answer to "is anything waiting on me" has to
+ *  arrive without a reload — a gate nobody notices is a gate that expires, and expiry is the one
+ *  outcome that throws away finished planning work. */
+export function useGates(opts: { refetch?: number } = {}) {
+  return useQuery({
+    queryKey: ["gates"],
+    queryFn: () => api.get<{ items: GateAsk[]; total: number }>("/api/gates"),
+    refetchInterval: opts.refetch ?? 10_000,
+  });
+}
+
+export function useRunGate(runId: string, opts: { refetch?: number } = {}) {
+  return useQuery({
+    queryKey: ["gate", runId],
+    queryFn: () => api.get<{ ask: GateAsk | null }>(`/api/runs/${runId}/gate`),
+    refetchInterval: opts.refetch,
+  });
+}
+
+export function useCreateRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: NewRunRequest) => api.post<EnqueueResult>("/api/runs", body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["queue"] });
+    },
+  });
+}
+
+export function useAnswerGate(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (answer: GateAnswer) =>
+      api.post<{ run_id: string; ask_id: string; readmitted: boolean }>(
+        `/api/runs/${runId}/gate`,
+        answer,
+      ),
+    // The answer re-admits the run, so the queue and the fleet both change — and `gates` most of all,
+    // since this run just left the needs-you list.
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["gate", runId] });
+      void qc.invalidateQueries({ queryKey: ["gates"] });
+      void qc.invalidateQueries({ queryKey: ["queue"] });
+      void qc.invalidateQueries({ queryKey: ["run", runId] });
+    },
+  });
+}
+
+export function useCancelRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) =>
+      api.post<{ cancelled: boolean; signalled: boolean }>(`/api/runs/${runId}/cancel`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["queue"] });
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["gates"] });
+    },
   });
 }

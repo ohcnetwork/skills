@@ -3,7 +3,9 @@
 
 import type { ReactNode } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { useRun, useRunArtifacts, useRunEvents } from "../api/queries";
+import { useCancelRun, useRun, useRunArtifacts, useRunEvents, useRunGate } from "../api/queries";
+import { GateAskView } from "../components/GateAskView";
+import type { QueueRow } from "../api/types";
 import { AppHeader } from "../components/AppHeader";
 import { Pipeline } from "../components/Pipeline";
 import { Timeline } from "../components/Timeline";
@@ -15,8 +17,15 @@ const REFRESH_MS = 5_000;
 export function RunPage() {
   const { runId } = useParams({ from: "/runs/$runId" });
   const run = useRun(runId, { refetch: REFRESH_MS });
-  const events = useRunEvents(runId, { refetch: REFRESH_MS });
-  const artifacts = useRunArtifacts(runId);
+  // Both need a journal, which a queued run does not have yet — the id is minted at enqueue, long
+  // before any process exists. Asking anyway 404s on every poll of a perfectly healthy run.
+  const started = run.data?.run != null;
+  const events = useRunEvents(runId, { refetch: REFRESH_MS, enabled: started });
+  const artifacts = useRunArtifacts(runId, { enabled: started });
+  // Polled alongside the run: a gate can open at any point in the plan stage, and the person who
+  // needs to answer it is most likely already looking at this page.
+  const gate = useRunGate(runId, { refetch: REFRESH_MS });
+  const cancel = useCancelRun();
 
   if (run.isPending)
     return (
@@ -42,7 +51,37 @@ export function RunPage() {
     );
   }
 
+  const q = run.data!.queue;
   const r = run.data!.run;
+  // The gate renders in EVERY state, above everything else: it is the only thing on this page that
+  // is waiting on the reader, and a run can be parked on a question whether or not its journal has
+  // reached the database yet.
+  const gateBanner = gate.data?.ask ? (
+    <div className="mb-5">
+      <GateAskView ask={gate.data.ask} onSettled={() => void run.refetch()} />
+    </div>
+  ) : null;
+
+  // Enqueued but not started: the id exists because it is minted at enqueue, so this page is
+  // reachable before any process has written a journal. Showing the request beats showing a 404 for
+  // what is a completely normal few seconds of a run's life.
+  if (!r && q)
+    return (
+      <Shell>
+        {gateBanner}
+        <NotStartedYet q={q} onCancel={() => cancel.mutate(runId)} />
+      </Shell>
+    );
+  if (!r)
+    return (
+      <Shell>
+        <Card className="border-destructive p-6">
+          <h2 className="mb-2 text-base font-semibold">No such run</h2>
+          <Link to="/" className="text-primary hover:underline">← Back to the fleet</Link>
+        </Card>
+      </Shell>
+    );
+  const cancellable = q !== null && ["pending", "running", "awaiting_gate"].includes(q.status);
   return (
     <Shell>
       <div className="flex items-start justify-between gap-4">
@@ -52,8 +91,34 @@ export function RunPage() {
             {r.task || <span className="text-muted-foreground">no task recorded</span>}
           </p>
         </div>
-        <Pipeline step={r.step} />
+        <div className="flex flex-col items-end gap-2">
+          <Pipeline step={r.step} />
+          {cancellable && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive"
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate(runId)}
+            >
+              Cancel run
+            </Button>
+          )}
+        </div>
       </div>
+
+      {gateBanner}
+      {q?.status === "awaiting_gate" && !gate.data?.ask && (
+        <Card className="mb-5 border-warn/40 p-4 text-sm">
+          This run is suspended at a gate whose question is no longer open — it was cancelled or
+          expired.
+        </Card>
+      )}
+      {q?.status === "pending" && (
+        <Card className="mb-5 p-4 text-sm text-muted-foreground">
+          Queued. Nothing has started yet — the run id exists because it is minted at enqueue.
+        </Card>
+      )}
 
       <Card className="mb-5 grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3 p-3.5">
         <Meta k="Step">
@@ -150,5 +215,44 @@ function Meta({ k, children }: { k: string; children: ReactNode }) {
       <dt className="mb-0.5 text-[11px] text-muted-foreground">{k}</dt>
       <dd className="m-0 text-[13px]">{children}</dd>
     </div>
+  );
+}
+
+/** A run that has been queued but has not produced a journal yet. Everything shown here comes from
+ *  the queue row, which is the only half that exists at this point. */
+function NotStartedYet({ q, onCancel }: { q: QueueRow; onCancel: () => void }) {
+  return (
+    <>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="font-mono text-lg font-semibold tracking-tight">
+            {q.repo.split("/")[1]}-{q.branch.replace(/\//g, "-")}
+          </h1>
+          <p className="mb-4 mt-1 max-w-3xl">{q.task}</p>
+        </div>
+        <Badge tone={q.status === "pending" ? "warn" : "neutral"}>{q.status}</Badge>
+      </div>
+      <Card className="p-5 text-sm">
+        <p className="text-muted-foreground">
+          {q.status === "pending"
+            ? "Queued. The supervisor starts it when a slot frees on this branch — the timeline appears once it does."
+            : q.status === "awaiting_gate"
+              ? "Suspended on the question above. It holds no process and no slot; answering it puts the run back in the queue."
+              : `This run is ${q.status} and has no timeline.`}
+        </p>
+        <dl className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
+          <Meta k="Ticket">{q.ticket}</Meta>
+          <Meta k="Branch"><span className="font-mono text-xs">{q.branch}</span></Meta>
+          <Meta k="Requested by">{q.requestedBy}</Meta>
+          <Meta k="Attempts">{q.attempts}</Meta>
+        </dl>
+        {q.error && <p className="mt-4 text-destructive">{q.error}</p>}
+        {["pending", "running", "awaiting_gate"].includes(q.status) && (
+          <Button variant="outline" size="sm" className="mt-4 text-destructive" onClick={onCancel}>
+            Cancel run
+          </Button>
+        )}
+      </Card>
+    </>
   );
 }

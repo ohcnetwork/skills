@@ -5,7 +5,7 @@
 // into Slack, and browser back does what it looks like it does.
 
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { useFacets, useRuns } from "../api/queries";
+import { useFacets, useGates, useRuns } from "../api/queries";
 import type { RunFilters, RunSummary } from "../api/types";
 import { age, cost, duration } from "../format";
 import { Pipeline } from "../components/Pipeline";
@@ -20,8 +20,13 @@ const TD = "border-b border-border px-2.5 py-2.5 align-top";
 export function FleetPage() {
   const search = useSearch({ from: "/" });
   const navigate = useNavigate({ from: "/" });
-  const runs = useRuns(search, { refetch: REFRESH_MS });
-  const facets = useFacets(search);
+  const { gate: gateOnly, ...serverFilters } = search;
+  const runs = useRuns(serverFilters, { refetch: REFRESH_MS });
+  const facets = useFacets(serverFilters);
+  const gates = useGates();
+  // Gates live in their own table, so this is a client-side narrowing over one small polled list
+  // rather than a filter the runs query could carry.
+  const waiting = new Set((gates.data?.items ?? []).map((a) => a.run_id));
 
   const setFilters = (next: Partial<RunFilters>): void => {
     void navigate({
@@ -69,9 +74,11 @@ export function FleetPage() {
             </tr>
           </thead>
           <tbody>
-            {runs.data.items.map((r) => (
-              <RunRow key={r.runId} run={r} />
-            ))}
+            {runs.data.items
+              .filter((r) => !gateOnly || waiting.has(r.runId))
+              .map((r) => (
+                <RunRow key={r.runId} run={r} waiting={waiting.has(r.runId)} />
+              ))}
           </tbody>
         </table>
       )}
@@ -83,7 +90,7 @@ export function FleetPage() {
   );
 }
 
-function RunRow({ run }: { run: RunSummary }) {
+function RunRow({ run, waiting }: { run: RunSummary; waiting: boolean }) {
   const num = cn(TD, "text-right whitespace-nowrap font-mono text-[13px]");
   return (
     <tr className={cn("hover:bg-muted/50", run.stale && "opacity-55")}>
@@ -103,6 +110,8 @@ function RunRow({ run }: { run: RunSummary }) {
               parity
             </Badge>
           )}
+          {/* The one row state a person, rather than the fleet, is the bottleneck for. */}
+          {waiting && <Badge tone="warn">needs you</Badge>}
         </div>
       </td>
       <td className={TD}>

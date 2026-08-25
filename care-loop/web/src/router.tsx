@@ -14,6 +14,7 @@ import {
 import { AuthGate } from "./components/AuthGate";
 import { FleetPage } from "./routes/fleet";
 import { RunPage } from "./routes/run";
+import { NewRunPage } from "./routes/new-run";
 import type { ListOrder, RunFilters } from "./api/types";
 
 const ORDERS: ListOrder[] = ["started_at", "updated_at", "cost_usd", "duration_ms"];
@@ -53,6 +54,9 @@ const fleetRoute = createRoute({
       stale: raw.stale === true || raw.stale === "true" ? true : undefined,
       order: ORDERS.includes(order as ListOrder) ? (order as ListOrder) : undefined,
       dir: dir === "asc" || dir === "desc" ? dir : undefined,
+      // Not a server filter: the API has no notion of "has an open gate". Narrowed client-side from
+      // the needs-you list, which is one small polled request either way.
+      gate: raw.gate === true || raw.gate === "true" ? true : undefined,
     };
   },
   component: FleetPage,
@@ -66,7 +70,13 @@ const runRoute = createRoute({
   component: RunPage,
 });
 
-const routeTree = rootRoute.addChildren([fleetRoute, runRoute]);
+const newRunRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/new",
+  component: NewRunPage,
+});
+
+const routeTree = rootRoute.addChildren([fleetRoute, newRunRoute, runRoute]);
 
 export const router = createRouter({ routeTree });
 

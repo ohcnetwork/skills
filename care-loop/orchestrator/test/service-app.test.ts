@@ -788,6 +788,29 @@ test("cancel is attributed and 404s on a run the queue never saw", async () => {
   }
 });
 
+test("a queued run is addressable before any process exists for it", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+
+    // Minting the run id at enqueue is what lets POST answer synchronously — so the id is a valid
+    // address BEFORE a journal exists, and the new-run form navigates straight to it. 404 here made
+    // a successful enqueue look like a failure for the first few seconds of every run's life.
+    const detail = await h.get(`/api/runs/${runId}`, jar);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.run, null, "no journal yet");
+    assert.equal(detail.body.queue.status, "pending");
+    assert.equal(detail.body.queue.task, REQ.task);
+
+    // Neither half existing is still a 404 — that is a genuinely unknown id.
+    assert.equal((await h.get(`/api/runs/${mintRunId()}`, jar)).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
 test("GET /api/runs/:id/gate answers null for a run with no open question", async () => {
   const h = await harness();
   try {
@@ -981,12 +1004,11 @@ test("GET /api/runs/:id carries the queue row, and null for a CLI run that never
     const jar = await signedIn(h);
     // a run that exists only because the CLI made it — a real and permanent case, not a gap
     const cliRun = seed(h.store, "care_fe-cli");
-    assert.equal((await h.get(`/api/runs/${cliRun}`, jar)).body.queue, null);
-
-    // a queued run has no `runs` row until the child starts, so the detail route 404s on it — the
-    // queue is where it lives until then
-    const queued = await h.post("/api/runs", REQ, jar);
-    assert.equal((await h.get(`/api/runs/${queued.body.run_id}`, jar)).status, 404);
+    const detail = await h.get(`/api/runs/${cliRun}`, jar);
+    assert.equal(detail.body.queue, null);
+    assert.equal(detail.body.run.runId, cliRun);
+    // The mirror case — a queued run with no `runs` row — has its own test above. BOTH halves are
+    // nullable, which is why neither is "the record" and the other a decoration.
   } finally {
     await h.close();
   }

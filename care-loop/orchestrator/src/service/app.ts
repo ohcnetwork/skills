@@ -468,10 +468,18 @@ export function buildApp(deps: AppDeps): Express {
     route((req, res) => {
       const id = runIdParam(req);
       const run = deps.index.get(id);
-      if (!run) throw notFound("run_not_found", `no run ${id}`);
-      // The queue row is null for a run started from the CLI, which never went through the service.
-      // That is a real and permanent case, not a gap — the child is the same binary either way.
-      res.json({ run, queue: deps.queue.byRunId(id) });
+      const queue = deps.queue.byRunId(id);
+      // EITHER half may legitimately be absent, which is why both are nullable rather than one being
+      // the record and the other a decoration:
+      //
+      //  - `queue` is null for a run started from the CLI, which never went through the service. A
+      //    permanent case, not a gap — the child is the same binary either way.
+      //  - `run` is null for a run that has been enqueued but has not started. Minting the run id at
+      //    enqueue is what lets `POST /api/runs` answer synchronously, so the id is addressable
+      //    BEFORE any process exists to write a journal — and the new-run form navigates straight
+      //    here. Returning 404 for that made a successful enqueue look like a failure.
+      if (!run && !queue) throw notFound("run_not_found", `no run ${id}`);
+      res.json({ run, queue });
     }),
   );
 

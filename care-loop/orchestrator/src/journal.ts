@@ -37,6 +37,10 @@ export type EventType =
   | "step.exit"
   | "gate.asked"
   | "gate.answered"
+  // The stage stopped at an unanswered gate and the process exited to free its concurrency slot
+  // ([[PLAN-loop-service]] §7). A pause, not a terminus: no `run.end` follows it, and the next
+  // journal event is written by the run resuming after the human answers.
+  | "gate.suspended"
   | "plan.approved"
   | "spawn.start"
   | "spawn.result"

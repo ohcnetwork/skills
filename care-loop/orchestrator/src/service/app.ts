@@ -18,6 +18,7 @@ import {
   type SessionStore,
 } from "./auth.js";
 import { bool, int, str, strList } from "./query.js";
+import type { GateAsk, GateStore } from "./gate-store.js";
 import {
   LIVE_STATUSES,
   QUEUE_STATUSES,
@@ -39,6 +40,9 @@ export interface AppDeps {
   index: RunIndex;
   sessions: SessionStore;
   queue: QueueStore;
+  /** The plan gate (§7). The child posts asks and polls for answers against the same table; this side
+   *  only ever reads an ask and writes an answer. */
+  gates: GateStore;
   /** Set once a supervisor is running (step 4). Until then `POST /api/runs` refuses rather than
    *  banking work nothing will ever execute — a queued row with no consumer is a silent black hole,
    *  and the person who asked for the run has no way to tell it apart from a slow start. */
@@ -60,6 +64,47 @@ export interface AppDeps {
   /** Built frontend to serve (`web/dist`). When set, the API and the app share ONE origin and one
    *  port — which is what lets the session cookie be plain same-origin with no CORS anywhere. */
   staticDir?: string;
+}
+
+/** The gate answer for an `approve` ask. Validated here rather than trusted, because it reaches
+ *  `runPlan`'s decision branch — where `approve` authorizes a push to origin. */
+function parseDecision(body: Record<string, unknown>): {
+  decision: "approve" | "reject" | "amend";
+  amendment?: string;
+} {
+  const decision = body.decision;
+  if (decision === "approve" || decision === "reject") return { decision };
+  if (decision === "amend") {
+    const amendment = typeof body.amendment === "string" ? body.amendment.trim() : "";
+    // An empty amendment is what the terminal gate re-prompts for: it would send the planner off to
+    // re-draft against no instruction, burning a model call to produce the same plan.
+    if (!amendment) throw badRequest("bad_amendment", "amend requires a non-empty amendment");
+    return { decision, amendment };
+  }
+  throw badRequest("bad_decision", "decision must be approve, reject, or amend");
+}
+
+/** The gate answer for an `interview` ask: one entry per question, correlated by the stable
+ *  `PlanQuestion.id` the child posted. */
+function parseAnswers(
+  body: Record<string, unknown>,
+  questions: { id: string }[],
+): { id: string; answer: string }[] {
+  const raw = body.answers;
+  if (!Array.isArray(raw)) throw badRequest("bad_request", "answers must be an array");
+  const byId = new Map<string, string>();
+  for (const entry of raw as Record<string, unknown>[]) {
+    if (typeof entry?.id !== "string" || typeof entry?.answer !== "string")
+      throw badRequest("bad_request", "each answer needs a string id and a string answer");
+    byId.set(entry.id, entry.answer);
+  }
+  // Every question, in the order asked. A partial set would reach the planner as a silently shorter
+  // interview rather than as an error, and the plan would be drafted against the gaps.
+  return questions.map((q) => {
+    const answer = byId.get(q.id);
+    if (answer === undefined) throw badRequest("bad_request", `no answer for question '${q.id}'`);
+    return { id: q.id, answer };
+  });
 }
 
 /** Wrap a handler so a thrown ApiError becomes its response. Express 5 forwards rejected promises to
@@ -350,6 +395,62 @@ export function buildApp(deps: AppDeps): Express {
       // after SIGTERM. Claiming completion here would be a lie the FE would render as a finished run
       // seconds before the process actually stops.
       res.status(202).json({ run_id: id, cancelled: true, signalled });
+    }),
+  );
+
+  const askView = (a: GateAsk): Record<string, unknown> => ({
+    run_id: a.runId,
+    ask_id: a.askId,
+    kind: a.kind,
+    payload: a.payload,
+    asked_at: a.askedAt,
+    expires_at: a.expiresAt,
+  });
+
+  app.get(
+    "/api/gates",
+    route((_req, res) => {
+      // The needs-you list. Not in §6's original table, but a gate that nobody sees is a gate that
+      // expires — and expiry is the one outcome here that throws away finished planning work.
+      const items = deps.gates.pendingRuns();
+      res.json({ items: items.map(askView), total: items.length });
+    }),
+  );
+
+  app.get(
+    "/api/runs/:id/gate",
+    route((req, res) => {
+      const id = runIdParam(req);
+      const ask = deps.gates.pending(id);
+      // `null`, not 404: "this run has no open question" is a normal answer to a poll, and the FE
+      // asks it of every run it shows. A 404 would make the ordinary case look like an error.
+      res.json({ ask: ask ? askView(ask) : null });
+    }),
+  );
+
+  app.post(
+    "/api/runs/:id/gate",
+    route((req, res) => {
+      // Attributed, and separately from `requested_by`: the person who approves a plan is not always
+      // the person who requested it, and at a gate that distinction is the interesting one.
+      const answeredBy = requireUser(req);
+      const id = runIdParam(req);
+      const ask = deps.gates.pending(id);
+      if (!ask) throw notFound("gate_not_found", `run ${id} has no open gate`);
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const answer =
+        ask.kind === "approve"
+          ? parseDecision(body)
+          : parseAnswers(body, ask.payload as { id: string }[]);
+
+      const { answered, readmitted } = deps.gates.answerAndReadmit(id, ask.askId, answer, answeredBy);
+      // Two people had the gate view open. The loser must learn they did not unblock the run rather
+      // than believe they did.
+      if (!answered) throw new ApiError(409, "gate_already_settled", `gate ${ask.askId} was already answered or cancelled`);
+
+      // 202: the answer is committed, but the run restarts on the supervisor's next tick.
+      res.status(202).json({ run_id: id, ask_id: ask.askId, readmitted });
     }),
   );
 

@@ -12,7 +12,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SqliteRunStore } from "../src/run-store.ts";
 import { QueueStore, type QueueRow } from "../src/service/queue.ts";
+import { GateStore } from "../src/service/gate-store.ts";
 import {
+  EXIT_GATE_SUSPENDED,
   Supervisor,
   childArgv,
   childEnv,
@@ -101,6 +103,9 @@ test("the child's argv is the command a human would type — no queue, no db", (
   // All four seed fields as flags is what makes the child NON-interactive: a missing one would put it
   // in the questionnaire, which on a spawned child with no TTY is an error, not a prompt.
   assert.equal(argv.includes("--queue"), false, "the child never learns a queue exists");
+  // The one flag that is not something a human would type: the gate transport. Everything else about
+  // the child is identical to a terminal run, which is the property §4 protects.
+  assert.equal(argv[argv.indexOf("--gate") + 1], "service");
 });
 
 test("the child adopts the service's run id and never opens a self-improvement PR", () => {
@@ -314,6 +319,109 @@ test("a re-adopted child that exits is closed out — the lock says whether it w
   assert.equal(failed.status, "failed");
   assert.match(failed.error!, /died holding its lock/);
   assert.equal(sup.activeCount, 0, "the slots came back");
+  sup.stop();
+});
+
+test("a child that exits 75 is SUSPENDED, not finished — and its slot comes back", () => {
+  const { queue, runsDir } = fixture();
+  const { spawn, children } = fakeSpawner();
+  const parked = queue.enqueue({ ...REQ, branch: "a" });
+  queue.enqueue({ ...REQ, branch: "b" });
+
+  const sup = new Supervisor({ queue, runsDir, concurrency: 1, spawn, log: () => {} });
+  sup.start();
+  assert.equal(children.length, 1, "the cap is 1");
+
+  // EX_TEMPFAIL: "I am not done, and nothing is wrong" — the child parked at a human gate and exited
+  // so its slot could go to someone else. A cap of 2 that two people going home can exhaust is not a
+  // cap, it is a deadlock with a countdown.
+  children[0].exit(EXIT_GATE_SUSPENDED);
+  assert.equal(queue.byRunId(parked.runId)?.status, "awaiting_gate");
+  assert.equal(sup.snapshot().some((r) => r.runId === parked.runId), false, "no longer supervised");
+  assert.equal(children.length, 2, "the freed slot went straight to the next branch");
+
+  // Live but NOT claimable: nothing will pick it up until a human answers.
+  sup.tick();
+  assert.equal(queue.byRunId(parked.runId)?.status, "awaiting_gate");
+  sup.stop();
+});
+
+test("a suspended run still owns its branch — it holds the run dir with no process", () => {
+  const { queue, runsDir } = fixture();
+  const { spawn, children } = fakeSpawner();
+  const parked = queue.enqueue({ ...REQ, branch: "feat-a" });
+  const behind = queue.enqueue({ ...REQ, branch: "feat-a", ticket: "ENG-2" });
+
+  const sup = new Supervisor({ queue, runsDir, concurrency: 2, spawn, log: () => {} });
+  sup.start();
+  children[0].exit(EXIT_GATE_SUSPENDED);
+  sup.tick();
+
+  // The run dir is ${repo}-${branch}, so a second run on this branch is not a competing run — it IS
+  // this one, mid-flight, waiting on a person.
+  assert.equal(children.length, 1, "the queued sibling must not start on top of it");
+  assert.equal(queue.byRunId(behind.runId)?.status, "pending");
+
+  // The answer re-admits it, and being the older row it claims first.
+  const gates = new GateStore(queue["db"] as never);
+  gates.ask({ runId: parked.runId, askId: "approve:x", kind: "approve", payload: {} });
+  gates.answerAndReadmit(parked.runId, "approve:x", { decision: "approve" }, "octocat");
+  assert.equal(queue.byRunId(parked.runId)?.status, "pending");
+  sup.tick();
+  assert.equal(children.length, 2);
+  assert.equal(children[1].req.row.runId, parked.runId);
+  sup.stop();
+});
+
+test("cancelling a run parked at a gate revokes the ask rather than reaching for a signal", () => {
+  const { queue, runsDir, db } = fixture();
+  const { spawn, children } = fakeSpawner();
+  const gates = new GateStore(db);
+  const row = queue.enqueue(REQ);
+  const sup = new Supervisor({ queue, runsDir, gates, spawn, gateGraceMs: 10, log: () => {} });
+  sup.start();
+  gates.ask({ runId: row.runId, askId: "approve:x", kind: "approve", payload: {} });
+
+  const result = sup.cancel(row.runId);
+  assert.equal(result.cancelled, true);
+  // NOT signalled: a signalled child skips its `finally`, leaving the lockfile behind, writing no
+  // run.end, and leaving the run's last journal event a question nobody will answer.
+  assert.equal(result.signalled, false);
+  assert.deepEqual(children[0].signals, []);
+  assert.equal(gates.pending(row.runId), null, "the ask is revoked — the child's next poll raises");
+  sup.stop();
+});
+
+test("a cooperative cancel still escalates when the child does not unwind", async () => {
+  const { queue, runsDir, db } = fixture();
+  const { spawn, children } = fakeSpawner();
+  const gates = new GateStore(db);
+  const row = queue.enqueue(REQ);
+  const sup = new Supervisor({ queue, runsDir, gates, spawn, gateGraceMs: 5, killGraceMs: 5, log: () => {} });
+  sup.start();
+  gates.ask({ runId: row.runId, askId: "approve:x", kind: "approve", payload: {} });
+  sup.cancel(row.runId);
+
+  // Cooperation is the opener, not the whole plan: a child wedged inside a model call never notices.
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(children[0].signals.slice(0, 1), ["SIGTERM"]);
+  sup.stop();
+});
+
+test("cancelling an already-suspended run needs no process at all", () => {
+  const { queue, runsDir, db } = fixture();
+  const { spawn, children } = fakeSpawner();
+  const gates = new GateStore(db);
+  const row = queue.enqueue(REQ);
+  const sup = new Supervisor({ queue, runsDir, gates, spawn, log: () => {} });
+  sup.start();
+  gates.ask({ runId: row.runId, askId: "approve:x", kind: "approve", payload: {} });
+  children[0].exit(EXIT_GATE_SUSPENDED);
+  assert.equal(queue.byRunId(row.runId)?.status, "awaiting_gate");
+
+  assert.deepEqual(sup.cancel(row.runId), { cancelled: true, signalled: false });
+  assert.equal(queue.byRunId(row.runId)?.status, "cancelled");
+  assert.equal(gates.pending(row.runId), null);
   sup.stop();
 });
 

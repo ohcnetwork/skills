@@ -19,6 +19,18 @@ import { fileURLToPath } from "node:url";
 import { defaultIsAlive, inspectLock } from "../lock.js";
 import { runSlug } from "../front-terminal.js";
 import type { QueueRow, QueueStore } from "./queue.js";
+import type { GateStore } from "./gate-store.js";
+
+/**
+ * The child's way of saying "I am not done, and nothing is wrong" — it parked at a human gate and
+ * exited so its concurrency slot could go to someone else (§7).
+ *
+ * An exit code, because it is the only channel a child has to the supervisor that does not require it
+ * to know a queue exists. `EX_TEMPFAIL` from sysexits, which is close enough to the meaning to be
+ * worth borrowing rather than inventing a number. A run started from a terminal uses the readline
+ * gate, never suspends, and never emits it.
+ */
+export const EXIT_GATE_SUSPENDED = 75;
 
 /** The subset of `ChildProcess` the supervisor uses. Narrow on purpose: it is the entire seam a test
  *  has to fake, and it keeps the tests free of real processes. */
@@ -41,6 +53,9 @@ export type SpawnPort = (req: SpawnRequest) => SupervisedChild;
 
 export interface SupervisorOptions {
   queue: QueueStore;
+  /** Optional: without it, cancelling a run parked at a gate falls back to SIGTERM, which works but
+   *  leaves the lockfile behind and writes no `run.end`. */
+  gates?: GateStore;
   /** Where run directories live. Must match the `--run-dir` the child is given, and therefore the
    *  same `${repo}-${branch}` convention `derivePaths` uses — hence `runSlug`, shared with it. */
   runsDir: string;
@@ -52,6 +67,9 @@ export interface SupervisorOptions {
   pollMs?: number;
   /** Grace between `SIGTERM` and `SIGKILL` on cancel. */
   killGraceMs?: number;
+  /** Grace for a gate-parked child to notice a revoked ask and unwind on its own, before falling back
+   *  to signals. Needs to comfortably exceed the child's gate poll interval. */
+  gateGraceMs?: number;
   spawn?: SpawnPort;
   /** Injected for tests. */
   now?: () => Date;
@@ -97,6 +115,10 @@ export function childArgv(row: QueueRow, runDir: string, opts: { mainRepoPath?: 
     "--summary", row.summary,
     "--run-dir", runDir,
     "--requested-by", row.requestedBy,
+    // Swap the readline dialog for the row-backed gate (§7). Without it the child prints the approval
+    // prompt to a `stdio: "ignore"` stdin and fails — which is the correct failure, but not a useful
+    // one for a run nobody is sitting in front of.
+    "--gate", "service",
   ];
   if (opts.mainRepoPath) argv.push("--main", opts.mainRepoPath);
   return argv;
@@ -122,7 +144,10 @@ export function childEnv(row: QueueRow, extra: Record<string, string> = {}): Rec
 
 export class Supervisor {
   private readonly o: Required<
-    Pick<SupervisorOptions, "queue" | "runsDir" | "concurrency" | "pollMs" | "killGraceMs">
+    Pick<
+      SupervisorOptions,
+      "queue" | "runsDir" | "concurrency" | "pollMs" | "killGraceMs" | "gateGraceMs"
+    >
   > &
     SupervisorOptions;
   private readonly active = new Map<number, SupervisedRun>();
@@ -134,6 +159,7 @@ export class Supervisor {
       concurrency: options.concurrency ?? 2,
       pollMs: options.pollMs ?? 2_000,
       killGraceMs: options.killGraceMs ?? 30_000,
+      gateGraceMs: options.gateGraceMs ?? 10_000,
       ...options,
       queue: options.queue,
       runsDir: options.runsDir,
@@ -353,6 +379,12 @@ export class Supervisor {
     // of it, not a second outcome to record.
     if (entry.cancelling || current?.status === "cancelled") {
       this.log(`${entry.runId} exited after cancel (code ${code}, signal ${signal})`);
+    } else if (code === EXIT_GATE_SUSPENDED) {
+      // Parked on a human, not finished. The row stays live but stops being claimable, and the
+      // answer re-admits it — which is what keeps a cap of 2 from being exhausted by two people who
+      // went home.
+      this.o.queue.suspend(entry.queueId);
+      this.log(`${entry.runId} suspended at a gate — slot released`);
     } else if (code === 0) {
       this.o.queue.finish(entry.queueId, "done", null, this.o.now?.());
       this.log(`${entry.runId} finished`);
@@ -382,25 +414,55 @@ export class Supervisor {
     const cancelled = this.o.queue.cancel(runId, this.o.now?.());
     if (!cancelled) return { cancelled: false, signalled: false };
 
+    // Revoke any open ask FIRST, whether or not a process is alive. For a suspended run this is the
+    // whole of cancellation; for a live one it is the cooperative half, and it must be in place
+    // before the signal so a child that notices in time can unwind through its normal path.
+    const revoked = this.o.gates?.cancel(runId, this.o.now?.()) ?? 0;
+
     const entry = this.active.get(row.id);
     if (!entry) {
-      this.log(`cancelled ${runId} (pending — nothing to kill)`);
+      this.log(
+        `cancelled ${runId} (${row.status} — no process${revoked ? `, ${revoked} gate ask revoked` : ""})`,
+      );
       return { cancelled: true, signalled: false };
     }
     entry.cancelling = true;
-    const signalled = this.signal(entry, "SIGTERM");
+
+    // A child parked at a gate is polling a row we just wrote, so give it a moment to see it: a
+    // cooperative exit releases the lock and writes `run.end`, where a signal skips the `finally`
+    // and leaves the run's last journal event a question nobody will answer. A child that is NOT
+    // parked has nothing to notice, so it pays none of this.
+    if (revoked > 0) {
+      this.log(`cancelled ${runId} — revoked ${revoked} gate ask, waiting ${this.o.gateGraceMs}ms`);
+      entry.killTimer = setTimeout(() => {
+        if (this.active.has(entry.queueId)) {
+          this.log(`${runId} did not unwind cooperatively — SIGTERM`);
+          this.escalate(entry);
+        }
+      }, this.o.gateGraceMs);
+      entry.killTimer.unref?.();
+      return { cancelled: true, signalled: false };
+    }
+
     // SIGTERM lets the child finish its journal write and release its lock; SIGKILL after the grace
     // period is for a child wedged inside a model call, which is the realistic hang. A killed run is
     // a resumable one — that is what crash-only buys.
+    const signalled = this.escalate(entry);
+    this.log(`cancelled ${runId} (running — SIGTERM sent to pid ${entry.pid})`);
+    return { cancelled: true, signalled };
+  }
+
+  /** SIGTERM now, SIGKILL after the grace — the escalation both cancel paths converge on. */
+  private escalate(entry: SupervisedRun): boolean {
+    const signalled = this.signal(entry, "SIGTERM");
     entry.killTimer = setTimeout(() => {
       if (this.active.has(entry.queueId)) {
-        this.log(`${runId} did not exit in ${this.o.killGraceMs}ms — SIGKILL`);
+        this.log(`${entry.runId} did not exit in ${this.o.killGraceMs}ms — SIGKILL`);
         this.signal(entry, "SIGKILL");
       }
     }, this.o.killGraceMs);
     entry.killTimer.unref?.();
-    this.log(`cancelled ${runId} (running — SIGTERM sent to pid ${entry.pid})`);
-    return { cancelled: true, signalled };
+    return signalled;
   }
 
   /** Signal a child we spawned (handle) or one we re-adopted after a restart (pid only). */

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-import { Journal } from "./journal.js";
+import { Journal, type JournalEvent } from "./journal.js";
 import { projectAndWrite, projectState } from "./state.js";
 import { renderEvent } from "./render.js";
 import { withLock } from "./lock.js";
@@ -43,6 +43,17 @@ import { openRunStore, setActiveRunStore, SqliteRunStore } from "./run-store.js"
 import { reindexRuns } from "./reindex.js";
 import { resolveRunId } from "./run-context.js";
 import { startService } from "./service/serve.js";
+import { GateStore } from "./service/gate-store.js";
+import { servicePlanGate } from "./service-gate.js";
+import { EXIT_GATE_SUSPENDED } from "./service/supervisor.js";
+import type {
+  ApprovalDecision,
+  ConsolidatedAsk,
+  PlanAnswer,
+  PlanGate,
+  PlanQuestion,
+  PlanRestore,
+} from "./plan-gate.js";
 
 const RUNS_ROOT = join(__dirname, "../../runs");
 const DB_PATH = join(RUNS_ROOT, "loops.db");
@@ -682,6 +693,48 @@ async function cmdSalvage(
   await cmdResume(runDir, flags);
 }
 
+/**
+ * The gate the loop-service spawns its children with (`--gate service`), plus whatever a previous
+ * attempt left to resume ([[PLAN-loop-service]] §7).
+ *
+ * The child polls SQLite, not the API: it already opens this database to write every run event, so
+ * the gate needs no HTTP client, no service URL, and no credentials here — and a gate survives the
+ * service being restarted or redeployed, because neither side holds state the other needs.
+ */
+function serviceGateFor(
+  runDir: string,
+  events: JournalEvent[],
+): { gate: PlanGate; restore: PlanRestore | null } {
+  const runId = resolveRunId(runDir);
+  const store = new GateStore(new SqliteRunStore(DB_PATH).raw());
+  const gate = servicePlanGate({ runId, store });
+
+  // Resume only from a SUSPENSION, and only if it is still the journal's last word: a `gate.asked`
+  // after it means the run already moved on.
+  const last = [...events].reverse().find((e) => e.event === "gate.suspended");
+  const movedOn = last
+    ? events.indexOf(last) < events.map((e) => e.event).lastIndexOf("plan.approved")
+    : true;
+  if (!last || movedOn) return { gate, restore: null };
+
+  const askId = String((last.data as { ask_id?: unknown })?.ask_id ?? "");
+  const ask = askId ? store.get(runId, askId) : null;
+  if (!ask) return { gate, restore: null };
+
+  const interview = store.latestOfKind(runId, "interview");
+  return {
+    gate,
+    restore: {
+      kind: ask.kind,
+      askId: ask.askId,
+      questions: (interview?.payload ?? []) as PlanQuestion[],
+      answers: (interview?.answer ?? []) as PlanAnswer[],
+      ask: ask.kind === "approve" ? (ask.payload as ConsolidatedAsk) : undefined,
+      answer: (ask.answer ?? undefined) as ApprovalDecision | undefined,
+    },
+  };
+}
+
 async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   // `--pr <n>` salvages an existing PR instead of planning a new change.
   if (flags.pr !== undefined && flags.pr !== true) {
@@ -693,7 +746,7 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
     await cmdSalvage(pr, flags);
     return;
   }
-  const { input: seed, gate } = await terminalFront(flags).resolve();
+  const { input: seed, gate: terminalPlanGate } = await terminalFront(flags).resolve();
   const input = await enrichPlanInput(seed, ticketFetcherFromEnv(flags));
   const modelsFile =
     typeof flags.models === "string" ? flags.models : undefined;
@@ -708,7 +761,24 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   );
   console.log(`  run dir: ${input.runDir}\n`);
 
-  const plan = await runPlan({ input, planner, gate });
+  // `--gate service` swaps the readline dialog for the row-backed one. Everything else about the
+  // child is identical to a run typed at a terminal — that is the property §4 protects.
+  const useService = flags.gate === "service";
+  const prior = existsSync(join(input.runDir, "journal.jsonl"))
+    ? journalOf(input.runDir).read().events
+    : [];
+  const { gate, restore } = useService
+    ? serviceGateFor(input.runDir, prior)
+    : { gate: terminalPlanGate, restore: null };
+  if (restore) console.log(`  resuming at the ${restore.kind} gate (${restore.askId})\n`);
+
+  const plan = await runPlan({ input, planner, gate, restore });
+  if (plan.outcome === "suspended") {
+    // Not a failure: the plan is drafted, the artifacts are written, and the ask is open. Exiting is
+    // how the run stops holding a concurrency slot while it waits on a person.
+    console.log(`\nplan: waiting on a human at the gate — suspending (resumes when answered)`);
+    process.exit(EXIT_GATE_SUSPENDED);
+  }
   console.log(
     `\nplan: ${plan.outcome}  (${plan.reasonCode})${plan.classification ? `  tier=${plan.classification}` : ""}`,
   );

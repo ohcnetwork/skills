@@ -8,11 +8,23 @@ import type { DatabaseSync } from "node:sqlite";
 import { mintRunId } from "../run-id.js";
 import { DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT } from "../run-index.js";
 
-export const QUEUE_STATUSES = ["pending", "running", "done", "failed", "cancelled"] as const;
+export const QUEUE_STATUSES = [
+  "pending",
+  "running",
+  // The child exited at a gate, on purpose, with nothing wrong (§7). Live but NOT claimable: the
+  // human's answer is what re-admits it to `pending`. Distinct from `pending` because "waiting on a
+  // human" and "waiting on capacity" are different states — the FE renders them differently, and
+  // `queue_position` is meaningless for the first.
+  "awaiting_gate",
+  "done",
+  "failed",
+  "cancelled",
+] as const;
 export type QueueStatus = (typeof QUEUE_STATUSES)[number];
 
-/** Statuses a run can still move from — what "occupies" a branch for admission control. */
-export const LIVE_STATUSES: readonly QueueStatus[] = ["pending", "running"];
+/** Statuses a run can still move from — what "occupies" a branch for admission control. A suspended
+ *  run counts: its run dir and journal are mid-flight, and a second run on that branch IS that run. */
+export const LIVE_STATUSES: readonly QueueStatus[] = ["pending", "running", "awaiting_gate"];
 
 export interface QueueRow {
   id: number;
@@ -203,7 +215,7 @@ export class QueueStore {
   liveOn(repo: string, branch: string): QueueRow | null {
     const r = this.db
       .prepare(
-        `SELECT * FROM queue WHERE repo = ? AND branch = ? AND status IN ('pending','running')
+        `SELECT * FROM queue WHERE repo = ? AND branch = ? AND status IN ('pending','running','awaiting_gate')
          ORDER BY enqueued_at ASC LIMIT 1`,
       )
       .get(repo, branch) as unknown as Row | undefined;
@@ -218,12 +230,14 @@ export class QueueStore {
    * UPDATE plus a `changes() === 1` check is the belt to that braces: even if the row were read
    * twice, only one transaction can move it out of `pending`.
    *
-   * **Queue-behind, not reject.** A pending row whose (repo, branch) already has a RUNNING row is
-   * skipped rather than failed — it becomes claimable the moment the first finishes. Rejecting at
+   * **Queue-behind, not reject.** A pending row whose (repo, branch) already has a RUNNING or
+   * SUSPENDED row is skipped rather than failed — it becomes claimable the moment the first finishes. Rejecting at
    * enqueue would push the retry back onto the requester for the exact situation a queue exists to
    * absorb. The reason it must be skipped at all: `derivePaths` derives the run dir AND the worktree
    * from `${repo}-${branch}`, so a second run on the same branch is not a competing run, it IS the
-   * first one — same dir, same journal, same lockfile.
+   * first one — same dir, same journal, same lockfile. `awaiting_gate` blocks for exactly that
+   * reason: a run parked on a human's answer still owns its run dir, even with no process alive. When
+   * the answer arrives it becomes `pending` again and, being the older row, claims first.
    *
    * **`startable` is how the filesystem gets a vote.** The queue table knows about runs the queue
    * started; it knows nothing about a run someone launched from a terminal, which holds the very same
@@ -249,7 +263,7 @@ export class QueueStore {
               AND NOT EXISTS (
                 SELECT 1 FROM queue r
                  WHERE r.repo = q.repo AND r.branch = q.branch
-                   AND r.status = 'running'
+                   AND r.status IN ('running', 'awaiting_gate')
               )
               AND q.id = (
                 SELECT MIN(p.id) FROM queue p
@@ -308,13 +322,23 @@ export class QueueStore {
       .run(status, now.toISOString(), error, id);
   }
 
+  /** Park a claimed row on a human (§7). Not terminal and not `pending`: the run is live, owns its
+   *  run dir, and blocks its branch — but nothing will claim it until someone answers its gate, which
+   *  `GateStore.answerAndReadmit` does in the same transaction as the answer. */
+  suspend(id: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE queue SET status = 'awaiting_gate' WHERE id = ? AND status = 'running'")
+      .run(id);
+    return changes === 1;
+  }
+
   /** Cancel a row. Returns false when it is already terminal — a finished run cannot be un-run, and
    *  saying so is more useful than silently succeeding. */
   cancel(runId: string, now: Date = new Date()): boolean {
     const { changes } = this.db
       .prepare(
         `UPDATE queue SET status = 'cancelled', finished_at = ?
-          WHERE run_id = ? AND status IN ('pending','running')`,
+          WHERE run_id = ? AND status IN ('pending','running','awaiting_gate')`,
       )
       .run(now.toISOString(), runId);
     return changes === 1;

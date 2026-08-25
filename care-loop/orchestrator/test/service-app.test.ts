@@ -20,6 +20,7 @@ import {
 import { mintRunId, isValidRunId } from "../src/run-id.ts";
 import { SessionStore } from "../src/service/auth.ts";
 import { QueueStore } from "../src/service/queue.ts";
+import { GateStore } from "../src/service/gate-store.ts";
 import { validateState, type CareState } from "../src/state.ts";
 import type { SqliteRunStore } from "../src/run-store.ts";
 import { useRealStore } from "./_store.ts";
@@ -62,6 +63,7 @@ interface Harness {
   /** Run ids the fake supervisor was asked to cancel, so a route test can assert the CALL rather than
    *  the process side effect — the route's job is to reach the supervisor, not to kill anything. */
   cancelled: string[];
+  gates: GateStore;
   base: string;
   get: (path: string, headers?: Record<string, string>) => Promise<Res>;
   post: (path: string, body?: unknown, headers?: Record<string, string>) => Promise<Res>;
@@ -78,6 +80,7 @@ async function harness(): Promise<Harness> {
   const store = useRealStore();
   const db = (store as unknown as { db: DatabaseSync }).db;
   const queue = new QueueStore(db);
+  const gates = new GateStore(db);
   // A fake supervisor with the real status-write behaviour and no processes: cancellation's contract
   // at this layer is "the row moves and the supervisor is told", and the signalling half belongs to
   // supervisor.test.ts where a fake child can observe it.
@@ -86,6 +89,7 @@ async function harness(): Promise<Harness> {
     index: new SqliteRunIndex(db),
     sessions: new SessionStore(db),
     queue,
+    gates,
     version: "test",
     // Enqueue is gated on a supervisor existing; most tests want it present so they can exercise the
     // route. The gate itself has its own test.
@@ -109,6 +113,7 @@ async function harness(): Promise<Harness> {
     store,
     queue,
     cancelled,
+    gates,
     base,
     get: async (path, headers) => read(await fetch(base + path, { headers })),
     post: async (path, body, headers) =>
@@ -603,6 +608,7 @@ test("the SPA fallback serves client routes but never disguises a missing asset"
     index: new SqliteRunIndex(db),
     sessions: new SessionStore(db),
     queue: new QueueStore(db),
+    gates: new GateStore(db),
     staticDir: dir,
   });
   const server = app.listen(0, "127.0.0.1");
@@ -782,6 +788,144 @@ test("cancel is attributed and 404s on a run the queue never saw", async () => {
   }
 });
 
+test("GET /api/runs/:id/gate answers null for a run with no open question", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    // `null`, not 404: "no open question" is a normal answer to a poll the FE makes of every run it
+    // shows, and a 404 would make the ordinary case look like an error.
+    const gate = await h.get(`/api/runs/${res.body.run_id}/gate`, jar);
+    assert.equal(gate.status, 200);
+    assert.equal(gate.body.ask, null);
+  } finally {
+    await h.close();
+  }
+});
+
+test("answering an approve gate re-admits the suspended run in one transaction", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    const row = h.queue.byRunId(runId)!;
+    h.queue.claim();
+    h.queue.suspend(row.id);
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: { summary: "do it" } });
+
+    const gate = await h.get(`/api/runs/${runId}/gate`, jar);
+    assert.equal(gate.body.ask.ask_id, "approve:x");
+    assert.deepEqual(gate.body.ask.payload, { summary: "do it" });
+
+    const answer = await h.post(`/api/runs/${runId}/gate`, { decision: "approve" }, jar);
+    assert.equal(answer.status, 202);
+    assert.equal(answer.body.readmitted, true);
+    // The answer IS the re-admission. Splitting them would leave a window where the gate is settled
+    // and the run is still awaiting_gate — waiting on a question nobody will ask again.
+    assert.equal(h.queue.byRunId(runId)?.status, "pending");
+    assert.equal(h.gates.get(runId, "approve:x")?.answeredBy, "octocat");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a second answer loses the race and is told so", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: {} });
+
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, { decision: "approve" }, jar)).status, 202);
+    // Two people had the gate view open. The loser must learn they did not unblock the run.
+    const second = await h.post(`/api/runs/${runId}/gate`, { decision: "reject" }, jar);
+    assert.equal(second.status, 404, "the ask is no longer pending");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the gate answer is validated — it authorizes a push to origin", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: {} });
+
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, {}, jar)).body.error.code, "bad_decision");
+    assert.equal(
+      (await h.post(`/api/runs/${runId}/gate`, { decision: "maybe" }, jar)).body.error.code,
+      "bad_decision",
+    );
+    // An empty amendment sends the planner off to re-draft against no instruction — a model call
+    // spent to produce the same plan. The terminal gate re-prompts for exactly this.
+    assert.equal(
+      (await h.post(`/api/runs/${runId}/gate`, { decision: "amend", amendment: "  " }, jar)).body.error.code,
+      "bad_amendment",
+    );
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, { decision: "approve" })).status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an interview gate needs an answer to every question it asked", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    const questions = [
+      { id: "q1", prompt: "which?" },
+      { id: "q2", prompt: "when?" },
+    ];
+    h.gates.ask({ runId, askId: "interview:x", kind: "interview", payload: questions });
+
+    // A partial set would reach the planner as a silently shorter interview, and the plan would be
+    // drafted against the gaps.
+    const partial = await h.post(`/api/runs/${runId}/gate`, { answers: [{ id: "q1", answer: "this" }] }, jar);
+    assert.equal(partial.status, 400);
+    assert.match(partial.body.error.message, /q2/);
+
+    const full = await h.post(
+      `/api/runs/${runId}/gate`,
+      { answers: [{ id: "q2", answer: "now" }, { id: "q1", answer: "this" }] },
+      jar,
+    );
+    assert.equal(full.status, 202);
+    // Correlated by id and returned in the order ASKED, not the order answered.
+    assert.deepEqual(h.gates.get(runId, "interview:x")?.answer, [
+      { id: "q1", answer: "this" },
+      { id: "q2", answer: "now" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/gates is the needs-you list", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const a = await h.post("/api/runs", { ...REQ, branch: "feat-a" }, jar);
+    const b = await h.post("/api/runs", { ...REQ, branch: "feat-b" }, jar);
+    h.gates.ask({ runId: a.body.run_id, askId: "approve:x", kind: "approve", payload: {} });
+    h.gates.ask({ runId: b.body.run_id, askId: "approve:y", kind: "approve", payload: {} });
+    await h.post(`/api/runs/${b.body.run_id}/gate`, { decision: "approve" }, jar);
+
+    // A gate nobody sees is a gate that expires — and expiry is the one outcome here that throws
+    // away finished planning work.
+    const gates = await h.get("/api/gates", jar);
+    assert.equal(gates.body.total, 1);
+    assert.equal(gates.body.items[0].run_id, a.body.run_id);
+  } finally {
+    await h.close();
+  }
+});
+
 test("GET /api/queue carries the same envelope as every other list route", async () => {
   const h = await harness();
   try {
@@ -897,6 +1041,7 @@ test("enqueue refuses when no supervisor would ever run the row", async () => {
     index: new SqliteRunIndex(db),
     sessions: new SessionStore(db),
     queue: new QueueStore(db),
+    gates: new GateStore(db),
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));

@@ -13,6 +13,7 @@ import { SqliteRunIndex } from "../run-index.js";
 import { applyConnectionPragmas } from "../run-store.js";
 import { SessionStore } from "./auth.js";
 import { QueueStore } from "./queue.js";
+import { GateStore } from "./gate-store.js";
 import { Supervisor } from "./supervisor.js";
 import { backupNow, integrityCheck } from "./backup.js";
 
@@ -94,6 +95,7 @@ export function startService(o: ServeOptions): Server {
   const index = new SqliteRunIndex(db);
   const sessions = new SessionStore(db);
   const queue = new QueueStore(db);
+  const gates = new GateStore(db);
   const here = dirname(fileURLToPath(import.meta.url));
   const defaultStatic = join(here, "../../../web/dist");
   const staticDir = o.staticDir ?? (existsSync(defaultStatic) ? defaultStatic : undefined);
@@ -112,6 +114,7 @@ export function startService(o: ServeOptions): Server {
     index,
     sessions,
     queue,
+    gates,
     supervisor,
     version: o.version ?? packageVersion(),
     secureCookies: o.secureCookies ?? false,

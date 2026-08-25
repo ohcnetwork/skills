@@ -8,10 +8,13 @@ import { Journal } from "../src/journal.ts";
 import { useRealStore } from "./_store.ts";
 import type { Planner, PlanGate, PlanInput } from "../src/ports.ts";
 import type { PlannerPayload } from "../src/skill-result.ts";
-import type {
-  ApprovalDecision,
-  PlanAnswer,
-  PlanQuestion,
+import {
+  GateCancelledError,
+  GateExpiredError,
+  GateSuspendedError,
+  type ApprovalDecision,
+  type PlanAnswer,
+  type PlanQuestion,
 } from "../src/plan-gate.ts";
 
 const rd = () => {
@@ -327,4 +330,166 @@ test("trivial classification flows through as the tier", async () => {
   assert.equal(res.classification, "trivial");
   const approved = events(runDir).find((e) => e.event === "plan.approved")!;
   assert.equal((approved.data as any).classification, "trivial");
+});
+
+// ── Gate suspension and resume ([[PLAN-loop-service]] §7) ─────────────────────────────────────────
+
+/** A gate that raises instead of answering — what a polling transport does when nobody is there. */
+const raisingGate = (err: Error, answers?: PlanAnswer[]): PlanGate => ({
+  async interview(qs: PlanQuestion[]) {
+    if (answers) return answers;
+    throw err;
+  },
+  async approve() {
+    throw err;
+  },
+});
+
+test("an unanswered approval gate SUSPENDS — a pause, not a terminus", async () => {
+  const runDir = rd();
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner({ questions: [{ id: "q1", prompt: "empty state?" }] }),
+    gate: raisingGate(new GateSuspendedError("approve:abc"), [{ id: "q1", answer: "a" }]),
+    lockOpts,
+  });
+
+  assert.equal(res.outcome, "suspended");
+  assert.equal(res.reasonCode, "gate_unanswered");
+  const evs = events(runDir);
+  assert.equal(evs.at(-1)?.event, "gate.suspended");
+  assert.equal((evs.at(-1)?.data as { ask_id: string }).ask_id, "approve:abc");
+  // No run.end: the plan is drafted, the artifacts are on disk, the ask is open. The run is simply
+  // not worth a concurrency slot while it waits on a person.
+  assert.equal(evs.some((e) => e.event === "run.end"), false);
+  assert.ok(existsSync(join(runDir, "criteria.md")), "the planning work survives");
+});
+
+test("a cancelled gate unwinds through the normal path — lock released, run.end written", async () => {
+  const runDir = rd();
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner(),
+    gate: raisingGate(new GateCancelledError("approve:abc")),
+    lockOpts,
+  });
+
+  assert.equal(res.outcome, "aborted");
+  assert.equal(res.reasonCode, "cancelled");
+  // The whole point of cancelling through the row rather than with a signal: a signalled child skips
+  // its `finally`, leaving the lockfile behind and the journal's last word a question.
+  assert.equal(events(runDir).at(-1)?.event, "run.end");
+  assert.equal(existsSync(join(runDir, ".orchestrator.lock")), false);
+});
+
+test("an expired gate abandons the run rather than suspending it again", async () => {
+  const runDir = rd();
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner(),
+    gate: raisingGate(new GateExpiredError("approve:abc")),
+    lockOpts,
+  });
+  assert.equal(res.outcome, "aborted");
+  assert.equal(res.reasonCode, "gate_timeout");
+});
+
+test("resuming an APPROVED gate calls no planner at all", async () => {
+  const runDir = rd();
+  const phases: string[] = [];
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner({ onCall: (p) => phases.push(p) }),
+    gate: fakeGate([]),
+    lockOpts,
+    restore: {
+      kind: "approve",
+      askId: "approve:abc",
+      questions: [{ id: "q1", prompt: "empty state?" }],
+      answers: [{ id: "q1", answer: "a" }],
+      // Everything the approval path reads off the in-memory draft is in the ask the human saw.
+      ask: {
+        plannedBy: "Opus 4.8",
+        summary: "expiry column",
+        classification: "trivial",
+        criteria: ["renders expiry"],
+        testPlan: "skip",
+        pushAuthNote: "authorizes a push",
+      },
+      answer: { decision: "approve" },
+    },
+  });
+
+  assert.equal(res.outcome, "approved");
+  assert.equal(res.classification, "trivial", "the tier comes from the ask, not from a re-draft");
+  assert.deepEqual(phases, [], "neither recon nor a draft was re-run");
+  const approved = events(runDir).find((e) => e.event === "plan.approved");
+  assert.equal((approved?.data as { planned_by: string }).planned_by, "Opus 4.8");
+  assert.equal(hasApprovedPlan(events(runDir)), true);
+});
+
+test("resuming a REJECTED gate is a single journal write", async () => {
+  const runDir = rd();
+  const phases: string[] = [];
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner({ onCall: (p) => phases.push(p) }),
+    gate: fakeGate([]),
+    lockOpts,
+    restore: {
+      kind: "approve",
+      askId: "approve:abc",
+      questions: [],
+      answers: [],
+      ask: {
+        plannedBy: "Opus 4.8",
+        summary: "s",
+        classification: "trivial",
+        criteria: [],
+        testPlan: "skip",
+        pushAuthNote: "n",
+      },
+      answer: { decision: "reject" },
+    },
+  });
+
+  assert.equal(res.outcome, "rejected");
+  assert.equal(res.reasonCode, "plan_rejected");
+  assert.deepEqual(phases, []);
+});
+
+test("resuming an AMENDED gate re-drafts once and never re-interviews", async () => {
+  const runDir = rd();
+  const phases: string[] = [];
+  const res = await runPlan({
+    input: makeInput(runDir),
+    planner: fakePlanner({ onCall: (p) => phases.push(p) }),
+    gate: fakeGate([{ decision: "approve" }]),
+    lockOpts,
+    restore: {
+      kind: "approve",
+      askId: "approve:abc",
+      questions: [{ id: "q1", prompt: "empty state?" }],
+      answers: [{ id: "q1", answer: "a" }],
+      ask: {
+        plannedBy: "Opus 4.8",
+        summary: "s",
+        classification: "standard",
+        criteria: [],
+        testPlan: "skip",
+        pushAuthNote: "n",
+      },
+      answer: { decision: "amend", amendment: "use a modal" },
+    },
+  });
+
+  assert.equal(res.outcome, "approved");
+  // Exactly the work the human asked for: one re-draft. Re-running recon to rediscover questions a
+  // human has already answered is the most expensive way to learn nothing.
+  assert.deepEqual(phases, ["plan"]);
+  assert.equal(
+    events(runDir).some((e) => e.event === "gate.asked"),
+    false,
+    "the interview was restored, not re-asked",
+  );
 });

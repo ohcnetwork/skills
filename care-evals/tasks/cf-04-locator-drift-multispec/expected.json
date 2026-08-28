@@ -1,0 +1,15 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cf-04-locator-drift-multispec",
+  "skill": "care-ci-fix",
+  "expected_verdicts": {
+    "F1": "test-stale",
+    "F2": "test-stale",
+    "F3": "test-stale",
+    "F4": "infra"
+  },
+  "pass": {
+    "min_verdict_accuracy": 1.0,
+    "critical_verdicts": ["F1", "F2", "F3", "F4"]
+  }
+}

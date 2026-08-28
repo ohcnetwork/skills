@@ -6,17 +6,22 @@ argument-hint: "Describe the test scenario or feature to test"
 
 # Playwright E2E Testing for CARE
 
-Router for CARE E2E tests: the discovery workflow, when to test, the rules, the QA
-mindset, and the form checklist. Mechanics (form interactions, selector helpers,
-assertions, pattern gallery, fixtures, a11y/clock) live in the bundled guide.
+Router for CARE E2E tests — **two tasks, two paths**: _authoring_ a new spec, or _fixing_ a
+failing one. Mechanics (form interactions, selector helpers, assertions, pattern gallery,
+fixtures, a11y/clock) live in the bundled guide.
 
-> **Before writing, read [`PLAYWRIGHT_GUIDE.md`](./PLAYWRIGHT_GUIDE.md)** (installed at
-> `~/.claude/skills/playwright/PLAYWRIGHT_GUIDE.md`) **and copy a shape from
-> [`examples/`](./examples):**
-> [`crudForm`](./examples/crudForm.spec.ts) (create → validate → verify → edit-prefill) ·
-> [`multiRole`](./examples/multiRole.spec.ts) (second user via `browser.newContext()`) ·
-> [`apiSetup`](./examples/apiSetup.spec.ts) (API seeding — the **exception**; per-test
-> data is seeded via the UI by default, see the seeding rule below).
+## Start here — pick your task
+
+- **Writing a new test / adding coverage** → [When to E2E](#when-to-e2e-and-when-not) →
+  [Authoring Workflow](#authoring-workflow--clarify-before-you-write) → author against the
+  Canonical Structure + Form Checklist.
+- **Fixing a test that's failing** (broken by another change, or flaky) →
+  [Fixing Workflow](#fixing-workflow--diagnose-before-you-edit) → [Debugging & Flakiness](#debugging--flakiness).
+  Do **not** run the authoring workflow — you're updating one assertion or a wait, not gathering
+  requirements for a new spec.
+- **Just running specs / commands** → [Setup & Commands](#setup--commands).
+
+> **Critical Rules** and **Mindset** apply to BOTH paths — read them whichever one you're on.
 
 ## When to E2E (and when not)
 
@@ -30,7 +35,17 @@ enforces a specific path. That is distinct from an agent driving the app live to
 a goal (runtime exploration): if you use a browser to explore, the committed artifact is
 still a deterministic spec, not the exploration.
 
-## Workflow — Clarify Before You Write
+## Authoring Workflow — Clarify Before You Write
+
+_(New specs only. Fixing a broken spec? Jump to [Fixing Workflow](#fixing-workflow--diagnose-before-you-edit).)_
+
+> **Before writing, read [`PLAYWRIGHT_GUIDE.md`](./PLAYWRIGHT_GUIDE.md)** (installed at
+> `~/.claude/skills/playwright/PLAYWRIGHT_GUIDE.md`) **and copy a shape from
+> [`examples/`](./examples):**
+> [`crudForm`](./examples/crudForm.spec.ts) (create → validate → verify → edit-prefill) ·
+> [`multiRole`](./examples/multiRole.spec.ts) (second user via `browser.newContext()`) ·
+> [`apiSetup`](./examples/apiSetup.spec.ts) (API seeding — the **exception**; per-test
+> data is seeded via the UI by default, see the seeding rule below).
 
 Don't jump to writing specs — most missed bugs come from untested requirements, not bad
 selectors. Run this gate first:
@@ -51,6 +66,32 @@ selectors. Run this gate first:
    loading→loaded states. Don't assume out of scope — ask.
 5. **Produce a test plan** — a numbered list, each with an outcome-style name and a
    happy / negative / edge tag. Get agreement before writing. Update the plan if scope shifts.
+
+<!-- care-loop:methodology name="mechanics" -->
+
+## Fixing Workflow — Diagnose Before You Edit
+
+You're fixing a spec that broke — **not** authoring a new one. Skip the Authoring Workflow
+above; do this instead:
+
+1. **Reproduce locally first.** `npx playwright test <path> --trace on`, then read the report/trace
+   (`npx playwright show-report`) — see the actual failure, don't guess from the test name.
+2. **Classify the failure before editing:**
+   - **Stale assertion** — the spec asserts behaviour the change intentionally replaced (an old
+     label / string / route / count). → Update _only_ the expected value(s); keep the journey and
+     structure intact. Do not rewrite the spec or add cases.
+   - **Real regression** — the change broke a flow the spec correctly guards. → Fix the _source_,
+     not the test (regression-first: the failing test is doing its job).
+   - **Flake / infra** — passes on re-run, or fails on race / animation / stale-DB / parallel
+     collision (see [Debugging & Flakiness](#debugging--flakiness)), or the backend is down. → Do
+     **not** edit the assertion; fix the _wait/isolation_ per the flaky-triage table, or if it's
+     environment, don't touch it at all.
+3. **Never weaken to go green** (Rule #17): no `.skip()`/`.fixme()`, no deleted assertions, no
+   loosened matchers to paper over a real failure.
+4. **Confirm green locally before pushing** (Rule #14). After **3 failed attempts, stop** and hand
+   to a human (Rule #15).
+
+<!-- /care-loop:methodology -->
 
 ## Setup & Commands
 
@@ -94,8 +135,12 @@ test.describe("Feature Name", () => {
   });
 
   test("creates location with valid name and type", async ({ page }) => {
-    await test.step("Fill location form", async () => {/* actions */});
-    await test.step("Verify location appears in list", async () => {/* assertions */});
+    await test.step("Fill location form", async () => {
+      /* actions */
+    });
+    await test.step("Verify location appears in list", async () => {
+      /* assertions */
+    });
   });
 });
 ```
@@ -104,6 +149,8 @@ test.describe("Feature Name", () => {
 — generated by `tests/setup/*.setup.ts`. **Key helpers** (`tests/helper/ui`):
 `expectToast`, `selectFromCommand`, `selectFromValueSet`, `selectFromFilterSelect`;
 `getFieldErrorMessage` (`tests/helper/error`). Full signatures in the guide.
+
+<!-- care-loop:methodology name="mechanics" -->
 
 ## Critical Rules
 
@@ -156,6 +203,8 @@ test.describe("Feature Name", () => {
   multi-window flows. Authored tests degrade sharply on complexity (industry reports
   ~8% failure on simple flows vs ~48% on complex ones); keep each spec small and linear.
 
+<!-- /care-loop:methodology -->
+
 ## Form Testing Checklist
 
 Every form MUST cover:
@@ -172,6 +221,8 @@ Every form MUST cover:
    visible on the destination page. Never stop at the click.
 10. **Edit prefill** — assert existing data is prefilled before changing anything.
 
+<!-- care-loop:methodology name="mechanics" -->
+
 ## Debugging & Flakiness
 
 ```bash
@@ -185,3 +236,5 @@ Fail → check report → `--headed` → `--debug` → if data looks stale, `npm
 **Flaky triage:** race (element before data) → wait for response/text, not `networkidle` ·
 animation → `waitFor({ state: "visible" })` first · parallel collision → `Date.now()` suffix ·
 stale DB → `db-restore` · polling/WebSocket → wait for a specific DOM change.
+
+<!-- /care-loop:methodology -->

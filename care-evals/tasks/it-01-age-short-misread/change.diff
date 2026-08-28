@@ -1,0 +1,32 @@
+diff --git a/src/Utils/ageFormat.ts b/src/Utils/ageFormat.ts
+index 1111111..2222222 100644
+--- a/src/Utils/ageFormat.ts
++++ b/src/Utils/ageFormat.ts
+@@ -1,13 +1,18 @@
+ // Formats a patient's age for the record header.
+-export function formatPatientAge(dob: string): string {
++export function formatPatientAge(
++  dob: string,
++  opts: { short?: boolean } = {},
++): string {
+   const { years, months, days } = ageParts(dob);
++  if (opts.short) {
++    return `${years}`;
++  }
+   if (years > 0) return `${years}Y`;
+   if (months > 0) return `${months}M`;
+   return `${days}D`;
+ }
+diff --git a/src/components/Patient/PatientCard.tsx b/src/components/Patient/PatientCard.tsx
+index 3333333..4444444 100644
+--- a/src/components/Patient/PatientCard.tsx
++++ b/src/components/Patient/PatientCard.tsx
+@@ -12,7 +12,7 @@ export function PatientCard({ patient }: { patient: Patient }) {
+   return (
+     <div className="patient-card">
+       <span className="name">{patient.name}</span>
+-      <span className="age">{formatPatientAge(patient.dob)}</span>
++      <span className="age">{formatPatientAge(patient.dob, { short: true })}</span>
+     </div>
+   );
+ }

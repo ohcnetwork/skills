@@ -1,0 +1,33 @@
+diff --git a/src/pages/Facility/patient/components/LabResultsSummary.tsx b/src/pages/Facility/patient/components/LabResultsSummary.tsx
+new file mode 100644
+index 000000000..1efc15a7b
+--- /dev/null
++++ b/src/pages/Facility/patient/components/LabResultsSummary.tsx
+@@ -0,0 +1,27 @@
++interface LabResult {
++  label: string; // e.g. "Serum Creatinine"
++  value: string; // e.g. "1.4 mg/dL"
++  delta: string; // e.g. "+0.3"
++}
++
++// Lab-result KPI cards for the patient summary header.
++// Intended as a three-across row on desktop; stacks on phones.
++export default function LabResultsSummary({ results }: { results: LabResult[] }) {
++  return (
++    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
++      {results.map((r) => (
++        <div key={r.label} className="flex items-center gap-3 rounded-lg border p-4">
++          {/* fixed-width mini trend chart */}
++          <div className="h-10 w-44 shrink-0 rounded bg-muted" aria-hidden />
++          <div className="flex flex-col">
++            <span className="text-sm font-medium">{r.label}</span>
++            <span className="text-lg font-semibold">{r.value}</span>
++          </div>
++          <span className="w-20 shrink-0 rounded-full bg-muted px-2 py-1 text-center text-xs">
++            {r.delta}
++          </span>
++        </div>
++      ))}
++    </div>
++  );
++}

@@ -1,0 +1,40 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-01-medrow-overflow",
+  "skill": "care-ux-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["medrow-overflow"]
+  },
+  "must_flag": [
+    {
+      "id": "medrow-overflow",
+      "class": "broken-overflow",
+      "file": "src/pages/Facility/billing/invoice/components/MedicationOrderRow.tsx",
+      "line_hint": "flex w-64 ... <span className=\"font-medium\">{name}</span>",
+      "signals": [
+        "truncate",
+        "min-w-0",
+        "line-clamp",
+        "break-words",
+        "overflow",
+        "w-64",
+        "fixed width",
+        "long name",
+        "long drug",
+        "long medication",
+        "escape",
+        "escapes",
+        "push the price",
+        "pushes the",
+        "clipped",
+        "does not wrap",
+        "won't wrap",
+        "no wrap"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

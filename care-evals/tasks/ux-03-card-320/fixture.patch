@@ -1,0 +1,23 @@
+diff --git a/src/pages/Facility/schedule/components/AppointmentCard.tsx b/src/pages/Facility/schedule/components/AppointmentCard.tsx
+new file mode 100644
+index 0000000..ec7d191
+--- /dev/null
++++ b/src/pages/Facility/schedule/components/AppointmentCard.tsx
+@@ -0,0 +1,17 @@
++interface AppointmentCardProps {
++  title: string;
++  time: string;
++  clinician: string;
++}
++
++// Appointment summary card in the schedule list.
++export default function AppointmentCard({ title, time, clinician }: AppointmentCardProps) {
++  return (
++    <div className="w-[360px] rounded-lg border px-6 py-4">
++      <p className="text-base font-semibold">{title}</p>
++      <p className="text-sm text-muted-foreground">
++        {time} · {clinician}
++      </p>
++    </div>
++  );
++}

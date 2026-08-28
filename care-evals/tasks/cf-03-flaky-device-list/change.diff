@@ -1,0 +1,10 @@
+diff --git a/src/components/Facility/LocationForm.tsx b/src/components/Facility/LocationForm.tsx
+index b1c2d3e..f4a5b6c 100644
+--- a/src/components/Facility/LocationForm.tsx
++++ b/src/components/Facility/LocationForm.tsx
+@@ -41,7 +41,7 @@ export function LocationForm() {
+       <Button type="submit" disabled={isPending}>
+-        Save location
++        Save
+       </Button>
+     </form>

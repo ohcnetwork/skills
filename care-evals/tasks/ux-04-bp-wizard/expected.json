@@ -1,0 +1,47 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-04-bp-wizard",
+  "skill": "care-ux-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 2,
+    "critical_must_flag": ["bp-wizard-too-many-steps"]
+  },
+  "must_flag": [
+    {
+      "id": "bp-wizard-too-many-steps",
+      "class": "workflow-efficiency",
+      "file": "src/pages/Facility/patient/components/RecordBpWizard.tsx",
+      "line_hint": "4-step wizard for one BP reading",
+      "signals": [
+        "single form",
+        "one form",
+        "one screen",
+        "single screen",
+        "one page",
+        "too many steps",
+        "too many screens",
+        "four steps",
+        "4 steps",
+        "four screens",
+        "multi-step",
+        "multiple screens",
+        "combine",
+        "consolidate",
+        "collapse into one",
+        "unnecessary steps",
+        "extra steps",
+        "clinician time",
+        "patient care",
+        "workflow",
+        "fewer taps",
+        "fewer clicks",
+        "should be one",
+        "wizard is unnecessary",
+        "wizard adds"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

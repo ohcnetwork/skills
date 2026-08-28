@@ -1,0 +1,14 @@
+outcome=converged rounds=1
+---
+run.start step=5-await round=1
+step.enter step=5-await round=1
+ci.wait
+ci.done
+step.exit step=5-await round=1 reason=ci_green
+decision signal=advance 5-await->6a
+step.enter step=6a round=1
+helper.exec step=6a cmd=collect-feedback
+spawn.result step=6a reason=triaged role=care-triager verdict=address=0 decline=0
+step.exit step=6a round=1 reason=converged_clean
+decision signal=converged 6a->7
+run.end reason=clean outcome=converged

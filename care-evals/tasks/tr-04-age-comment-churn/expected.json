@@ -1,0 +1,18 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tr-04-age-comment-churn",
+  "skill": "care-triager",
+  "note": "F2-F5 are [resolved]/withdrawn-thread distractors — the skill calls resolved threads 'skippable', so skip and decline are both correct dispositions (either keeps addressCount at 0). Only F1 (still-open comment-churn nit) and F6 (still-open, plausible-looking false-positive) require active judgment, so those are the graded verdicts. A passing triager declines both and manufactures no address item → the loop converges at Step 7 instead of churning rounds 3-9.",
+  "expected_verdicts": {
+    "F1": "decline",
+    "F6": "decline"
+  },
+  "expected_missed_by": {
+    "F1": "none",
+    "F6": "none"
+  },
+  "pass": {
+    "min_verdict_accuracy": 1.0,
+    "critical_verdicts": ["F1", "F6"]
+  }
+}

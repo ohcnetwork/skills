@@ -1,0 +1,30 @@
+diff --git a/src/pages/Facility/billing/invoice/components/CopayNotice.tsx b/src/pages/Facility/billing/invoice/components/CopayNotice.tsx
+new file mode 100644
+index 0000000..e4ef853
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/CopayNotice.tsx
+@@ -0,0 +1,24 @@
++import { formatCurrency } from "@/Utils/utils";
++
++interface CopayNoticeProps {
++  patient: { name: string; copay?: number };
++  currency: string;
++  defaultCopay: number;
++}
++
++// Copay the patient owes for this visit. `patient.copay` is the per-patient override; when the
++// patient has no override we fall back to the plan's default copay. A copay of 0 means the visit
++// is fully covered for this patient.
++export default function CopayNotice({ patient, currency, defaultCopay }: CopayNoticeProps) {
++  const copay = patient.copay || defaultCopay;
++
++  return (
++    <div className="rounded border p-3 text-sm">
++      <p className="font-medium">{patient.name}</p>
++      <p>
++        Copay due:{" "}
++        <span className="font-semibold">{formatCurrency(copay, currency)}</span>
++      </p>
++    </div>
++  );
++}

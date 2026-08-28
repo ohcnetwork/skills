@@ -1,0 +1,14 @@
+{
+  "provider": "github-copilot",
+  "tiers": {
+    "judgment": "claude-opus-4.8",
+    "maker": "claude-sonnet-4.6"
+  },
+  "roles": {
+    "reviewer": "claude-opus-4.8",
+    "planner": "claude-opus-4.8",
+    "plannerRecon": "claude-sonnet-4.6",
+    "triager": "claude-opus-4.8",
+    "implementer": "claude-sonnet-4.6"
+  }
+}

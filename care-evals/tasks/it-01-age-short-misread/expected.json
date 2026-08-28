@@ -1,0 +1,76 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "it-01-age-short-misread",
+  "skill": "care-intent",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 0.5,
+    "max_false_positives": 1,
+    "critical_must_flag": ["short-drops-unit"]
+  },
+  "must_flag": [
+    {
+      "id": "short-drops-unit",
+      "class": "behavior",
+      "file": "src/Utils/ageFormat.ts",
+      "line_hint": "return `${years}`",
+      "signals": [
+        "no unit",
+        "without a unit",
+        "without the unit",
+        "drops the unit",
+        "omits the unit",
+        "bare year",
+        "bare number",
+        "just the year",
+        "year number only",
+        "number only",
+        "no Y",
+        "no suffix"
+      ]
+    },
+    {
+      "id": "short-infant-zero",
+      "class": "behavior",
+      "file": "src/Utils/ageFormat.ts",
+      "line_hint": "short branch runs before months/days",
+      "signals": [
+        "0 for infants",
+        "returns 0",
+        "returns \"0\"",
+        "renders 0",
+        "under one year",
+        "younger than one",
+        "less than a year",
+        "sub-year",
+        "loses months",
+        "drops months",
+        "discards months",
+        "infant",
+        "3-month",
+        "three-month"
+      ]
+    }
+  ],
+  "must_not_flag": [
+    {
+      "id": "assumes-unit-kept",
+      "signals": [
+        "abbreviated with the unit",
+        "short form like 3y",
+        "keeps the unit",
+        "retains the unit",
+        "unit is preserved"
+      ]
+    },
+    {
+      "id": "invents-localization",
+      "signals": [
+        "localization",
+        "internationalization",
+        "i18n",
+        "translated age"
+      ]
+    }
+  ]
+}

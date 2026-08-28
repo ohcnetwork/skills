@@ -1,0 +1,9 @@
+outcome=deferred rounds=1
+---
+run.start step=5-await round=1
+step.enter step=5-await round=1
+ci.wait
+ci.done
+step.exit step=5-await round=1 reason=poll_timeout
+checkpoint.written reason=ci_or_bots_timeout
+run.end reason=poll_timeout outcome=deferred

@@ -1,0 +1,42 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-02-vitals-nomobile",
+  "skill": "care-ux-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["vitals-nomobile"]
+  },
+  "must_flag": [
+    {
+      "id": "vitals-nomobile",
+      "class": "broken-responsive",
+      "file": "src/pages/Facility/patient/components/VitalsGrid.tsx",
+      "line_hint": "w-[1100px] ... grid grid-cols-6",
+      "signals": [
+        "w-[1100px]",
+        "1100",
+        "fixed width",
+        "grid-cols-6",
+        "no responsive",
+        "not responsive",
+        "responsive variant",
+        "sm:grid",
+        "md:grid",
+        "breakpoint",
+        "usebreakpoints",
+        "375",
+        "mobile",
+        "horizontal scroll",
+        "horizontal overflow",
+        "overflow",
+        "single column",
+        "collapse to",
+        "does not adapt",
+        "won't fit"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

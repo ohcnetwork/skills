@@ -1,0 +1,36 @@
+diff --git a/src/Utils/formatAgeTier.ts b/src/Utils/formatAgeTier.ts
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/src/Utils/formatAgeTier.ts
+@@ -0,0 +1,29 @@
++import dayjs from "dayjs";
++
++/**
++ * Render a patient age string. Tier "12 months to 16 years" shows years and
++ * months (0 months suppressed): a patient at the 12-month boundary shows "1Y".
++ */
++export function formatAgeTier(start: Date, end: Date, suffixes: {
++  year: string;
++  month: string;
++  day: string;
++}): string {
++  const s = dayjs(start);
++  const e = dayjs(end);
++  const totalDays = e.diff(s, "day");
++  const years = e.diff(s, "years");
++
++  // 12 months to 16 years: years and months (suppress 0 months)
++  // Start at 11 months 30 days = 364 days
++  if (totalDays >= 364) {
++    const months = e.diff(s, "month");
++    const leftoverMonths = months % 12;
++    if (leftoverMonths === 0) {
++      return `${years}${suffixes.year}`;
++    }
++    return `${years}${suffixes.year} ${leftoverMonths}${suffixes.month}`;
++  }
++
++  const months = e.diff(s, "month");
++  return `${months}${suffixes.month} ${e.diff(s.add(months, "month"), "day")}${suffixes.day}`;
++}

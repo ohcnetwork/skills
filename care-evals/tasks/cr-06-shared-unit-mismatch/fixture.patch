@@ -1,0 +1,77 @@
+diff --git a/src/pages/Facility/billing/invoice/billingTotals.ts b/src/pages/Facility/billing/invoice/billingTotals.ts
+new file mode 100644
+index 0000000..e964a15
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/billingTotals.ts
+@@ -0,0 +1,19 @@
++export interface InvoiceTotals {
++  subtotal: number;
++  tax: number;
++  total: number;
++}
++
++/**
++ * Compute invoice totals from line items.
++ *
++ * All amounts are returned in **minor units** (paise) — integers, never fractional. Every caller
++ * must divide by 100 before display.
++ */
++export function computeInvoiceTotals(
++  lines: { amountMinor: number; taxMinor: number }[],
++): InvoiceTotals {
++  const subtotal = lines.reduce((sum, l) => sum + l.amountMinor, 0);
++  const tax = lines.reduce((sum, l) => sum + l.taxMinor, 0);
++  return { subtotal, tax, total: subtotal + tax };
++}
+diff --git a/src/pages/Facility/billing/invoice/components/InvoiceSummaryCard.tsx b/src/pages/Facility/billing/invoice/components/InvoiceSummaryCard.tsx
+new file mode 100644
+index 0000000..2958f57
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/InvoiceSummaryCard.tsx
+@@ -0,0 +1,19 @@
++import { formatCurrency } from "@/Utils/utils";
++
++import { computeInvoiceTotals } from "../billingTotals";
++
++interface Props {
++  lines: { amountMinor: number; taxMinor: number }[];
++  currency: string;
++}
++
++// Compact card shown in the invoice list row.
++export default function InvoiceSummaryCard({ lines, currency }: Props) {
++  const totals = computeInvoiceTotals(lines);
++  return (
++    <div className="rounded border p-2 text-sm">
++      <span className="text-muted-foreground">Amount due </span>
++      <span className="font-semibold">{formatCurrency(totals.total, currency)}</span>
++    </div>
++  );
++}
+diff --git a/src/pages/Facility/billing/invoice/components/PrintInvoiceTotals.tsx b/src/pages/Facility/billing/invoice/components/PrintInvoiceTotals.tsx
+new file mode 100644
+index 0000000..1525346
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/PrintInvoiceTotals.tsx
+@@ -0,0 +1,21 @@
++import { formatCurrency } from "@/Utils/utils";
++
++import { computeInvoiceTotals } from "../billingTotals";
++
++interface Props {
++  lines: { amountMinor: number; taxMinor: number }[];
++  currency: string;
++}
++
++export default function PrintInvoiceTotals({ lines, currency }: Props) {
++  const totals = computeInvoiceTotals(lines);
++  // totals are in minor units — divide by 100 for display.
++  return (
++    <dl className="grid grid-cols-2 text-sm">
++      <dt className="font-semibold">Total</dt>
++      <dd className="text-right font-semibold">
++        {formatCurrency(totals.total / 100, currency)}
++      </dd>
++    </dl>
++  );
++}

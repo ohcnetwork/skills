@@ -1,0 +1,17 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tg-03-asserts-unrelated",
+  "skill": "care-test-grade",
+  "expected_outcome": "block",
+  "pass": {
+    "min_verdict_accuracy": 0.66,
+    "require_block": true,
+    "critical_verdicts": ["AC1"]
+  },
+  "expected_verdicts": {
+    "AC1": "Wrong",
+    "AC2": "Covered",
+    "AC3": "Missing"
+  },
+  "notes": "Second flavor of Wrong: the AC1 spec asserts an unrelated green thing (the success toast) instead of the recomputed balance the criterion is about. A grader that calls AC1 Covered was fooled by the green assertion; one that calls it Weak under-rated a total miss of the criterion. Only a Wrong here blocks — that is the check."
+}

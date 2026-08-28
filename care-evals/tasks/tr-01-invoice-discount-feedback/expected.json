@@ -1,0 +1,23 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "tr-01-invoice-discount-feedback",
+  "skill": "care-triager",
+  "expected_verdicts": {
+    "F1": "address",
+    "F2": "address",
+    "F3": "address",
+    "F4": "decline",
+    "F5": "defer"
+  },
+  "expected_missed_by": {
+    "F1": "care-reviewer",
+    "F2": "care-technical-review",
+    "F3": "care-reviewer",
+    "F4": "none",
+    "F5": "none"
+  },
+  "pass": {
+    "min_verdict_accuracy": 0.8,
+    "critical_verdicts": ["F1", "F4", "F5"]
+  }
+}

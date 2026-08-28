@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+care-evals/results/
+care-evals/**/__pycache__/
+**/.DS_Store

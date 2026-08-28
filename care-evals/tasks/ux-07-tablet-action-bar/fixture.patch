@@ -1,0 +1,42 @@
+diff --git a/src/pages/Facility/patient/components/PatientHeaderActions.tsx b/src/pages/Facility/patient/components/PatientHeaderActions.tsx
+new file mode 100644
+index 000000000..cdd49a6cf
+--- /dev/null
++++ b/src/pages/Facility/patient/components/PatientHeaderActions.tsx
+@@ -0,0 +1,36 @@
++interface PatientHeaderActionsProps {
++  patientName: string;
++  onAdmit: () => void;
++  onTransfer: () => void;
++  onDischarge: () => void;
++  onPrint: () => void;
++}
++
++// Sticky patient header: name on the left, primary actions on the right.
++export default function PatientHeaderActions({
++  patientName,
++  onAdmit,
++  onTransfer,
++  onDischarge,
++  onPrint,
++}: PatientHeaderActionsProps) {
++  return (
++    <div className="flex flex-col gap-3 border-b p-4 md:flex-row md:items-center md:justify-between">
++      <h1 className="text-xl font-semibold">{patientName}</h1>
++      <div className="flex flex-wrap gap-2 md:flex-nowrap">
++        <button onClick={onAdmit} className="h-11 min-w-[9rem] rounded-md border px-4">
++          Admit
++        </button>
++        <button onClick={onTransfer} className="h-11 min-w-[9rem] rounded-md border px-4">
++          Transfer
++        </button>
++        <button onClick={onDischarge} className="h-11 min-w-[9rem] rounded-md border px-4">
++          Discharge
++        </button>
++        <button onClick={onPrint} className="h-11 min-w-[9rem] rounded-md border px-4">
++          Print summary
++        </button>
++      </div>
++    </div>
++  );
++}

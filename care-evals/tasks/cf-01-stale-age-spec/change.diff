@@ -1,0 +1,11 @@
+diff --git a/src/Utils/utils.ts b/src/Utils/utils.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/Utils/utils.ts
++++ b/src/Utils/utils.ts
+@@ -118,7 +118,7 @@ export function formatPatientAge(years: number): string {
+   if (years < 0) {
+     return "";
+   }
+-  return `${years} Y`;
++  return `${years} years`;
+ }

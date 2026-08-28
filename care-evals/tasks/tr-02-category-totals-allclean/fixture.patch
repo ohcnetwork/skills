@@ -1,0 +1,53 @@
+diff --git a/src/pages/Facility/billing/invoice/components/InvoiceCategoryTotals.tsx b/src/pages/Facility/billing/invoice/components/InvoiceCategoryTotals.tsx
+new file mode 100644
+index 0000000..ac44640
+--- /dev/null
++++ b/src/pages/Facility/billing/invoice/components/InvoiceCategoryTotals.tsx
+@@ -0,0 +1,47 @@
++import { useMemo } from "react";
++
++import { formatCurrency } from "@/Utils/utils";
++
++interface InvoiceLine {
++  id: string;
++  category: string;
++  // amount in minor units (paise/cents)
++  amountMinor: number;
++}
++
++interface InvoiceCategoryTotalsProps {
++  lines: InvoiceLine[];
++  currency: string;
++}
++
++// Groups invoice lines by category and shows each category's subtotal plus the grand total.
++// Amounts are integer minor units; we divide by 100 only for display.
++export default function InvoiceCategoryTotals({
++  lines,
++  currency,
++}: InvoiceCategoryTotalsProps) {
++  const { byCategory, total } = useMemo(() => {
++    const byCategory = new Map<string, number>();
++    let total = 0;
++    for (const line of lines) {
++      byCategory.set(line.category, (byCategory.get(line.category) ?? 0) + line.amountMinor);
++      total += line.amountMinor;
++    }
++    return { byCategory, total };
++  }, [lines]);
++
++  const rows = [...byCategory.entries()].sort(([a], [b]) => a.localeCompare(b));
++
++  return (
++    <dl className="grid grid-cols-2 gap-1 text-sm">
++      {rows.map(([category, amountMinor]) => (
++        <div key={category} className="contents">
++          <dt>{category}</dt>
++          <dd className="text-right">{formatCurrency(amountMinor / 100, currency)}</dd>
++        </div>
++      ))}
++      <dt className="font-semibold">Total</dt>
++      <dd className="text-right font-semibold">{formatCurrency(total / 100, currency)}</dd>
++    </dl>
++  );
++}

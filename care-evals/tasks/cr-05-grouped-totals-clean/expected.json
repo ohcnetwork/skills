@@ -1,0 +1,60 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-05-grouped-totals-clean",
+  "skill": "care-review",
+  "expected_outcome": "clean",
+  "pass": {
+    "require_clean_signal": true,
+    "max_false_positives": 0
+  },
+  "clean_signals": [
+    "sound",
+    "mergeable",
+    "no changes",
+    "nothing to change",
+    "no issues",
+    "no findings",
+    "looks good",
+    "looks correct",
+    "behavior-preserving",
+    "proportionate",
+    "clean",
+    "correct",
+    "nothing worth"
+  ],
+  "must_not_flag": [
+    {
+      "id": "fp-divide-100",
+      "class": "correctness",
+      "signals": [
+        "divide by 100 is wrong",
+        "should not divide by 100",
+        "division by 100 is incorrect",
+        "rounding bug in the total",
+        "floating-point error",
+        "loses precision when"
+      ]
+    },
+    {
+      "id": "fp-usememo-unnecessary",
+      "class": "overengineering",
+      "signals": [
+        "usememo is unnecessary",
+        "unnecessary usememo",
+        "remove the usememo",
+        "usememo adds nothing"
+      ]
+    },
+    {
+      "id": "fp-map-accumulator",
+      "class": "correctness",
+      "signals": [
+        "?? 0 is wrong",
+        "accumulator is wrong",
+        "grouping is incorrect",
+        "total is double-counted",
+        "double-counts the"
+      ]
+    }
+  ]
+}

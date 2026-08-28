@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>care-loopd dashboard</title>
+  <style>
+    :root {
+      --bg: #f4f7f9;
+      --bg2: #fff;
+      --fg: #0a1018;
+      --fg2: #5a6872;
+      --border: #d4dbe2;
+      --accent: #1e9e45;
+      --accent2: #1478c8;
+      --green: #1e9e45;
+      --green-bg: #e0f5e8;
+      --red: #d92534;
+      --red-bg: #fde8ea;
+      --blue: #1478c8;
+      --blue-bg: #dceefa;
+      --yellow: #b08800;
+      --yellow-bg: #fdf3d7;
+      --gray: #5a6872;
+      --gray-bg: #e4e9ed;
+      --radius: 0.625rem;
+      --mono: "Space Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+      --sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #02080e;
+        --bg2: #09131a;
+        --fg: #e9f0f5;
+        --fg2: #85919a;
+        --border: #202a32;
+        --accent: #2fbc5b;
+        --accent2: #319cfc;
+        --green: #24c55f;
+        --green-bg: #0d2618;
+        --red: #f22a36;
+        --red-bg: #2a0e10;
+        --blue: #319cfc;
+        --blue-bg: #0c1e30;
+        --yellow: #edb200;
+        --yellow-bg: #2a2200;
+        --gray: #85919a;
+        --gray-bg: #172128;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.25rem 1.5rem;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.75rem;
+      flex-wrap: wrap;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    header .controls {
+      margin-left: auto;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      font-size: 0.8rem;
+      color: var(--fg2);
+    }
+
+    header .controls label {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .back-btn {
+      cursor: pointer;
+      background: var(--gray-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.3rem 0.75rem;
+      color: var(--fg);
+      font-size: 0.8rem;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+
+    .back-btn:hover {
+      background: var(--border);
+    }
+
+    /* Fleet table */
+    .fleet-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 0.85rem;
+    }
+
+    .fleet-table th {
+      text-align: left;
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      color: var(--fg2);
+      letter-spacing: 0.06em;
+    }
+
+    .fleet-table td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+
+    .fleet-table tr {
+      cursor: pointer;
+    }
+
+    .fleet-table tr:hover td {
+      background: var(--gray-bg);
+    }
+
+    .fleet-table .run-name {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .fleet-table .num {
+      text-align: right;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+    }
+
+    .fleet-table .age {
+      color: var(--fg2);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
+    /* Step badge */
+    .step-badge {
+      display: inline-block;
+      padding: 0.15rem 0.55rem;
+      border-radius: var(--radius);
+      font-size: 0.72rem;
+      font-weight: 600;
+      white-space: nowrap;
+      letter-spacing: 0.01em;
+    }
+
+    .step-badge.active {
+      background: var(--blue-bg);
+      color: var(--blue);
+    }
+
+    .step-badge.merged {
+      background: var(--green-bg);
+      color: var(--green);
+    }
+
+    .step-badge.aborted {
+      background: var(--red-bg);
+      color: var(--red);
+    }
+
+    .step-badge.awaiting {
+      background: var(--yellow-bg);
+      color: var(--yellow);
+    }
+
+    .tier-badge {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      border-radius: calc(var(--radius) * 0.6);
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 500;
+      background: var(--gray-bg);
+      color: var(--fg2);
+    }
+
+    /* Pipeline viz */
+    .pipeline {
+      display: flex;
+      gap: 3px;
+      align-items: center;
+    }
+
+    .pipeline .pip {
+      width: 20px;
+      height: 5px;
+      border-radius: 2.5px;
+      background: var(--gray-bg);
+      transition: background 0.2s;
+    }
+
+    .pipeline .pip.done {
+      background: var(--green);
+      opacity: 0.5;
+    }
+
+    .pipeline .pip.current {
+      background: var(--accent);
+    }
+
+    .pipeline .pip.terminal-ok {
+      background: var(--green);
+    }
+
+    .pipeline .pip.terminal-fail {
+      background: var(--red);
+    }
+
+    /* Run detail */
+    .run-header {
+      margin-bottom: 1.75rem;
+    }
+
+    .run-header h2 {
+      font-family: var(--mono);
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+      word-break: break-all;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .run-meta {
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+      font-size: 0.82rem;
+      color: var(--fg2);
+    }
+
+    .run-meta span {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    /* Event timeline */
+    .timeline {
+      position: relative;
+      padding-left: 1.75rem;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 0.5rem;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--border);
+      border-radius: 1px;
+    }
+
+    .event {
+      position: relative;
+      margin-bottom: 0.4rem;
+      padding: 0.45rem 0.7rem;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .event::before {
+      content: "";
+      position: absolute;
+      left: -1.3rem;
+      top: 0.75rem;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--gray);
+      border: 2px solid var(--bg);
+    }
+
+    .event.ev-step::before {
+      background: var(--accent);
+    }
+
+    .event.ev-skill::before {
+      background: var(--accent2);
+    }
+
+    .event.ev-push::before {
+      background: var(--green);
+    }
+
+    .event.ev-error::before {
+      background: var(--red);
+    }
+
+    .event.ev-gate::before {
+      background: var(--yellow);
+    }
+
+    .event .ev-head {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .event .ev-time {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--fg2);
+      white-space: nowrap;
+    }
+
+    .event .ev-type {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--fg);
+      white-space: nowrap;
+    }
+
+    .event .ev-subtype {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      color: var(--fg2);
+      padding: 0.1rem 0.35rem;
+      border-radius: calc(var(--radius) * 0.5);
+      background: var(--gray-bg);
+      white-space: nowrap;
+    }
+
+    .event .ev-body {
+      font-size: 0.8rem;
+      color: var(--fg2);
+      margin-top: 0.2rem;
+    }
+
+    .event .ev-detail {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--fg2);
+      margin-top: 0.35rem;
+      padding: 0.4rem 0.6rem;
+      background: var(--bg);
+      border-radius: calc(var(--radius) * 0.6);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+      display: none;
+    }
+
+    .event .ev-toggle {
+      cursor: pointer;
+      font-size: 0.7rem;
+      color: var(--accent);
+      font-weight: 500;
+      margin-left: auto;
+      white-space: nowrap;
+    }
+
+    .event .ev-toggle:hover {
+      text-decoration: underline;
+    }
+
+    .event .ev-cost {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .event .ev-dur {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--fg2);
+    }
+
+    .step-divider {
+      margin: 1rem 0 0.5rem;
+      padding: 0.25rem 0.6rem 0.25rem 0;
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      position: relative;
+      display: flex;
+      align-items: baseline;
+      gap: 0.75rem;
+    }
+
+    .step-divider::before {
+      content: "";
+      position: absolute;
+      left: -1.3rem;
+      top: 0.4rem;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg);
+    }
+
+    .step-divider .step-stats {
+      font-weight: 500;
+      font-size: 0.7rem;
+      color: var(--fg2);
+      text-transform: none;
+      letter-spacing: normal;
+      font-family: var(--mono);
+    }
+
+    .empty {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--fg2);
+      font-size: 0.9rem;
+    }
+
+    .error-msg {
+      color: var(--red);
+      font-size: 0.8rem;
+      font-style: italic;
+    }
+
+    @media (max-width: 700px) {
+      .container {
+        padding: 0.75rem;
+      }
+
+      .fleet-table th:nth-child(n+5),
+      .fleet-table td:nth-child(n+5) {
+        display: none;
+      }
+
+      .run-meta {
+        flex-direction: column;
+        gap: 0.3rem;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <header>
+      <h1 id="title">care-loopd</h1>
+      <div class="controls">
+        <label id="stale-toggle" style="display:none">
+          <input type="checkbox" id="show-stale"> stale
+        </label>
+        <label>
+          <input type="checkbox" id="auto-refresh" checked> auto-refresh
+        </label>
+        <span id="last-update" style="font-size:0.72rem"></span>
+      </div>
+    </header>
+    <main id="main"></main>
+  </div>
+
+  <script>
+    (function () {
+      const $ = (sel) => document.querySelector(sel);
+      const main = $("#main");
+      const titleEl = $("#title");
+      let currentView = "fleet";
+      let currentRun = null;
+      let refreshTimer = null;
+      let navVersion = 0;
+
+      const STEP_LABELS = {
+        "1": "Plan", "2": "Setup", "3": "Implement", "3-implementing": "Implementing",
+        "4a": "Review A", "4b": "Review B", "4c": "Review C", "4c-validating": "Validating",
+        "5": "Gate", "5-committing": "Committing", "5-pushing": "Pushing",
+        "5-await": "CI Wait", "5-replying": "Replying",
+        "6a": "Triage", "6b": "Apply", "6b-applying": "Applying",
+        "7": "Done", "merged": "Merged", "aborted": "Aborted"
+      };
+
+      const PIPELINE_STEPS = ["1", "2", "3", "4", "5", "6", "7"];
+      function stepGroup(step) {
+        if (!step) return null;
+        const n = step.charAt(0);
+        return PIPELINE_STEPS.includes(n) ? n : null;
+      }
+
+      function stepClass(step) {
+        if (step === "merged") return "merged";
+        if (step === "aborted") return "aborted";
+        if (step === "5-await") return "awaiting";
+        return "active";
+      }
+
+      function age(iso) {
+        if (!iso) return "-";
+        const ms = Date.now() - new Date(iso).getTime();
+        if (ms < 60000) return "<1m";
+        if (ms < 3600000) return Math.floor(ms / 60000) + "m";
+        if (ms < 86400000) return Math.floor(ms / 3600000) + "h";
+        return Math.floor(ms / 86400000) + "d";
+      }
+
+      function fmtTime(iso) {
+        if (!iso) return "";
+        return new Date(iso).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", second: "2-digit",
+          hour12: true,
+        }).replace(",", "");
+      }
+
+      function fmtCost(usd) {
+        if (usd == null) return "-";
+        return "$" + usd.toFixed(2);
+      }
+
+      function fmtDuration(ms) {
+        if (ms == null || ms <= 0) return "-";
+        const sec = Math.floor(ms / 1000);
+        if (sec < 60) return sec + "s";
+        const min = Math.floor(sec / 60);
+        const remSec = sec % 60;
+        if (min < 60) return min + "m" + (remSec ? " " + remSec + "s" : "");
+        const hr = Math.floor(min / 60);
+        const remMin = min % 60;
+        return hr + "h" + (remMin ? " " + remMin + "m" : "");
+      }
+
+      // A step (e.g. "6a") can run in more than one round, so stats are keyed by step+round —
+      // otherwise every round's divider would show the merged total for that step.
+      function stepStatsKey(step, round) {
+        return `${step}#${round ?? ""}`;
+      }
+
+      // Wall-clock time is misleading: a run can sit idle for days between a run.end/suspend and a
+      // run.resume (the process isn't running). We measure ACTIVE time only — the sum of gaps
+      // between consecutive events — and drop the gap that lands ON a run.resume, since that gap is
+      // the idle stretch while the loop was stopped.
+      function totalActiveMs(events) {
+        let ms = 0;
+        for (let i = 1; i < events.length; i++) {
+          if (events[i].event === "run.resume") continue;
+          ms += new Date(events[i].ts).getTime() - new Date(events[i - 1].ts).getTime();
+        }
+        return ms;
+      }
+
+      function computeStepStats(events) {
+        const stats = {};
+        let currentStep = null;
+        let currentRound = null;
+        let currentKey = null;
+
+        for (let i = 0; i < events.length; i++) {
+          const ev = events[i];
+          // Attribute the gap prev→ev to the step active during it (the one entered before ev),
+          // unless it's the idle stretch preceding a run.resume.
+          if (i > 0 && currentKey && ev.event !== "run.resume") {
+            const delta = new Date(ev.ts).getTime() - new Date(events[i - 1].ts).getTime();
+            (stats[currentKey] ??= { durationMs: 0, costUsd: 0 }).durationMs += delta;
+          }
+          if (ev.event === "step.enter") {
+            currentStep = ev.step;
+            currentRound = ev.round;
+            currentKey = stepStatsKey(currentStep, currentRound);
+            stats[currentKey] ??= { durationMs: 0, costUsd: 0 };
+          }
+          // Attribute each skill's spend to its step. New logs tag the skill event with its own
+          // `step`; older logs don't, so fall back to the step we're currently inside. Either way
+          // we use the loop round from step.enter — a skill event's own `round` is a spawn counter,
+          // not the loop round.
+          if (typeof ev.data?.cost_usd === "number") {
+            const costStep = ev.step ?? currentStep;
+            if (costStep != null) {
+              const key = stepStatsKey(costStep, currentRound);
+              (stats[key] ??= { durationMs: 0, costUsd: 0 }).costUsd += ev.data.cost_usd;
+            }
+          }
+        }
+        return stats;
+      }
+
+      function renderPipeline(step) {
+        const g = stepGroup(step);
+        const terminal = step === "merged" || step === "aborted";
+        return PIPELINE_STEPS.map(s => {
+          let cls = "pip";
+          if (terminal && s <= (g || "7")) cls += step === "merged" ? " terminal-ok" : " terminal-fail";
+          else if (g && s < g) cls += " done";
+          else if (s === g) cls += " current";
+          return `<div class="${cls}" title="Step ${s}"></div>`;
+        }).join("");
+      }
+
+      function renderFleet(runs) {
+        if (!runs.length) {
+          main.innerHTML = '<div class="empty">No runs found.</div>';
+          return;
+        }
+        const sorted = [...runs].sort((a, b) => {
+          const ta = a.state?.updated_at || a.startedAt || "";
+          const tb = b.state?.updated_at || b.startedAt || "";
+          return tb.localeCompare(ta);
+        });
+
+        let html = `<table class="fleet-table"><thead><tr>
+      <th>Run</th><th>Step</th><th>Pipeline</th><th>Round</th>
+      <th>PR</th><th>Tier</th><th>Cost</th><th>Duration</th><th>Age</th>
+    </tr></thead><tbody>`;
+
+        for (const r of sorted) {
+          const s = r.state;
+          const step = s?.step || "-";
+          const sc = stepClass(step);
+          const prLink = s?.pr ? `#${s.pr}` : "-";
+          html += `<tr data-run="${r.name}">
+        <td class="run-name" title="${r.name}">${r.name}</td>
+        <td><span class="step-badge ${sc}">${STEP_LABELS[step] || step}</span></td>
+        <td><div class="pipeline">${renderPipeline(step)}</div></td>
+        <td class="num">${s?.round ?? "-"}</td>
+        <td class="num">${prLink}</td>
+        <td>${s?.tier ? `<span class="tier-badge">${s.tier}</span>` : "-"}</td>
+        <td class="num">${fmtCost(r.lastCost)}</td>
+        <td class="num">${fmtDuration(r.durationMs)}</td>
+        <td class="age">${age(s?.updated_at || r.startedAt)}</td>
+      </tr>`;
+        }
+        html += `</tbody></table>`;
+        main.innerHTML = html;
+
+      }
+
+      function eventCssClass(ev) {
+        const t = ev.event;
+        if (t.startsWith("step.")) return "ev-step";
+        if (t.startsWith("skill.") || t.startsWith("spawn.")) return "ev-skill";
+        if (t === "push" || t === "ci.done") return "ev-push";
+        if (t === "budget.stop" || t === "run.end" || t.includes("invalid") || t.includes("escalate")) return "ev-error";
+        if (t.startsWith("gate.") || t === "plan.approved") return "ev-gate";
+        return "";
+      }
+
+      function eventTitle(ev) {
+        const d = ev.data || {};
+        const role = d.role ? String(d.role) : "agent";
+        const skill = d.skill ? String(d.skill) : null;
+        const stepLabel = (s) => STEP_LABELS[s] || `Step ${s}`;
+        switch (ev.event) {
+          case "run.start": return "Run started";
+          case "run.resume": return "Run resumed";
+          case "run.end": return "Run ended";
+          case "step.enter": return `Started ${stepLabel(ev.step)}`;
+          case "step.exit": return `Finished ${stepLabel(ev.step)}`;
+          case "gate.asked": return "Awaiting input";
+          case "gate.answered": return "Input received";
+          case "plan.approved": return "Plan approved";
+          case "spawn.start": return `Spawned ${role}`;
+          case "spawn.result": return `${role.charAt(0).toUpperCase() + role.slice(1)} finished`;
+          case "spawn.invalid": return `${role.charAt(0).toUpperCase() + role.slice(1)} output invalid`;
+          case "spawn.retry": return `Retrying ${role}`;
+          case "spawn.escalate": return `Escalated to ${d.to || "?"}`;
+          case "skill.invoke": return skill ? `Running ${skill}` : "Running skill";
+          case "skill.result": return skill ? `${skill} finished` : "Skill finished";
+          case "helper.exec": return "Ran command";
+          case "decision": return "Decision";
+          case "push": return "Pushed commit";
+          case "ci.wait": return "Waiting for CI";
+          case "ci.done": return "CI finished";
+          case "budget.tick": return "Budget update";
+          case "budget.stop": return "Budget limit hit";
+          case "checkpoint.written": return "Checkpoint saved";
+          default: return ev.event;
+        }
+      }
+
+      function eventSummary(ev) {
+        const d = ev.data || {};
+        switch (ev.event) {
+          case "skill.invoke": return `${d.skill || ""}`;
+          case "skill.result": {
+            const parts = [d.skill || "", d.verdict || d.terminal_state || ""];
+            if (d.counts) parts.push(Object.entries(d.counts).map(([k, v]) => `${k}=${v}`).join(" "));
+            return parts.filter(Boolean).join(" — ");
+          }
+          case "helper.exec": return `$ ${d.cmd || ""} → exit ${d.exit ?? "?"}`;
+          case "decision": return `${d.from} → ${d.to}`;
+          case "push": return `${(d.head_sha || "").slice(0, 9)}${d.pr ? ` PR #${d.pr}` : ""}`;
+          case "plan.approved": return `by ${d.planned_by || "?"}, tier=${d.classification || "?"}`;
+          case "gate.asked": return `${d.count || "?"} question(s)`;
+          case "spawn.result": return `${d.role || ""} → ${d.verdict || ""} ${d.reason_code || ""}`;
+          case "run.start": return (d.state?.task || d.task || "").slice(0, 120);
+          case "run.end": return d.outcome || d.reason_code || "";
+          case "ci.done": return d.conclusion || "";
+          default: return "";
+        }
+      }
+
+      function renderDetail(detail) {
+        const s = detail.state;
+        const step = s?.step || "?";
+        const sc = stepClass(step);
+
+        let hdr = `<div class="run-header">
+      <button class="back-btn" id="back-btn">← Fleet</button>
+      <h2>${detail.name}</h2>
+      <div class="run-meta">
+        <span><span class="step-badge ${sc}">${STEP_LABELS[step] || step}</span></span>
+        <span>Round ${s?.round ?? "?"}</span>
+        ${s?.pr ? `<span>PR #${s.pr}</span>` : ""}
+        ${s?.tier ? `<span class="tier-badge">${s.tier}</span>` : ""}
+        ${s?.branch ? `<span>branch: ${s.branch}</span>` : ""}
+        <span>${detail.events.length} events</span>
+        ${detail.events.length >= 2 ? `<span>${fmtDuration(totalActiveMs(detail.events))}</span>` : ""}
+      </div>
+      <div class="run-meta" style="margin-top:0.5rem">
+        <div class="pipeline" style="gap:3px">${renderPipeline(step)}</div>
+      </div>
+    </div>`;
+
+        const stepStats = computeStepStats(detail.events);
+
+        let timeline = '<div class="timeline">';
+        let lastKey = null;
+
+        const HIDE = new Set(["step.enter", "step.exit", "decision"]);
+
+        for (const ev of detail.events) {
+          const evKey = ev.event === "step.enter" ? stepStatsKey(ev.step, ev.round) : null;
+          if (evKey && evKey !== lastKey) {
+            const ss = stepStats[evKey];
+            const statParts = [];
+            if (ss?.durationMs > 0) statParts.push(fmtDuration(ss.durationMs));
+            if (ss?.costUsd != null && ss.costUsd > 0) statParts.push(fmtCost(ss.costUsd));
+            const statsHtml = statParts.length ? `<span class="step-stats">${statParts.join(" · ")}</span>` : "";
+            timeline += `<div class="step-divider"><span>Step ${ev.step} ${ev.round ? `· Round ${ev.round}` : ""}</span>${statsHtml}</div>`;
+            lastKey = evKey;
+          }
+
+          if (HIDE.has(ev.event)) continue;
+
+          const css = eventCssClass(ev);
+          const summary = eventSummary(ev);
+          const dur = ev.data?.duration_ms != null ? `${(Number(ev.data.duration_ms) / 1000).toFixed(1)}s` : "";
+          const cost = typeof ev.data?.cost_usd === "number" ? fmtCost(ev.data.cost_usd) : "";
+          const hasData = ev.data && Object.keys(ev.data).length > 0;
+
+          const title = eventTitle(ev);
+          timeline += `<div class="event ${css}">
+        <div class="ev-head">
+          <span class="ev-time">${fmtTime(ev.ts)}</span>
+          <span class="ev-type">${escHtml(title)}</span>
+          <span class="ev-subtype">${ev.event}</span>
+          ${dur ? `<span class="ev-dur">${dur}</span>` : ""}
+          ${cost ? `<span class="ev-cost">${cost}</span>` : ""}
+          ${hasData ? `<span class="ev-toggle">[data]</span>` : ""}
+        </div>
+        ${summary ? `<div class="ev-body">${escHtml(summary)}</div>` : ""}
+        ${hasData ? `<div class="ev-detail">${escHtml(JSON.stringify(ev.data, null, 2))}</div>` : ""}
+      </div>`;
+        }
+
+        if (!detail.events.length) {
+          timeline += '<div class="empty">No events in journal.</div>';
+        }
+        if (detail.truncatedTail) {
+          timeline += '<div class="error-msg">Journal tail was truncated (crash recovery).</div>';
+        }
+        if (detail.error) {
+          timeline += `<div class="error-msg">Error: ${escHtml(detail.error)}</div>`;
+        }
+
+        timeline += "</div>";
+        main.innerHTML = hdr + timeline;
+
+      }
+
+      // Event delegation — survives auto-refresh re-renders
+      main.addEventListener("click", (e) => {
+        const toggle = e.target.closest(".ev-toggle");
+        if (toggle) {
+          const detail = toggle.closest(".event").querySelector(".ev-detail");
+          const showing = detail.style.display === "block";
+          detail.style.display = showing ? "none" : "block";
+          toggle.textContent = showing ? "[data]" : "[hide]";
+          return;
+        }
+        const backBtn = e.target.closest("#back-btn");
+        if (backBtn) { showFleet(); return; }
+        const row = e.target.closest("tr[data-run]");
+        if (row) { showRun(row.dataset.run); return; }
+      });
+
+      function escHtml(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      async function fetchJson(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        return r.json();
+      }
+
+      async function showFleet() {
+        const v = ++navVersion;
+        currentView = "fleet";
+        currentRun = null;
+        titleEl.textContent = "care-loopd";
+        $("#stale-toggle").style.display = "inline-flex";
+        const stale = $("#show-stale").checked ? "?stale=1" : "";
+        try {
+          const runs = await fetchJson("/api/runs" + stale);
+          if (v !== navVersion) return;
+          renderFleet(runs);
+        } catch (e) {
+          if (v !== navVersion) return;
+          main.innerHTML = `<div class="error-msg">Failed to load runs: ${escHtml(e.message)}</div>`;
+        }
+        updateTimestamp();
+      }
+
+      async function showRun(name) {
+        const v = ++navVersion;
+        currentView = "detail";
+        currentRun = name;
+        titleEl.textContent = name;
+        $("#stale-toggle").style.display = "none";
+        try {
+          const detail = await fetchJson("/api/runs/" + encodeURIComponent(name));
+          if (v !== navVersion) return;
+          renderDetail(detail);
+        } catch (e) {
+          if (v !== navVersion) return;
+          main.innerHTML = `<div class="error-msg">Failed to load run: ${escHtml(e.message)}</div>`;
+        }
+        updateTimestamp();
+      }
+
+      function updateTimestamp() {
+        const t = new Date().toLocaleTimeString();
+        $("#last-update").textContent = t;
+      }
+
+      async function refresh() {
+        const scrollY = window.scrollY;
+        if (currentView === "fleet") await showFleet();
+        else if (currentView === "detail" && currentRun) await showRun(currentRun);
+        window.scrollTo(0, scrollY);
+      }
+
+      function scheduleRefresh() {
+        clearInterval(refreshTimer);
+        if ($("#auto-refresh").checked) {
+          refreshTimer = setInterval(refresh, 10000);
+        }
+      }
+
+      $("#auto-refresh").addEventListener("change", scheduleRefresh);
+      $("#show-stale").addEventListener("change", () => { if (currentView === "fleet") showFleet(); });
+
+      showFleet();
+      scheduleRefresh();
+    })();
+  </script>
+</body>
+
+</html>

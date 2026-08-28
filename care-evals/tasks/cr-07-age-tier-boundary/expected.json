@@ -1,0 +1,42 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cr-07-age-tier-boundary",
+  "skill": "care-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["age-tier-boundary-offbyone"]
+  },
+  "must_flag": [
+    {
+      "id": "age-tier-boundary-offbyone",
+      "class": "correctness",
+      "file": "src/Utils/formatAgeTier.ts",
+      "line_hint": "if (totalDays >= 364) { ... years = diff('years') }",
+      "signals": [
+        "years >= 1",
+        "years>=1",
+        "0Y 11mo",
+        "0 years",
+        "0Y",
+        "still 0",
+        "is 0 at 364",
+        "years is 0",
+        "diff('years') is 0",
+        "off-by-one",
+        "off by one",
+        "gate on years",
+        "gate should be on",
+        "totalDays >= 364",
+        "364 days",
+        "renders 1Y",
+        "should show 1Y",
+        "calendar-aware",
+        "shown unit",
+        "displayed unit"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

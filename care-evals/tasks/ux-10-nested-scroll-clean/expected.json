@@ -1,0 +1,68 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-10-nested-scroll-clean",
+  "skill": "care-ux-review",
+  "expected_outcome": "clean",
+  "pass": {
+    "require_clean_signal": true,
+    "max_false_positives": 0
+  },
+  "clean_signals": [
+    "clean pass",
+    "no broken",
+    "no findings",
+    "nothing to flag",
+    "nothing worth",
+    "no issues",
+    "handled correctly",
+    "properly handled",
+    "both scrollers work",
+    "both scroll areas work",
+    "scrolls correctly",
+    "scroll correctly",
+    "scrollers are usable",
+    "bounds and scrolls",
+    "bounded correctly",
+    "sound"
+  ],
+  "must_not_flag": [
+    {
+      "id": "fp-scroll-dead",
+      "class": "broken-nested-scroll",
+      "signals": [
+        "won't scroll",
+        "wont scroll",
+        "will not scroll",
+        "cannot scroll",
+        "can't scroll",
+        "does not scroll",
+        "doesn't scroll",
+        "never scrolls",
+        "not scrollable",
+        "scroller doesn't work",
+        "scroller does not work",
+        "scroll never engages",
+        "missing min-h-0",
+        "no min-h-0",
+        "add min-h-0",
+        "needs min-h-0",
+        "without min-h-0"
+      ]
+    },
+    {
+      "id": "fp-scroll-overflow",
+      "class": "broken-nested-scroll",
+      "signals": [
+        "overflows the sheet",
+        "escapes the sheet",
+        "content is clipped",
+        "gets clipped",
+        "grows to fit",
+        "expands to content",
+        "unbounded height",
+        "double scrollbar",
+        "scroll trap"
+      ]
+    }
+  ]
+}

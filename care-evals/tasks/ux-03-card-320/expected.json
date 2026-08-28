@@ -1,0 +1,41 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "ux-03-card-320",
+  "skill": "care-ux-review",
+  "expected_outcome": "findings",
+  "pass": {
+    "min_recall": 1.0,
+    "max_false_positives": 1,
+    "critical_must_flag": ["card-320-overflow"]
+  },
+  "must_flag": [
+    {
+      "id": "card-320-overflow",
+      "class": "broken-small-device",
+      "file": "src/pages/Facility/schedule/components/AppointmentCard.tsx",
+      "line_hint": "w-[360px] ... px-6 (fits 375, overflows 320)",
+      "signals": [
+        "320",
+        "small phone",
+        "smaller phone",
+        "small screen",
+        "smaller screen",
+        "small device",
+        "smaller device",
+        "below 375",
+        "under 375",
+        "less than 375",
+        "narrower than 375",
+        "narrow phone",
+        "iphone se",
+        "smallest",
+        "compact phone",
+        "older phone",
+        "360px is wider",
+        "360 exceeds",
+        "on smaller"
+      ]
+    }
+  ],
+  "must_not_flag": []
+}

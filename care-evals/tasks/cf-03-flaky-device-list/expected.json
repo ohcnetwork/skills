@@ -1,0 +1,7 @@
+{
+  "schema": "care-evals/expected@1",
+  "task": "cf-03-flaky-device-list",
+  "skill": "care-ci-fix",
+  "expected_verdicts": { "F1": "infra" },
+  "pass": { "min_verdict_accuracy": 1.0, "critical_verdicts": ["F1"] }
+}

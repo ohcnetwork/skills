@@ -1,0 +1,19 @@
+outcome=deferred rounds=1
+---
+run.start step=5-await round=1
+step.enter step=5-await round=1
+ci.wait
+ci.done
+step.exit step=5-await round=1 reason=ci_green
+decision signal=advance 5-await->6a
+step.enter step=6a round=1
+helper.exec step=6a cmd=collect-feedback
+spawn.result step=6a reason=triaged role=care-triager verdict=address=0 decline=0
+step.exit step=6a round=1 reason=ci_red_residual
+decision signal=advance 6a->6b
+step.enter step=6b round=1
+helper.exec step=6b cmd=getFailingSpecs
+spawn.result step=6b reason=no_ci_fixer role=ci-fixer verdict=handoff
+step.exit step=6b round=1 reason=no_ci_fixer
+checkpoint.written reason=ci_red_human
+run.end reason=ci_red_human outcome=deferred

@@ -1,0 +1,34 @@
+outcome=converged rounds=2
+---
+run.start step=5-await round=1
+step.enter step=5-await round=1
+ci.wait
+ci.done
+step.exit step=5-await round=1 reason=ci_green
+decision signal=advance 5-await->6a
+step.enter step=6a round=1
+helper.exec step=6a cmd=collect-feedback
+spawn.result step=6a reason=triaged role=care-triager verdict=address=0 decline=0
+step.exit step=6a round=1 reason=ci_red_residual
+decision signal=advance 6a->6b
+step.enter step=6b round=1
+helper.exec step=6b cmd=getFailingSpecs
+spawn.result step=6b reason=fixed role=ci-fixer verdict=fixed
+step.exit step=6b round=1 reason=ci_fixed
+decision signal=advance 6b->5
+step.enter step=5 round=2
+helper.exec step=5 cmd=run_gate.sh
+push
+step.exit step=5 round=2 reason=gate_passed
+decision signal=gate-ok 5->5-await
+step.enter step=5-await round=2
+ci.wait
+ci.done
+step.exit step=5-await round=2 reason=ci_green
+decision signal=advance 5-await->6a
+step.enter step=6a round=2
+helper.exec step=6a cmd=collect-feedback
+spawn.result step=6a reason=triaged role=care-triager verdict=address=0 decline=0
+step.exit step=6a round=2 reason=converged_clean
+decision signal=converged 6a->7
+run.end reason=clean outcome=converged

@@ -19,7 +19,10 @@
     "live:halfpipe": "tsx src/half-pipe-live.ts",
     "smoke:github": "tsx src/github-smoke.ts",
     "test": "node --import tsx --test --test-force-exit test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:live": "CARE_LIVE=1 node --import tsx --test --test-force-exit test/live/*.live.ts",
+    "typecheck": "tsc --noEmit",
+    "bench:triager": "tsx src/ab-triager.ts",
+    "stress:triager": "tsx src/stress-triage.ts"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.0.0",

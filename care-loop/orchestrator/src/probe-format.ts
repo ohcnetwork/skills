@@ -7,6 +7,8 @@
 
 import { createOpencode } from "@opencode-ai/sdk";
 import { JOBRESULT_SCHEMA } from "./jobresult.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 function unwrap<T>(x: any): T {
   return (x && typeof x === "object" && "data" in x ? x.data : x) as T;
@@ -82,7 +84,10 @@ async function main() {
   const reviewerSystem =
     "You are the care-loop reviewer. Review the supplied diff. You may read files for context. " +
     "Respond ONLY as the required JobResult.";
-  const readTask = "Read /Users/jacob/Desktop/care_fe/package.json for context, then review this trivial diff:\n+// TODO\nSet verdict=pass.";
+  // A real file the model can actually open — the point is to INVITE a read, so the path has to
+  // exist on this machine. CARE_MAIN_REPO is the same knob the loop itself uses for the checkout.
+  const mainRepo = process.env.CARE_MAIN_REPO?.trim() || join(homedir(), "Desktop", "care_fe");
+  const readTask = `Read ${join(mainRepo, "package.json")} for context, then review this trivial diff:\n+// TODO\nSet verdict=pass.`;
   await tryOne("live-cond: tools ON (read-inviting)", JOBRESULT_SCHEMA as any, { system: reviewerSystem, task: readTask });
   // 8) SAME, but exploration tools DISABLED → expect fast single-shot structured output (the FIX).
   const noTools = { write: false, edit: false, bash: false, read: false, glob: false, grep: false, webfetch: false, list: false, patch: false, task: false, todowrite: false, todoread: false };

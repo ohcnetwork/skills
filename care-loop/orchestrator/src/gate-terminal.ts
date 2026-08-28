@@ -17,17 +17,12 @@ export interface TerminalGateIo {
 export class GateInputClosedError extends Error {}
 
 /**
- * Wrap a readline interface in an `ask` that FAILS on a closed stdin instead of hanging on it.
+ * Fails on a closed stdin instead of hanging on it. `rl.question` against an ended stream never
+ * resolves — not EOF, not an empty string, just a promise that sits there — so a non-interactive
+ * invocation stopped dead at the gate with no error and no exit. Reachable rather than theoretical:
+ * the supervisor spawns children with `stdio: "ignore"`.
  *
- * `rl.question` against an ended stream never resolves — not EOF, not an empty string, just a promise
- * that sits there — so a non-interactive invocation stopped dead at the gate, having printed the
- * prompt, with no error and no exit. The CLI advertises a non-interactive (CI/bot) mode and the
- * loop-service supervisor spawns children with `stdio: "ignore"`, so this is a reachable hang rather
- * than a theoretical one. Racing the question against the interface's own `close` turns a silent hang
- * into a diagnosable failure.
- *
- * Shared by both terminal gates: two readline dialogs would otherwise need two copies of the fix, and
- * the second one would be the one nobody remembers.
+ * Shared by both terminal gates, so the fix cannot exist in one and be forgotten in the other.
  */
 export function askOrFail(rl: {
   question: (prompt: string) => Promise<string>;
@@ -43,12 +38,11 @@ export function askOrFail(rl: {
       ),
     );
   });
-  // The caller closes the interface on the happy path too, rejecting this with nobody waiting on it.
+  // The happy path closes the interface too, rejecting this with nobody waiting on it.
   closed.catch(() => {});
   return async (prompt: string): Promise<string> => {
-    // `question` on an ALREADY-closed interface throws synchronously (ERR_USE_AFTER_CLOSE) rather
-    // than returning a promise, so it would escape the race below and surface as a node internal.
-    // Reached by `echo "a" | care-loopd`, where the input ends after the first answer.
+    // An already-closed interface throws ERR_USE_AFTER_CLOSE synchronously rather than returning a
+    // promise, escaping the race below as a node internal. Reached by `echo "a" | care-loopd`.
     try {
       return await Promise.race([rl.question(prompt), closed]);
     } catch (err) {

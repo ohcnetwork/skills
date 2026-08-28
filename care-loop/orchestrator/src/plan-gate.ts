@@ -44,13 +44,12 @@ export interface PlanGate {
 
 // ── Gate outcomes that are not answers ────────────────────────────────────────────────────────────
 //
-// Part of the CONTRACT, not of one adapter: any transport may be revoked or may run out of patience,
-// and `runPlan` has to unwind the same way whichever one is in use. The readline adapter never raises
-// these (a terminal gate's equivalents are ctrl-C and walking away); a polling adapter raises all
-// three. Declared here so the loop can catch them without importing a transport.
+// Part of the contract rather than of one adapter, so `runPlan` unwinds the same way whichever
+// transport is in use and can catch them without importing one. The readline adapter raises none of
+// these — its equivalents are ctrl-C and walking away; a polling adapter raises all three.
 
-/** The caller should stop waiting and EXIT, freeing its slot. Not an error: the ask stays open and
- *  the run resumes when someone answers it ([[PLAN-loop-service]] §7). */
+/** Stop waiting and exit, freeing the slot. Not an error: the ask stays open and the run resumes
+ *  when someone answers it. */
 export class GateSuspendedError extends Error {
   constructor(readonly askId: string) {
     super(`gate ${askId} is still unanswered — suspending`);
@@ -73,12 +72,9 @@ export class GateExpiredError extends Error {
 }
 
 /**
- * A suspended plan stage, restored from wherever the transport persisted it.
- *
- * Assembled by the CALLER (which owns the store) and handed to `runPlan` as plain data, so the loop
- * gains a resume path without gaining a dependency on the service. Everything here was already
- * durable before the run suspended — the plan artifacts are on disk, and these are the two things
- * that only existed in memory.
+ * A suspended plan stage, restored from wherever the transport persisted it. Assembled by the caller
+ * and handed over as plain data, so the loop gains a resume path without a dependency on the service.
+ * Everything else was already durable: the plan artifacts are on disk.
  */
 export interface PlanRestore {
   kind: "interview" | "approve";
@@ -86,8 +82,8 @@ export interface PlanRestore {
   /** The interview, so a resume never re-asks a human what they already answered. */
   questions: PlanQuestion[];
   answers: PlanAnswer[];
-  /** The draft the human was looking at — carries `plannedBy` and `classification`, which are the
-   *  only two fields the approval path reads off the in-memory draft. */
+  /** The draft the human saw. `plannedBy` and `classification` are the only fields the approval
+   *  path reads off it. */
   ask?: ConsolidatedAsk;
   /** Their decision, if they have given one. */
   answer?: ApprovalDecision;

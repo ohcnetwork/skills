@@ -1,18 +1,12 @@
-// run-store.ts — SqliteRunStore: the database IS the source of truth (PLAN-sqlite-run-store.md §2,
-// §10 cutover). `journal.jsonl` is written as a continuously-verified replica (see journal.ts's
-// `readReplica()` + the run.end parity check in parity.ts) — diffed against the DB, and able to
-// rebuild it via `reindex`, but nothing on the live control-flow path (`Journal.read()`, `resume`,
-// `projectState`) depends on it anymore.
+// The database is the source of truth. `journal.jsonl` is written alongside it as the human- and
+// doctor-readable log, and `reindex` can rebuild the run tables from it, but no live control-flow
+// path depends on it. Backing up the tables no journal covers — queue, sessions, gate_asks — is
+// service/backup.ts's job.
 //
-// The write path hooks at exactly two chokepoints — `Journal.append` (per-event mirror + incremental
-// rollup bump) and `state.ts#projectAndWrite` (full rollup recompute, self-healing any incremental
-// drift at the next step boundary) — through the process-wide active store below, so none of the
-// ~120 journal-append call sites or the ~10 `Journal` constructors needed to change.
-//
-// Both writes are now FATAL (§2): a store failure propagates out of `Journal.append` /
-// `projectAndWrite` and halts the run — a replica with holes, or a DB that silently drifted from what
-// actually happened, can verify or rebuild nothing. `NullRunStore` survives only as a test double
-// (§10 item 5); there is no production `--no-db` path any more.
+// The write path hooks two chokepoints through the process-wide active store below: `Journal.append`
+// mirrors each event and bumps the rollups incrementally, and `state.ts#projectAndWrite` recomputes
+// them in full at every step boundary, healing any drift. Both are fatal — a store failure halts the
+// run, because a log with holes rebuilds nothing.
 
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
@@ -26,10 +20,7 @@ export interface RunRollups {
   durationMs: number;
 }
 
-/** Incremental per-event contribution. The caller (`Journal.append`) already has both figures in
- *  hand — `deltaMs` from the DB's last event for this run (§10 item 2: ordering is DB-owned now,
- *  not derived from the jsonl tail), `costUsd` from the event's own data — so nothing here needs to
- *  re-derive them. */
+/** `Journal.append` already holds both figures, so nothing here re-derives them. */
 export interface EventIncrement {
   /** ts - previous event ts; 0 for the first event of a run and across a run.resume boundary. */
   deltaMs: number;
@@ -38,31 +29,23 @@ export interface EventIncrement {
 }
 
 export interface RunStore {
-  /** Seed the `runs` + `run_detail` row from a freshly-validated CareState, BEFORE the run.start
-   *  event row is inserted — so the `run_events` FK never dangles on the very first event (§4). */
+  /** Must run before the `run.start` event row, so the `run_events` FK never dangles. */
   seedRun(slug: string, state: CareState): void;
-  /** Full recompute from the whole event array — the reconciling write `projectAndWrite` makes at
-   *  every step transition; corrects any drift the incremental path in `appendEvent` accumulated. */
+  /** The reconciling write `projectAndWrite` makes at every step transition, correcting any drift
+   *  `appendEvent`'s incremental path accumulated. */
   upsertRun(slug: string, state: CareState, rollups: RunRollups): void;
-  /** Per-event mirror into `run_events` + the incremental rollup bump on `runs`. */
+  /** Mirrors into `run_events` and bumps the rollups on `runs`. */
   appendEvent(runId: string, ev: JournalEvent, incr: EventIncrement): void;
-  /** All events for a run, ordered by seq — the authoritative read path (§10 item 3): `Journal.read()`
-   *  and everything downstream of it (`resume`, `projectState`, the drivers) goes through this. */
+  /** The authoritative read path: `Journal.read()` and everything downstream of it. */
   getEvents(runId: string): JournalEvent[];
-  /** The last event for a run, or null if none — how `Journal.append` derives `seq`/`prev`/`deltaMs`
-   *  now (§10 item 2), instead of reading the jsonl tail. */
+  /** How `Journal.append` derives `seq` and `deltaMs`, instead of reading the jsonl tail. (`prev`
+   *  still comes from the file — it checksums the bytes on disk, not the ordering.) */
   getLastEvent(runId: string): JournalEvent | null;
-  /** Record (or clear, with null) a run.end parity divergence on the run's row — §10 item 7. The
-   *  run.end check is a DETECTOR, not a guard: by the time it fires both writes have committed, so
-   *  it cannot prevent what it finds. It records instead of throwing, and the fleet surfaces it. */
-  recordParityError(runId: string, reason: string | null): void;
-  /** Mirror a skill artifact's BODY into the db alongside the sidecar file it was just written to
-   *  ([[PLAN-loop-service]] §6). Fatal on failure, exactly like `appendEvent`: the database is the
-   *  source of truth the API reads, so a silently-missing artifact would be a run whose record is
-   *  partially absent, repaired invisibly by the next reindex and masking a real db fault.
-   *  Idempotent on (run_id, path) so a resumed or replayed step overwrites rather than throwing.
-   *  `content` is the canonical JSON TEXT; the store encodes it to jsonb. Malformed JSON throws
-   *  here — which is why `SkillLogger.artifact` serializes rather than accepting a string. */
+  /** Mirrors an artifact body alongside the sidecar file. Fatal on failure, like `appendEvent`: a
+   *  silently-missing artifact would be repaired invisibly by the next reindex, masking a real fault.
+   *  Idempotent on (run_id, path), so a replayed step overwrites rather than throwing. `content` is
+   *  canonical JSON text — malformed JSON throws here, which is why `SkillLogger.artifact`
+   *  serializes rather than accepting a string. */
   putArtifact(runId: string, a: ArtifactRow): void;
   close(): void;
 }
@@ -77,30 +60,26 @@ export interface ArtifactRow {
 }
 
 /** Bump with every schema change, and add the matching idempotent step to `migrate()`. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
- * Pragmas that are PER-CONNECTION and are NOT stored in the database file. Every connection that
- * opens `loops.db` must apply them for itself — including ones that do not run the schema, which is
- * exactly where this went wrong: `serve.ts` opened a bare `DatabaseSync`, so the service ran with
- * `busy_timeout = 0` and took an immediate SQLITE_BUSY the moment the child held the write lock,
- * while the child (which does run the schema) waited politely for five seconds.
+ * These are per-connection and are NOT persisted in the file, so EVERY connection must apply them —
+ * including ones that never run the schema. A connection missing `busy_timeout` takes an immediate
+ * SQLITE_BUSY the moment a child holds the write lock.
  *
- * `journal_mode = WAL` is deliberately NOT here: it IS persisted in the file, and it is also what
- * masked the bug — WAL lets readers proceed without the write lock, so a read-only service never
- * contended. The problem only became reachable when the service started writing sessions and queue
- * rows.
+ * `journal_mode = WAL` is absent because it IS persisted. It also masked the bug above: WAL lets
+ * readers proceed without the write lock, so nothing contended until the service began writing.
  */
 export function applyConnectionPragmas(db: DatabaseSync): void {
   db.exec(`
     PRAGMA busy_timeout = 5000;
     PRAGMA foreign_keys = ON;
-    PRAGMA synchronous = FULL;  -- §10 item 4: the DB is the only source Journal.read()/resume trust
+    PRAGMA synchronous = FULL;  -- the only source Journal.read() and resume trust
   `);
 }
 
 const SCHEMA = `
-PRAGMA journal_mode = WAL;      -- persisted in the file; the rest are per-connection, see above
+PRAGMA journal_mode = WAL;      -- persisted in the file, unlike applyConnectionPragmas' set
 
 CREATE TABLE IF NOT EXISTS runs (
   run_id       TEXT PRIMARY KEY,
@@ -116,8 +95,7 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_at   TEXT NOT NULL,
   event_count  INTEGER NOT NULL DEFAULT 0,
   cost_usd     REAL    NOT NULL DEFAULT 0,
-  duration_ms  INTEGER NOT NULL DEFAULT 0,
-  parity_error TEXT      -- §10 item 7: last run.end parity divergence; NULL = clean
+  duration_ms  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS run_detail (
@@ -128,23 +106,6 @@ CREATE TABLE IF NOT EXISTS run_detail (
   worktree          TEXT NOT NULL,
   head_sha          TEXT,
   last_reviewed_sha TEXT
-);
-
--- Real 1:N (schema-complete per PLAN §3); NOT populated yet — per-round analytics is future work.
--- The read path (run-index.ts) never queries it; the journal file stays the per-round detail source.
-CREATE TABLE IF NOT EXISTS run_rounds (
-  run_id        TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  round         INTEGER NOT NULL,
-  started_at    TEXT NOT NULL,
-  ended_at      TEXT,
-  triage_total  INTEGER,
-  addressed     INTEGER,
-  declined      INTEGER,
-  apply_outcome TEXT,
-  ci_outcome    TEXT,
-  pushed_sha    TEXT,
-  cost_usd      REAL,
-  PRIMARY KEY (run_id, round)
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -160,26 +121,15 @@ CREATE TABLE IF NOT EXISTS run_events (
   PRIMARY KEY (run_id, seq)
 );
 
--- Skill artifact BODIES ([[PLAN-loop-service]] §6). The journal spine stays lean — a skill.result
--- event carries bounded fields plus a {path,sha256} REF — but the service reads the database and
--- nothing else, so the referenced content has to live here too or the API can report that a skill
--- returned three findings without being able to show what it wrote.
+-- Artifact bodies. The journal event carries only a {path,sha256} ref, but the service reads the
+-- database and nothing else, so the content has to be reachable here too. Stored inline because the
+-- whole historical fleet is 200 artifacts / 1.1 MB (measured 2026-08-20).
 --
--- Content is stored inline rather than by reference: the entire historical fleet is 200 artifacts /
--- 1.1 MB, largest single 21 KB (measured 2026-08-20), so there is nothing here that warrants an
--- external blob store or a size cap. The bytes column records the ORIGINAL text length, so a future
--- runaway is visible as data rather than as a mystery.
+-- BLOB, not "JSONB": jsonb is a function and an encoding, not a column type, and declaring it would
+-- land on NUMERIC affinity and silently coerce numeric-looking strings.
 --
--- content is SQLite's binary JSON (produced by jsonb(), read back with json()), not text. Every
--- artifact is a serialized JSON value by construction — SkillLogger.artifact takes a value and does
--- the serializing — so the encoding is always valid, and json_extract() over it needs no reparse if
--- we ever want to query inside bodies. NOTE: jsonb is a FUNCTION and an encoding, not a column type;
--- declaring a column "JSONB" would land on NUMERIC affinity and silently coerce numeric-looking
--- strings. BLOB is the correct declaration.
---
--- PK is (run_id, path), not (run_id, sha256): the sidecar path is unique within a run, while two
--- artifacts CAN share content (an unchanged input across two rounds) and keying by hash would
--- silently collapse them into one row.
+-- Keyed by path, not sha256: two artifacts can share content (an unchanged input across two rounds),
+-- and keying by hash would silently collapse them into one row.
 CREATE TABLE IF NOT EXISTS run_artifacts (
   run_id  TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   path    TEXT NOT NULL,      -- run-dir-relative, e.g. skills/care-reviewer-r1.input.json
@@ -192,13 +142,12 @@ CREATE TABLE IF NOT EXISTS run_artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON run_artifacts(run_id, sha256);
 
--- SERVICE-OWNED tables ([[PLAN-loop-service]] §3, §6). Unlike everything above, these have no journal
--- behind them and reindex must never touch them: a deleted queue row is unrecoverable where a deleted
--- runs row is not. They are written by the service; the run tables are written by the child.
+-- SERVICE-OWNED tables, written by the service where the run tables are written by the child. They
+-- have no journal behind them, so reindex must never touch them: a deleted queue row is
+-- unrecoverable where a deleted runs row is not.
 --
--- users is the roster, accumulated as people log in. login is the GitHub login and is MUTABLE — a
--- rename orphans history — which is why the numeric github_id column exists unpopulated: real auth
--- brings it, and the future migration points runs.requested_by at users.id rather than rewriting rows.
+-- login is mutable — a GitHub rename orphans history — which is why the numeric github_id column
+-- exists unpopulated. Real auth supplies it, and points runs.requested_by at users.id.
 CREATE TABLE IF NOT EXISTS users (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   login        TEXT NOT NULL UNIQUE,
@@ -207,9 +156,8 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen_at TEXT NOT NULL
 );
 
--- sessions holds a HASH of each token, never the token: the cookie value is the only copy, so a
--- leaked database cannot be replayed as a live login. Cheap now, awkward to retrofit later.
--- revoked_at rather than DELETE, per the standing preference for soft deletes on domain rows.
+-- A hash of each token, never the token: the cookie is the only copy, so a leaked database cannot
+-- be replayed as a live login. revoked_at rather than DELETE keeps "who was signed in when".
 CREATE TABLE IF NOT EXISTS sessions (
   token_sha256 TEXT PRIMARY KEY,
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -222,17 +170,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- The request queue. The service inserts; the supervisor claims, spawns, and writes the terminal
--- status. The CHILD never sees this table — it is handed a run dir and flags, exactly as a human
--- would from the CLI, which is what keeps the child the same binary either way.
+-- status. The child never sees this table.
 --
--- run_id is minted at ENQUEUE (run-id.ts), because POST /api/runs must answer { run_id }
--- synchronously while the child starts long afterwards — possibly never, if the row is cancelled or
--- the spawn fails. It is deliberately NOT a foreign key to runs(run_id): the queue row exists before
--- any run row does, so a FK would reject every insert. That also means reindex's DELETE FROM runs
--- cannot cascade queue rows away, which is the behaviour we want — a queue row is unrecoverable
--- where a runs row is rebuildable.
---
--- status: pending → running → done | failed, or cancelled from either of the first two.
+-- run_id is minted at enqueue, because POST /api/runs answers synchronously while the child starts
+-- long afterwards — possibly never, if the row is cancelled or the spawn fails. It is NOT a foreign
+-- key to runs(run_id): the queue row exists before any run row does, so a FK would reject every
+-- insert, and reindex's DELETE FROM runs would cascade away rows nothing can rebuild.
 CREATE TABLE IF NOT EXISTS queue (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id       TEXT NOT NULL UNIQUE,
@@ -250,11 +193,11 @@ CREATE TABLE IF NOT EXISTS queue (
   error        TEXT
 );
 
--- v6 — the plan gate ([[PLAN-loop-service]] §7). Ask and answer are both ROWS, so a gate survives the
--- service restarting AND the child exiting: the two sides never talk to each other, only to this table.
+-- The plan gate. Ask and answer are both rows, so a gate survives the service restarting AND the
+-- child exiting: the two sides never talk to each other, only to this table.
 CREATE TABLE IF NOT EXISTS gate_asks (
   run_id       TEXT NOT NULL,
-  ask_id       TEXT NOT NULL,   -- 'interview:<n>' | 'approve:<n>' — PER ATTEMPT, never bare 'approve'
+  ask_id       TEXT NOT NULL,   -- 'interview:<n>' | 'approve:<n>' — per attempt, never a bare kind
   kind         TEXT NOT NULL,   -- interview | approve
   payload      BLOB NOT NULL,   -- jsonb: PlanQuestion[] or ConsolidatedAsk
   answer       BLOB,            -- jsonb: PlanAnswer[] or ApprovalDecision; NULL while pending
@@ -266,13 +209,11 @@ CREATE TABLE IF NOT EXISTS gate_asks (
   PRIMARY KEY (run_id, ask_id)
 );
 
--- "Does this run have an open question?" — asked by the claim path, the cancel path, and the FE's
--- needs-you list. Partial, because a pending ask is a tiny minority of rows the moment the fleet has
--- any history at all.
+-- "Does this run have an open question?" — the claim path, the cancel path, and the needs-you list.
+-- Partial, because a pending ask is a tiny minority of rows once the fleet has any history.
 CREATE INDEX IF NOT EXISTS idx_gate_pending ON gate_asks(run_id)
   WHERE answer IS NULL AND cancelled_at IS NULL;
 
--- The claim scan reads pending rows oldest-first and checks for a live row on the same branch.
 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status, enqueued_at);
 CREATE INDEX IF NOT EXISTS idx_queue_target ON queue(repo, branch, status);
 CREATE INDEX IF NOT EXISTS idx_runs_mine   ON runs(requested_by, started_at DESC);
@@ -280,7 +221,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_recent ON runs(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON run_events(event, ts DESC);
 `;
 
-/** Reconstruct a `JournalEvent` from a `run_events` row — the inverse of what `appendEvent` stores. */
+/** The inverse of what `appendEvent` stores. */
 function rowToEvent(row: {
   run_id: string;
   seq: number;
@@ -301,15 +242,14 @@ function rowToEvent(row: {
   };
   if (row.step !== null) ev.step = row.step;
   if (row.round !== null) ev.round = row.round;
-  if (row.data !== null) ev.data = JSON.parse(row.data) as Record<string, unknown>;
+  if (row.data !== null)
+    ev.data = JSON.parse(row.data) as Record<string, unknown>;
   if (row.cost_cum !== null) ev.cost_cum = { usd_est: row.cost_cum };
   return ev;
 }
 
-/** Lift of the fold `dashboard.ts#summarizeRun` used to do at read-time-per-poll — now computed once
- *  at write-time (`projectAndWrite`) and by `reindex`. Sums `data.cost_usd` off `skill.result` events
- *  (NOT `cost_cum`, which does not accumulate correctly on older journals) and the active duration
- *  (gaps between consecutive events, dropping the gap that lands on a `run.resume`). */
+/** Sums `data.cost_usd` off `skill.result` events — not `cost_cum`, which does not accumulate
+ *  correctly on older journals — and the active duration, ignoring the gap a `run.resume` spans. */
 export function rollupsFromEvents(events: JournalEvent[]): RunRollups {
   let costUsd = 0;
   for (const e of events) {
@@ -338,19 +278,23 @@ export class SqliteRunStore implements RunStore {
     this.migrate();
   }
 
-  /** Schema migrations, keyed off `PRAGMA user_version` (PLAN §3: the migration hook, no
-   *  schema_version table). Written to be idempotent and safe to run against a fresh DB as well as
-   *  an existing one: `CREATE TABLE IF NOT EXISTS` in SCHEMA leaves an older `runs` table untouched,
-   *  so a v1 database reaches here WITHOUT the columns a v2 SCHEMA declares. Column presence is
-   *  checked directly rather than inferred from the version, so a half-applied migration (ALTER ran,
-   *  version bump did not) self-heals instead of throwing "duplicate column name". */
+  /** `CREATE TABLE IF NOT EXISTS` leaves an existing `runs` untouched, so an older database arrives
+   *  here with the wrong columns. Presence is checked directly rather than inferred from
+   *  `user_version`, so a half-applied migration self-heals instead of throwing. */
   private migrate(): void {
     const cols = this.db
       .prepare("SELECT name FROM pragma_table_info('runs')")
       .all() as unknown as { name: string }[];
-    if (!cols.some((c) => c.name === "parity_error")) {
-      this.db.exec("ALTER TABLE runs ADD COLUMN parity_error TEXT");
+    // v7 — drop `parity_error`. The jsonl log is no longer diffed against the db on every
+    // run.end/run.resume (see journal.ts's header), so nothing writes this and nothing reads it.
+    // Dropped rather than left in place so a fresh db and an upgraded one have the same shape.
+    if (cols.some((c) => c.name === "parity_error")) {
+      this.db.exec("ALTER TABLE runs DROP COLUMN parity_error");
     }
+    // v7 — drop `run_rounds`. Declared schema-complete for per-round analytics that was never built:
+    // no INSERT, no SELECT, and zero rows in every db it ever shipped to. Re-add it with the feature
+    // that needs it, when its columns can be chosen against a real query rather than guessed.
+    this.db.exec("DROP TABLE IF EXISTS run_rounds");
     // v3 (`run_artifacts`), v4 (`users`/`sessions`), v5 (`queue`) and v6 (`gate_asks`) need no step
     // here: they are NEW tables, so the `CREATE TABLE IF NOT EXISTS` in SCHEMA already created them on
     // this connection.
@@ -361,7 +305,11 @@ export class SqliteRunStore implements RunStore {
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
-  private writeRunRow(slug: string, state: CareState, rollups: RunRollups): void {
+  private writeRunRow(
+    slug: string,
+    state: CareState,
+    rollups: RunRollups,
+  ): void {
     this.db.exec("BEGIN");
     try {
       this.db
@@ -477,12 +425,6 @@ export class SqliteRunStore implements RunStore {
     return rows.map(rowToEvent);
   }
 
-  recordParityError(runId: string, reason: string | null): void {
-    this.db
-      .prepare("UPDATE runs SET parity_error = :reason WHERE run_id = :run_id")
-      .run({ reason, run_id: runId });
-  }
-
   putArtifact(runId: string, a: ArtifactRow): void {
     this.db
       .prepare(
@@ -504,36 +446,29 @@ export class SqliteRunStore implements RunStore {
 
   getLastEvent(runId: string): JournalEvent | null {
     const row = this.db
-      .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
+      .prepare(
+        "SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1",
+      )
       .get(runId) as unknown as Parameters<typeof rowToEvent>[0] | undefined;
     return row ? rowToEvent(row) : null;
   }
 
-  /** Wipe every projected row (cascades to run_detail/run_events/run_rounds/run_artifacts) — the
-   *  first step of `care-loopd reindex`'s rebuild-from-journals guarantee (PLAN-sqlite-run-store.md
-   *  §8). Not part of the `RunStore` write-path interface: only reindex tooling needs a full clear.
-   *
-   *  Scoped to the RUN tables on purpose. `queue`, `gate_asks`, `users`, and `sessions` are
-   *  service-owned and have no journal behind them, so deleting one of their rows is unrecoverable
-   *  where deleting a runs row is not — losing `gate_asks` means a human re-approves a plan, and
-   *  losing `queue` means a request is re-submitted. They survive a reindex by not being named here,
-   *  and neither `queue.run_id` nor `gate_asks.run_id` is a foreign key, so the cascade cannot reach
-   *  them either. */
+  /** The first step of `reindex`'s rebuild. Deliberately scoped to the run tables: `queue`,
+   *  `gate_asks`, `users`, and `sessions` have no journal behind them, so their rows are
+   *  unrecoverable. They survive by not being named here, and their `run_id` columns are not foreign
+   *  keys, so the cascade cannot reach them either. */
   clearAll(): void {
     this.db.exec("DELETE FROM runs");
   }
 
-  /** Read-only escape hatch for tooling that needs direct SQL (RunIndex, tests). Not part of the
-   *  `RunStore` write-path interface. */
+  /** Escape hatch for tooling that needs direct SQL (RunIndex, tests). */
   raw(): DatabaseSync {
     return this.db;
   }
 }
 
-/** The no-db test double: every method is a no-op / returns empty. `--no-db` no longer exists in
- *  production (§10 item 5) — a run that can't reach the DB can no longer resume or project state, so
- *  it would be a broken mode rather than an opt-out. Kept for tests that don't care about DB
- *  persistence and deliberately don't set up a real store. */
+/** Test double for tests that deliberately set up no store. There is no production `--no-db` path:
+ *  a run that cannot reach the DB can no longer resume or project state. */
 export class NullRunStore implements RunStore {
   seedRun(_slug: string, _state: CareState): void {}
   upsertRun(_slug: string, _state: CareState, _rollups: RunRollups): void {}
@@ -544,14 +479,13 @@ export class NullRunStore implements RunStore {
   getLastEvent(_runId: string): JournalEvent | null {
     return null;
   }
-  recordParityError(_runId: string, _reason: string | null): void {}
   putArtifact(_runId: string, _a: ArtifactRow): void {}
   close(): void {}
 }
 
 let activeStore: RunStore = new NullRunStore();
 
-/** Set the process-wide store `Journal.append` / `projectAndWrite` mirror into. */
+/** The store `Journal.append` and `projectAndWrite` mirror into. */
 export function setActiveRunStore(store: RunStore): void {
   activeStore = store;
 }
@@ -560,10 +494,8 @@ export function getActiveRunStore(): RunStore {
   return activeStore;
 }
 
-/** Open a `SqliteRunStore` at `dbPath`. Throws if it can't be opened — PLAN §2/§10: the DB is the
- *  source of truth, so an unreachable DB is fatal, not a silent fallback. There is no `--no-db`
- *  production path any more (§10 item 5); tests that want a no-op store construct `NullRunStore`
- *  directly. */
+/** Throws if the database cannot be opened: it is the source of truth, so this is fatal rather than
+ *  a silent fallback. */
 export function openRunStore(dbPath: string): RunStore {
   return new SqliteRunStore(dbPath);
 }

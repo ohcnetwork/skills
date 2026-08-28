@@ -1,8 +1,5 @@
-// api/queries.ts — every server interaction, as TanStack Query hooks.
-//
-// Query keys mirror the URL they fetch, so a filter change is a new key and therefore a new cache
-// entry rather than a mutation of an existing one. That is what makes back/forward navigation
-// instant: the previous filter's results are still cached under their own key.
+// Query keys mirror the URL they fetch, so a filter change is a new cache entry rather than a
+// mutation of an existing one — which is what makes back/forward navigation instant.
 
 import {
   useInfiniteQuery,
@@ -34,9 +31,8 @@ export interface Me {
   account: User | null;
 }
 
-/** Who the caller is. Answers 200-with-null when nobody is signed in, so this is one unconditional
- *  call whose RESULT decides between the login screen and the app — an anonymous visitor is a state,
- *  not an error, and must not be retried as though the request failed. */
+/** Answers 200-with-null when nobody is signed in, so one unconditional call decides between the
+ *  login screen and the app. An anonymous visitor is a state, not a failure to retry. */
 export function useMe(): UseQueryResult<Me> {
   return useQuery({
     queryKey: ["me"],
@@ -50,9 +46,8 @@ export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (login: string) => api.post<{ user: User }>("/api/auth/login", { login }),
-    // Refetch rather than write the result into the cache: the session cookie is what actually
-    // decides identity from here on, so re-asking the server is the honest confirmation that it
-    // stuck. Writing `me` optimistically would show a signed-in UI even if the cookie were rejected.
+    // Refetch rather than write the result in: the cookie decides identity from here on, and an
+    // optimistic write would show a signed-in UI even if the cookie were rejected.
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["me"] }),
   });
 }
@@ -70,16 +65,14 @@ export function useRuns(filters: RunFilters, opts: { refetch?: number } = {}) {
   return useQuery({
     queryKey: ["runs", filters],
     queryFn: () => api.get<Page<RunSummary>>(`/api/runs${qs(filters)}`),
-    // Keep showing the previous page while the next loads, so tabbing a filter does not blank the
-    // table and jump the scroll position.
+    // Keeps the previous page visible while the next loads, so filtering does not blank the table.
     placeholderData: (prev) => prev,
     refetchInterval: opts.refetch,
   });
 }
 
 export function useFacets(filters: RunFilters) {
-  // Facets answer the SAME filter as the list, so narrowing to one repo offers only that repo's
-  // branches. Paging params are stripped: they do not change which values exist.
+  // Same filter as the list, minus paging — which does not change which values exist.
   const { limit: _l, offset: _o, order: _r, dir: _d, ...rest } = filters;
   return useQuery({
     queryKey: ["facets", rest],
@@ -91,23 +84,20 @@ export function useFacets(filters: RunFilters) {
 export function useRun(runId: string, opts: { refetch?: number } = {}) {
   return useQuery({
     queryKey: ["run", runId],
-    // Both halves are nullable: `run` is absent until a process writes a journal, `queue` is absent
-    // for a CLI-started run. A queued run is addressable before either exists, because the id is
-    // minted at enqueue.
+    // Both halves are nullable: `run` is absent until a process writes a journal, `queue` for a
+    // CLI-started run. The id is minted at enqueue, so a run is addressable before either exists.
     queryFn: () => api.get<{ run: RunRecord | null; queue: QueueRow | null }>(`/api/runs/${runId}`),
     refetchInterval: opts.refetch,
   });
 }
 
-/** Page size for the timeline. The API caps at 2000; asking for that in one shot and ignoring
- *  `next_seq` meant a long run's timeline simply STOPPED at 2000 with nothing saying so. The live
- *  fleet already has a 327-event run. */
+/** The API caps at 2000, and asking for that in one shot while ignoring `next_seq` made a long
+ *  run's timeline stop dead at 2000 with nothing saying so. */
 const EVENTS_PAGE = 500;
 
 export function useRunEvents(runId: string, opts: { refetch?: number; enabled?: boolean } = {}) {
   return useInfiniteQuery({
-    // A queued run has an id but no journal, so this route 404s until a process writes one. Asking
-    // anyway would 404 on every poll of a perfectly healthy run.
+    // A queued run has an id but no journal, so this route 404s on every poll until one exists.
     enabled: opts.enabled ?? true,
     queryKey: ["run-events", runId],
     queryFn: ({ pageParam }) =>
@@ -115,8 +105,7 @@ export function useRunEvents(runId: string, opts: { refetch?: number; enabled?: 
         `/api/runs/${runId}/events${qs({ limit: EVENTS_PAGE, after_seq: pageParam })}`,
       ),
     initialPageParam: undefined as number | undefined,
-    // `next_seq` is null on the last page — the API returns it precisely so the client does not have
-    // to guess from a short page.
+    // Null on the last page, so the client never has to guess from a short one.
     getNextPageParam: (last) => last.next_seq ?? undefined,
     refetchInterval: opts.refetch,
   });
@@ -130,8 +119,7 @@ export function useRunArtifacts(runId: string, opts: { enabled?: boolean } = {})
   });
 }
 
-/** One artifact body, fetched only when opened — bodies are the heavy part and a timeline shows
- *  dozens of refs. `enabled` is what keeps this lazy. */
+/** Fetched only when opened: bodies are the heavy part and a timeline shows dozens of refs. */
 export function useArtifact(runId: string, sha: string | null) {
   return useQuery({
     queryKey: ["artifact", runId, sha],
@@ -152,9 +140,8 @@ export function useQueue(opts: { refetch?: number } = {}) {
   });
 }
 
-/** Every run with an open question. Polled, because the answer to "is anything waiting on me" has to
- *  arrive without a reload — a gate nobody notices is a gate that expires, and expiry is the one
- *  outcome that throws away finished planning work. */
+/** Polled, because "is anything waiting on me" has to arrive without a reload — a gate nobody
+ *  notices is a gate that expires, throwing away planning work already paid for. */
 export function useGates(opts: { refetch?: number } = {}) {
   return useQuery({
     queryKey: ["gates"],
@@ -190,8 +177,8 @@ export function useAnswerGate(runId: string) {
         `/api/runs/${runId}/gate`,
         answer,
       ),
-    // The answer re-admits the run, so the queue and the fleet both change — and `gates` most of all,
-    // since this run just left the needs-you list.
+    // The answer re-admits the run, so the queue and fleet both change — and this run just left the
+    // needs-you list.
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["gate", runId] });
       void qc.invalidateQueries({ queryKey: ["gates"] });

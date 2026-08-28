@@ -1,5 +1,5 @@
-// Pipeline — the step vocabulary as a progress strip. Labelled for screen readers rather than left
-// as decorative dots, since it is the only place the run's position is shown graphically.
+// Labelled for screen readers rather than left as decorative dots: this is the only place a run's
+// position is shown graphically.
 
 import { PIPELINE, pipelineIndex } from "../format";
 import { cn } from "./ui/primitives";
@@ -7,8 +7,7 @@ import { cn } from "./ui/primitives";
 export function Pipeline({ step }: { step: string }) {
   const at = pipelineIndex(step);
   const aborted = step === "aborted";
-  // A step the strip does not know (aborted, or one this build predates) shows the step itself rather
-  // than a row of empty pips, which would read as "not started" — a wrong answer told confidently.
+  // An unknown step shows itself rather than a row of empty pips, which would read as "not started".
   if (at === null)
     return (
       <span

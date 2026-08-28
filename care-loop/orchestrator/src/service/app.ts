@@ -1,11 +1,6 @@
-// service/app.ts — the Express application ([[PLAN-loop-service]] §6, build step 1).
-//
-// Read routes only, and the reads go through `RunIndex`, which is DB-only: no route touches a run
-// directory, a journal.jsonl, or a state.json. The frontend in turn talks only to this API. Three
-// layers, each with exactly one thing below it.
-//
-// `buildApp` takes its dependencies rather than opening them, so tests drive a real Express app over
-// an in-memory database with no server, no port, and no fixture directory.
+// Reads go through `RunIndex`, which is DB-only: no route touches a run directory, a journal.jsonl,
+// or a state.json. `buildApp` takes its dependencies rather than opening them, so tests drive a real
+// Express app over an in-memory database with no server and no port.
 
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -43,31 +38,25 @@ export interface AppDeps {
   /** The plan gate (§7). The child posts asks and polls for answers against the same table; this side
    *  only ever reads an ask and writes an answer. */
   gates: GateStore;
-  /** Set once a supervisor is running (step 4). Until then `POST /api/runs` refuses rather than
-   *  banking work nothing will ever execute — a queued row with no consumer is a silent black hole,
-   *  and the person who asked for the run has no way to tell it apart from a slow start. */
+  /** Absent until a supervisor runs, and `POST /api/runs` refuses while it is: a queued row with no
+   *  consumer is a black hole the requester cannot tell apart from a slow start. */
   supervisor?: {
     running: boolean;
-    /** `cancelled: false` means the row was already terminal — a finished run cannot be un-run, and
-     *  saying so beats a 202 that did nothing. */
+    /** `cancelled: false` means the row was already terminal. */
     cancel(runId: string): { cancelled: boolean; signalled: boolean };
   } | null;
-  /** Repos a run may be requested against. An allowlist rather than free text: `repo` reaches
-   *  `git worktree add` and a GitHub API call, and "whatever the client sent" is not a good input to
-   *  either. Defaults to the one repo this exists for. */
+  /** An allowlist rather than free text: `repo` reaches `git worktree add` and a GitHub API call. */
   allowedRepos?: string[];
   /** Reported by `/api/health` so a deploy can be identified without shelling into the box. */
   version?: string;
-  /** Mark the session cookie `Secure`. Off by default because the service binds loopback over plain
-   *  HTTP; turn it on wherever TLS terminates. */
+  /** Off by default because the service binds loopback over plain HTTP; on wherever TLS terminates. */
   secureCookies?: boolean;
-  /** Built frontend to serve (`web/dist`). When set, the API and the app share ONE origin and one
-   *  port — which is what lets the session cookie be plain same-origin with no CORS anywhere. */
+  /** When set, the API and the app share one origin, which is what lets the session cookie be plain
+   *  same-origin with no CORS anywhere. */
   staticDir?: string;
 }
 
-/** The gate answer for an `approve` ask. Validated here rather than trusted, because it reaches
- *  `runPlan`'s decision branch — where `approve` authorizes a push to origin. */
+/** Validated rather than trusted: this reaches `runPlan`, where `approve` authorizes a push. */
 function parseDecision(body: Record<string, unknown>): {
   decision: "approve" | "reject" | "amend";
   amendment?: string;
@@ -76,16 +65,14 @@ function parseDecision(body: Record<string, unknown>): {
   if (decision === "approve" || decision === "reject") return { decision };
   if (decision === "amend") {
     const amendment = typeof body.amendment === "string" ? body.amendment.trim() : "";
-    // An empty amendment is what the terminal gate re-prompts for: it would send the planner off to
-    // re-draft against no instruction, burning a model call to produce the same plan.
+    // Without one the planner re-drafts against no instruction, at one model call per lap.
     if (!amendment) throw badRequest("bad_amendment", "amend requires a non-empty amendment");
     return { decision, amendment };
   }
   throw badRequest("bad_decision", "decision must be approve, reject, or amend");
 }
 
-/** The gate answer for an `interview` ask: one entry per question, correlated by the stable
- *  `PlanQuestion.id` the child posted. */
+/** One entry per question, correlated by the `PlanQuestion.id` the child posted. */
 function parseAnswers(
   body: Record<string, unknown>,
   questions: { id: string }[],
@@ -98,8 +85,8 @@ function parseAnswers(
       throw badRequest("bad_request", "each answer needs a string id and a string answer");
     byId.set(entry.id, entry.answer);
   }
-  // Every question, in the order asked. A partial set would reach the planner as a silently shorter
-  // interview rather than as an error, and the plan would be drafted against the gaps.
+  // Every question, in the order asked: a partial set would reach the planner as a silently shorter
+  // interview, and the plan would be drafted against the gaps.
   return questions.map((q) => {
     const answer = byId.get(q.id);
     if (answer === undefined) throw badRequest("bad_request", `no answer for question '${q.id}'`);
@@ -107,8 +94,10 @@ function parseAnswers(
   });
 }
 
-/** Wrap a handler so a thrown ApiError becomes its response. Express 5 forwards rejected promises to
- *  the error middleware, but these handlers are synchronous and this keeps the intent local. */
+/** Client-side routes have no extension; assets always do. */
+const looksLikeAsset = (path: string): boolean => /\.[a-zA-Z0-9]+$/.test(path);
+
+/** Turns a thrown ApiError into its response. */
 function route(fn: (req: Request, res: Response) => void) {
   return (req: Request, res: Response, next: NextFunction): void => {
     try {
@@ -119,11 +108,7 @@ function route(fn: (req: Request, res: Response) => void) {
   };
 }
 
-/** Every `:id` in this API is a run_id. Validating the SHAPE here means an obviously-malformed id is
- *  a 400 (the caller's mistake) while a well-formed unknown one is a 404 (a real lookup that missed)
- *  — a distinction the frontend needs in order to tell a broken link from a deleted run. */
-/** Read every list filter off the query string, in one place, so `/runs` and `/runs/facets` cannot
- *  drift apart in what they accept. */
+/** Shared by `/runs` and `/runs/facets` so they cannot drift apart in what they accept. */
 function listFilterFrom(req: Request): ListFilter {
   const q = req.query as Record<string, unknown>;
   const order = str(q, "order");
@@ -133,10 +118,8 @@ function listFilterFrom(req: Request): ListFilter {
   if (dir !== undefined && dir !== "asc" && dir !== "desc")
     throw badRequest("bad_query", "dir must be asc or desc");
 
-  // `requested_by=me` resolves to the caller. A CONVENIENCE, not a permission — §6 is explicit that
-  // no route may make an authorization decision, and this one does not: it expands to a filter value
-  // the caller could have typed themselves. Requiring a session for it would be a gate, so when
-  // nobody is signed in it 400s as a malformed filter rather than 401ing.
+  // A convenience, not a permission: it expands to a value the caller could have typed themselves,
+  // so an anonymous caller gets a 400 for a malformed filter rather than a 401.
   let requestedBy = str(q, "requested_by");
   if (requestedBy === "me") {
     if (!req.user)
@@ -163,6 +146,8 @@ function listFilterFrom(req: Request): ListFilter {
   };
 }
 
+/** Validating the SHAPE here makes a malformed id a 400 and a well-formed unknown one a 404 — the
+ *  distinction between a broken link and a deleted run. */
 function runIdParam(req: Request): string {
   const raw = req.params.id;
   const id = Array.isArray(raw) ? raw[0] : raw;
@@ -175,15 +160,13 @@ export function buildApp(deps: AppDeps): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
-  // /api/health is registered BEFORE identity() on purpose: health is precisely the route that must
-  // answer when the database is unhappy, and identity touches the db. With it behind the middleware,
-  // a dead db plus a cookie produced `500 internal` where a dead db alone correctly produced
-  // `503 {ok:false}` — the diagnostic route failing in the manner it exists to report.
+  // Registered BEFORE identity(), which touches the db: health is precisely the route that must
+  // answer when the database is unhappy. Behind the middleware, a dead db plus a cookie produced a
+  // 500 where a dead db alone correctly produced 503.
   app.get(
     "/api/health",
     route((_req, res) => {
-      // Actually touch the database rather than reporting a cached flag: "the process is up" is not
-      // the question anyone asks health for.
+      // Touch the db rather than report a cached flag: "the process is up" is not the question.
       let db = false;
       try {
         deps.index.count({ limit: 1 });
@@ -202,11 +185,8 @@ export function buildApp(deps: AppDeps): Express {
 
   app.use(identity(deps.sessions));
 
-  // ── auth ────────────────────────────────────────────────────────────────────────────────────
-  // Not authentication yet: logging in means CLAIMING a login, and nothing verifies it (§6). The
-  // shape is what matters — swapping in GitHub OAuth replaces the body of this one handler and
-  // leaves /auth/me, /auth/logout, the middleware, and every other route untouched.
-
+  // Logging in means CLAIMING a login; nothing verifies it. Swapping in GitHub OAuth replaces the
+  // body of this one handler and leaves every other route untouched.
   app.post(
     "/api/auth/login",
     route((req, res) => {
@@ -227,8 +207,8 @@ export function buildApp(deps: AppDeps): Express {
   app.post(
     "/api/auth/logout",
     route((req, res) => {
-      // Idempotent: signing out twice, or with a stale cookie, succeeds. Clearing the cookie matters
-      // more than whether a row was updated — the client must not keep sending a dead token.
+      // Clearing the cookie matters more than whether a row was updated: the client must not keep
+      // sending a dead token.
       if (req.sessionToken) deps.sessions.revoke(req.sessionToken);
       res.setHeader("Set-Cookie", clearedCookie({ secure: deps.secureCookies ?? false }));
       res.status(204).end();
@@ -238,8 +218,8 @@ export function buildApp(deps: AppDeps): Express {
   app.get(
     "/api/auth/me",
     route((req, res) => {
-      // 200-with-null rather than 401: "who am I" is answerable when the answer is "nobody", and it
-      // lets the frontend decide between a login screen and a dashboard from one unconditional call.
+      // 200-with-null, not 401: "who am I" is answerable when the answer is "nobody", and the
+      // frontend chooses between a login screen and a dashboard from one unconditional call.
       res.json({ login: req.user, account: req.account });
     }),
   );
@@ -248,8 +228,8 @@ export function buildApp(deps: AppDeps): Express {
     "/api/runs",
     route((req, res) => {
       const filter = listFilterFrom(req);
-      // Echo the EFFECTIVE paging, not what was asked for: `?limit=999` serves 200 rows, and a
-      // response claiming 999 would make `offset += limit` skip 799 of them without erroring.
+      // The EFFECTIVE paging: `?limit=999` serves 200 rows, and a response claiming 999 would make
+      // `offset += limit` skip 799 of them without erroring.
       const applied = resolvePaging(filter);
       res.json({
         items: deps.index.list(filter),
@@ -263,9 +243,7 @@ export function buildApp(deps: AppDeps): Express {
   app.post(
     "/api/runs",
     route((req, res) => {
-      // The first route that needs to know WHO — every run is attributed, and an unattributed row
-      // would be a request nobody can be asked about. Still not authorization: it asks that the
-      // caller said who they are, never what they are allowed to do.
+      // Every run is attributed: an unattributed row is a request nobody can be asked about.
       const requestedBy = requireUser(req);
       if (!deps.supervisor?.running)
         throw new ApiError(
@@ -303,16 +281,12 @@ export function buildApp(deps: AppDeps): Express {
         summary: seed.summary!,
       });
 
-      // Report why this will not start immediately, rather than refusing. The row is queued either
-      // way and becomes claimable when the blocker clears (§12: queue behind, don't reject) — but the
-      // caller deserves to know, and the two reasons are genuinely different:
+      // Reported rather than refused — the row is queued either way. Both reasons are sent because
+      // they are different: `blocked_by_branch` waits on one specific run, `queue_position` waits on
+      // capacity, and with a cap of 2 the second is far more common.
       //
-      //  - `blocked_by_branch` — another live run owns this (repo, branch), so this one waits for THAT
-      //    run specifically. `liveOn` returns the oldest live row on the branch, which is our own when
-      //    nothing else holds it, so a different run id is exactly the signal.
-      //  - `queue_position` — rows ahead of us in line. This is the far more common reason with a
-      //    concurrency cap of 2 and five queued branches, and reporting only the first would tell
-      //    three of those five callers `null` and let them expect an immediate start.
+      // `liveOn` returns the oldest live row on the branch, which is our own when nothing else holds
+      // it — so a DIFFERENT run id is the signal that something is ahead of us.
       const ahead = deps.queue.liveOn(repo, seed.branch!);
       res.status(201).json({
         run_id: row.runId,
@@ -331,8 +305,7 @@ export function buildApp(deps: AppDeps): Express {
       for (const st of requested ?? [])
         if (!QUEUE_STATUSES.includes(st as QueueStatus))
           throw badRequest("bad_query", `status must be one of ${QUEUE_STATUSES.join(", ")}`);
-      // Defaults to the live rows: "what is the queue doing" is the question this answers, and a
-      // month of finished rows buries it.
+      // Live rows by default: a month of finished ones buries the question this answers.
       const filter = {
         status: (requested as QueueStatus[] | undefined) ?? [...LIVE_STATUSES],
         requestedBy: str(q, "requested_by"),
@@ -341,9 +314,6 @@ export function buildApp(deps: AppDeps): Express {
         limit: int(q, "limit", { min: 1 }),
         offset: int(q, "offset", { min: 0 }),
       };
-      // The same `{items, total, limit, offset}` envelope as every other list route (§6): a bare
-      // array cannot grow pagination later without breaking every client, which is the whole reason
-      // the convention exists — and this was the one route that had drifted from it.
       const applied = resolveQueuePaging(filter);
       res.json({
         items: deps.queue.list(filter),
@@ -359,8 +329,7 @@ export function buildApp(deps: AppDeps): Express {
     route((_req, res) => {
       const byStep: Record<string, number> = {};
       for (const f of deps.index.facets({}).steps) byStep[f.value] = f.count;
-      // Counted in SQL, not by filtering a page of rows — the previous version silently stopped
-      // being a total the moment the queue outgrew one page.
+      // Counted in SQL: filtering a page of rows stops being a total once the queue outgrows it.
       const counts = deps.queue.statusCounts();
       res.json({
         runs: deps.index.count({}),
@@ -374,9 +343,8 @@ export function buildApp(deps: AppDeps): Express {
   app.post(
     "/api/runs/:id/cancel",
     route((req, res) => {
-      // Attributed, like every write. Not restricted to the requester: this is a shared box with a
-      // shared concurrency cap, and a run wedged on someone's day off has to be stoppable by whoever
-      // is at the keyboard. Authorization arrives with real auth, not before it.
+      // Attributed but not restricted to the requester: a shared concurrency cap means a run wedged
+      // on someone's day off has to be stoppable by whoever is at the keyboard.
       requireUser(req);
       const id = runIdParam(req);
       if (!deps.supervisor)
@@ -384,16 +352,13 @@ export function buildApp(deps: AppDeps): Express {
       const row = deps.queue.byRunId(id);
       if (!row) throw notFound("run_not_found", `no queued run ${id}`);
 
-      // ONE route for both states (§6). Minting `run_id` at enqueue means a request has a stable id
-      // before it has a process, so the caller never has to know whether it caught the run pending or
-      // running — the distinction it is least able to make without a race.
+      // One route for pending and running alike: a stable id before there is a process means the
+      // caller never has to make the distinction it is least able to make without racing.
       const { cancelled, signalled } = deps.supervisor.cancel(id);
       if (!cancelled)
         throw badRequest("not_cancellable", `run ${id} is already ${row.status}`);
 
-      // 202, not 204: the row is cancelled for certain, but a running child exits on its own schedule
-      // after SIGTERM. Claiming completion here would be a lie the FE would render as a finished run
-      // seconds before the process actually stops.
+      // 202, not 204: the row is cancelled for certain, but the child exits on its own schedule.
       res.status(202).json({ run_id: id, cancelled: true, signalled });
     }),
   );
@@ -410,8 +375,7 @@ export function buildApp(deps: AppDeps): Express {
   app.get(
     "/api/gates",
     route((_req, res) => {
-      // The needs-you list. Not in §6's original table, but a gate that nobody sees is a gate that
-      // expires — and expiry is the one outcome here that throws away finished planning work.
+      // A gate nobody sees is a gate that expires, throwing away planning work already paid for.
       const items = deps.gates.pendingRuns();
       res.json({ items: items.map(askView), total: items.length });
     }),
@@ -457,8 +421,8 @@ export function buildApp(deps: AppDeps): Express {
   app.get(
     "/api/runs/facets",
     route((req, res) => {
-      // Declared BEFORE /api/runs/:id — Express matches in order, and "facets" is a valid-looking
-      // path segment that would otherwise be caught by the :id route and rejected as a bad run id.
+      // Must precede /api/runs/:id — Express matches in order, and "facets" would otherwise be
+      // caught by the :id route and rejected as a bad run id.
       res.json(deps.index.facets(listFilterFrom(req)));
     }),
   );
@@ -469,15 +433,9 @@ export function buildApp(deps: AppDeps): Express {
       const id = runIdParam(req);
       const run = deps.index.get(id);
       const queue = deps.queue.byRunId(id);
-      // EITHER half may legitimately be absent, which is why both are nullable rather than one being
-      // the record and the other a decoration:
-      //
-      //  - `queue` is null for a run started from the CLI, which never went through the service. A
-      //    permanent case, not a gap — the child is the same binary either way.
-      //  - `run` is null for a run that has been enqueued but has not started. Minting the run id at
-      //    enqueue is what lets `POST /api/runs` answer synchronously, so the id is addressable
-      //    BEFORE any process exists to write a journal — and the new-run form navigates straight
-      //    here. Returning 404 for that made a successful enqueue look like a failure.
+      // Either half may legitimately be absent: `queue` is null for a CLI run that never went
+      // through the service, and `run` is null for one enqueued but not yet started — which the
+      // new-run form navigates straight to, so 404 there made a successful enqueue look like one.
       if (!run && !queue) throw notFound("run_not_found", `no run ${id}`);
       res.json({ run, queue });
     }),
@@ -487,8 +445,8 @@ export function buildApp(deps: AppDeps): Express {
     "/api/runs/:id/events",
     route((req, res) => {
       const id = runIdParam(req);
-      // A run with zero events is indistinguishable from a missing one on this route unless the run
-      // is checked first — and "no events yet" is the normal state of a run that just started.
+      // Checked first: an empty page is otherwise indistinguishable from a missing run, and "no
+      // events yet" is the normal state of one that just started.
       if (!deps.index.get(id)) throw notFound("run_not_found", `no run ${id}`);
       const q = req.query as Record<string, unknown>;
       const page = deps.index.events(id, {
@@ -505,8 +463,7 @@ export function buildApp(deps: AppDeps): Express {
     route((req, res) => {
       const id = runIdParam(req);
       if (!deps.index.get(id)) throw notFound("run_not_found", `no run ${id}`);
-      // Metadata only. A run's artifacts total ~160 KB and a timeline view wants the links, not the
-      // bodies — streaming every skill envelope to render a list would be the wrong default.
+      // Metadata only — a timeline wants the links, not ~160 KB of skill envelopes.
       res.json({ items: deps.index.artifacts(id) });
     }),
   );
@@ -517,8 +474,7 @@ export function buildApp(deps: AppDeps): Express {
       const id = runIdParam(req);
       const raw = req.params.sha;
       const sha = Array.isArray(raw) ? raw[0] : raw;
-      // Validate the shape before it reaches SQL, and so a typo is a 400 rather than an empty 404
-      // the caller has to guess at.
+      // Shape-checked before SQL, so a typo is a 400 rather than an empty 404 to guess at.
       if (typeof sha !== "string" || !/^(sha256:)?[0-9a-f]{64}$/.test(sha))
         throw new ApiError(400, "bad_sha", `'${String(sha)}' is not a sha256 hex digest`);
       if (!deps.index.get(id)) throw notFound("run_not_found", `no run ${id}`);
@@ -528,24 +484,18 @@ export function buildApp(deps: AppDeps): Express {
     }),
   );
 
-  // Unmatched /api paths are a 404 in the API's own envelope. Scoped to /api so it cannot swallow
-  // the frontend's client-side routes below.
+  // Scoped to /api so it cannot swallow the frontend's client-side routes below.
   app.use("/api", (_req, res) => {
     sendError(res, notFound("not_found", "no such route"));
   });
 
   if (deps.staticDir) {
     app.use(express.static(deps.staticDir, { index: false }));
-    // SPA fallback: `/runs/<id>` is a client-side route, so a direct hit or a refresh must return
-    // index.html rather than 404.
-    //
-    // Anything that LOOKS like a file (has an extension) is excluded, and that exclusion is the whole
-    // point: without it a missing `/assets/main.js` answers 200-with-HTML, the browser tries to
-    // execute a document as JavaScript, and the resulting MIME error says nothing about the actual
-    // problem — a stale asset reference after a redeploy. Client routes have no extension; assets
-    // always do.
+    // SPA fallback, excluding anything that looks like a file. Without that exclusion a missing
+    // /assets/main.js answers 200-with-HTML, the browser executes a document as JavaScript, and the
+    // MIME error says nothing about the real problem — a stale asset reference after a redeploy.
     app.get(/.*/, (req, res, next) => {
-      if (/\.[a-zA-Z0-9]+$/.test(req.path)) return next();
+      if (looksLikeAsset(req.path)) return next();
       res.sendFile(join(deps.staticDir!, "index.html"));
     });
   }

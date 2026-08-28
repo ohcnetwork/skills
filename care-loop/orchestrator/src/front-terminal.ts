@@ -61,23 +61,18 @@ export interface DerivedPaths {
 /** The (repo, main checkout, worktree, run dir) convention, derived from a branch + optional overrides.
  *  Shared by the terminal front (`plan`/`run`) and `cmdStart` so both stages resolve to the SAME run dir
  *  + worktree for a given branch — the single source of the convention, so it can't drift between them. */
-/** The run-dir / worktree name for a (repo, branch) pair: `<repo name>-<branch with / as ->`.
- *  Exported because the loop-service supervisor has to derive the SAME directory the child will,
- *  from a queue row rather than from flags — and two copies of this rule would mean the service
- *  checking one path's lock while the child takes another's. */
+/** Exported because the supervisor derives the same directory the child will, from a queue row
+ *  rather than from flags — two copies would have the service checking one path's lock while the
+ *  child takes another's. */
 export function runSlug(repo: string, branch: string): string {
   const name = repo.split("/")[1] ?? repo;
   return `${name}-${branch.replace(/\//g, "-")}`;
 }
 
 /**
- * Where worktrees are created, and where the main checkout lives.
- *
- * Flag, then environment, then a laptop-shaped default. The middle rung exists for the deployed
- * service: `~/Desktop` is a reasonable guess on the machine a person is sitting at and nonsense on a
- * headless box, where the service user's home is a state directory. Setting it declaratively in the
- * unit beats passing two more flags on every spawn — these are properties of the MACHINE, not of the
- * run, and the supervisor has no business knowing them.
+ * Flag, then environment, then a laptop-shaped default. The environment rung exists for the deployed
+ * service, where `~/Desktop` is nonsense — these are properties of the MACHINE rather than of a run,
+ * so the unit sets them declaratively and the supervisor never has to know them.
  */
 function pathRoots(): { main: string; worktrees: string } {
   const desktop = join(homedir(), "Desktop");

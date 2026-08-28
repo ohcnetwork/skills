@@ -1,30 +1,19 @@
-// service/auth.ts — sessions ([[PLAN-loop-service]] §6).
+// Sessions. Logging in means CLAIMING a GitHub login — nothing verifies it yet, and the trust
+// boundary is the network. Adding OAuth replaces `login()`'s body and leaves `resolve`, `revoke`,
+// the cookie handling, and every route untouched.
 //
-// **This is not authentication yet, and the shape is the point.** Logging in means claiming a GitHub
-// login; nothing verifies it, and the security boundary remains the network (§6). What it buys is the
-// STRUCTURE real auth needs: a session established by some credential step, a cookie carrying it, and
-// every route downstream reading `req.user` without caring how it got there. Adding GitHub OAuth
-// replaces `login()`'s body — verify the code, read the real account — and leaves `resolve`,
-// `revoke`, the cookie handling, and every route untouched.
-//
-// Two habits are worth having from the start even though nothing here is secret yet:
-//   • the db stores a HASH of the token, never the token, so a leaked database is not a set of live
-//     logins (the cookie is the only copy);
-//   • logout REVOKES rather than deletes, so "who was signed in when" survives the sign-out.
+// The db stores a hash of the token, never the token, so a leaked database is not a set of live
+// logins; logout revokes rather than deletes, so "who was signed in when" survives the sign-out.
 
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 export const SESSION_COOKIE = "care_session";
-/** 30 days. Long because this is a team dashboard on a VPN, not a bank. */
+/** Long because this is a team dashboard on a VPN, not a bank. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/** How stale `last_seen_at` may get before `resolve` bothers to refresh it.
- *
- *  This exists because `resolve` runs on EVERY request — including `/api/health` and every static
- *  asset — and an unconditional UPDATE made every authenticated request a writer. Under a child's
- *  write lock that cost the full `busy_timeout` and then threw, turning a read-only dashboard poll
- *  into a 5-second hang and an HTTP 500. `last_seen_at` is a liveness hint, not an audit trail;
- *  minute-granularity is more than it is ever read at. */
+/** `last_seen_at` is a liveness hint, not an audit trail, so it is refreshed at most this often —
+ *  an unconditional update made every authenticated request a writer contending with running
+ *  children, turning dashboard polls into `busy_timeout` hangs. */
 export const SESSION_TOUCH_INTERVAL_MS = 60_000;
 
 export interface User {
@@ -37,16 +26,15 @@ export interface User {
 
 export interface LoginResult {
   user: User;
-  /** The raw token — the ONLY copy. Goes straight into the cookie and is never stored. */
+  /** The only copy — goes straight into the cookie and is never stored. */
   token: string;
 }
 
 const hash = (token: string): string =>
   createHash("sha256").update(token, "utf8").digest("hex");
 
-/** GitHub's own rule: 1–39 chars, alphanumeric or single hyphens, not leading/trailing a hyphen.
- *  Validated even though the claim is unverified — a login that could never exist is a typo, and a
- *  typo silently becoming a new "user" is how a roster fills with junk. */
+/** GitHub's own rule: 1–39 chars, alphanumeric or single hyphens, none leading or trailing. Enforced
+ *  even on an unverified claim, so a typo cannot silently become a new roster entry. */
 const LOGIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
 export function isValidLogin(login: string): boolean {
@@ -72,8 +60,8 @@ const toUser = (r: UserRow): User => ({
 export class SessionStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Find or create the user, then mint a session. The upsert is what accumulates the roster: today
-   *  from a claimed login, later from a verified OAuth account, with no change to callers. */
+  /** The upsert is what accumulates the roster: today from a claimed login, later from a verified
+   *  OAuth account, with no change to callers. */
   login(login: string, now: Date = new Date()): LoginResult {
     const iso = now.toISOString();
     this.db
@@ -96,9 +84,8 @@ export class SessionStore {
     return { user: toUser(row), token };
   }
 
-  /** The user behind a token, or null if it is unknown, revoked, or expired. Expiry is checked in SQL
-   *  against the caller's clock rather than swept by a background job: a stale row that is never read
-   *  costs nothing, and a sweep is one more thing to run and get wrong. */
+  /** Expiry is enforced in SQL rather than swept by a background job — an expired row that is never
+   *  read costs nothing. */
   resolve(token: string, now: Date = new Date()): User | null {
     const iso = now.toISOString();
     const digest = hash(token);
@@ -110,29 +97,27 @@ export class SessionStore {
       .get(digest, iso) as unknown as (UserRow & { session_seen: string }) | undefined;
     if (!row) return null;
 
-    // Throttled, and deliberately AFTER the identity is already decided. Two separate problems were
-    // being caused by the unconditional version:
-    //   • every request became a write, so a read-only dashboard poll contended with a running child;
-    //   • a SQLITE_BUSY on this bookkeeping write propagated out of the identity middleware, which is
-    //     not wrapped by `route()`, and 500'd the whole request — costing the caller their identity
-    //     over a timestamp nobody reads at second granularity.
-    const age = now.getTime() - Date.parse(row.session_seen);
-    if (!Number.isFinite(age) || age >= SESSION_TOUCH_INTERVAL_MS) {
-      try {
-        this.db
-          .prepare("UPDATE sessions SET last_seen_at = ? WHERE token_sha256 = ?")
-          .run(iso, digest);
-      } catch (err) {
-        // Non-fatal by design: failing to record when someone was last seen must never fail their
-        // request. Logged so a persistently locked db is still visible.
-        console.error("[service] session touch failed (identity is unaffected):", err);
-      }
-    }
+    this.touch(digest, row.session_seen, now);
     return toUser(row);
   }
 
-  /** Idempotent: revoking an unknown or already-revoked token is a no-op, so a double logout (or a
-   *  logout with a stale cookie) succeeds rather than erroring at someone who is already signed out. */
+  /** Runs after the identity is already decided, and never throws: a SQLITE_BUSY here would escape
+   *  the identity middleware, which `route()` does not wrap, and cost the caller their whole request
+   *  over a timestamp nobody reads at second granularity. */
+  private touch(tokenDigest: string, sessionSeenAt: string, now: Date): void {
+    const age = now.getTime() - Date.parse(sessionSeenAt);
+    if (Number.isFinite(age) && age < SESSION_TOUCH_INTERVAL_MS) return;
+    try {
+      this.db
+        .prepare("UPDATE sessions SET last_seen_at = ? WHERE token_sha256 = ?")
+        .run(now.toISOString(), tokenDigest);
+    } catch (err) {
+      console.error("[service] session touch failed (identity is unaffected):", err);
+    }
+  }
+
+  /** Idempotent, so a double logout or a stale cookie succeeds rather than erroring at someone who
+   *  is already signed out. */
   revoke(token: string, now: Date = new Date()): void {
     this.db
       .prepare(
@@ -141,8 +126,7 @@ export class SessionStore {
       .run(now.toISOString(), hash(token));
   }
 
-  /** Every session for a user — what a future "sign out everywhere" needs, and what makes the roster
-   *  inspectable while there is no real auth behind it. */
+  /** What "sign out everywhere" needs. */
   revokeAllFor(userId: number, now: Date = new Date()): void {
     this.db
       .prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
@@ -157,8 +141,8 @@ export class SessionStore {
   }
 }
 
-/** Parse one named cookie out of a Cookie header. Hand-rolled to avoid a dependency for a single
- *  cookie; deliberately tolerant of whitespace and of other cookies sharing the header. */
+/** Hand-rolled to avoid a dependency for one cookie; tolerant of whitespace and of other cookies
+ *  sharing the header. */
 export function readCookie(header: string | undefined, name: string): string | null {
   if (!header) return null;
   for (const part of header.split(";")) {

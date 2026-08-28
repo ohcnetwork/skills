@@ -1,5 +1,5 @@
-// run.tsx — one run: header, metadata, and the event timeline, at parity with the vanilla
-// dashboard's drill-down. Artifacts are listed per event and fetched only when opened.
+// One run: header, metadata, and the event timeline. Artifacts are listed per event and fetched
+// only when opened.
 
 import type { ReactNode } from "react";
 import { Link, useParams } from "@tanstack/react-router";
@@ -17,13 +17,12 @@ const REFRESH_MS = 5_000;
 export function RunPage() {
   const { runId } = useParams({ from: "/runs/$runId" });
   const run = useRun(runId, { refetch: REFRESH_MS });
-  // Both need a journal, which a queued run does not have yet — the id is minted at enqueue, long
-  // before any process exists. Asking anyway 404s on every poll of a perfectly healthy run.
+  // Both need a journal, which a queued run has not written yet — the id is minted at enqueue, long
+  // before any process exists.
   const started = run.data?.run != null;
   const events = useRunEvents(runId, { refetch: REFRESH_MS, enabled: started });
   const artifacts = useRunArtifacts(runId, { enabled: started });
-  // Polled alongside the run: a gate can open at any point in the plan stage, and the person who
-  // needs to answer it is most likely already looking at this page.
+  // A gate can open at any point in the plan stage, and whoever must answer is likely already here.
   const gate = useRunGate(runId, { refetch: REFRESH_MS });
   const cancel = useCancelRun();
 
@@ -53,18 +52,16 @@ export function RunPage() {
 
   const q = run.data!.queue;
   const r = run.data!.run;
-  // The gate renders in EVERY state, above everything else: it is the only thing on this page that
-  // is waiting on the reader, and a run can be parked on a question whether or not its journal has
-  // reached the database yet.
+  // Above everything else, in every state: it is the only thing on this page waiting on the reader,
+  // and a run can be parked on a question before its journal reaches the database.
   const gateBanner = gate.data?.ask ? (
     <div className="mb-5">
       <GateAskView ask={gate.data.ask} onSettled={() => void run.refetch()} />
     </div>
   ) : null;
 
-  // Enqueued but not started: the id exists because it is minted at enqueue, so this page is
-  // reachable before any process has written a journal. Showing the request beats showing a 404 for
-  // what is a completely normal few seconds of a run's life.
+  // Reachable before any process has written a journal, so showing the request beats a 404 for what
+  // is a normal few seconds of a run's life.
   if (!r && q)
     return (
       <Shell>
@@ -159,14 +156,6 @@ export function RunPage() {
         <Meta k="Events">{r.eventCount}</Meta>
       </Card>
 
-      {/* A parity divergence is the db and its replica disagreeing — rare, and worth surfacing on the
-          run it happened to rather than only in a log nobody reads. */}
-      {r.parityError && (
-        <Card className="mb-5 border-warn p-3.5 text-sm">
-          <strong className="text-warn">Replica parity divergence:</strong> {r.parityError}
-        </Card>
-      )}
-
       {events.isPending && <p className="text-muted-foreground">loading timeline…</p>}
       {events.isError && <p className="text-sm text-destructive">{(events.error as Error).message}</p>}
       {events.data && (
@@ -218,8 +207,7 @@ function Meta({ k, children }: { k: string; children: ReactNode }) {
   );
 }
 
-/** A run that has been queued but has not produced a journal yet. Everything shown here comes from
- *  the queue row, which is the only half that exists at this point. */
+/** Everything here comes from the queue row, the only half that exists at this point. */
 function NotStartedYet({ q, onCancel }: { q: QueueRow; onCancel: () => void }) {
   return (
     <>

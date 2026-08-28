@@ -1,17 +1,15 @@
-// journal.ts — §10 cutover (PLAN-sqlite-run-store.md): the DATABASE is now the source of truth.
-// `read()` queries the active `RunStore`; `append()` derives `seq`/`prev`/`deltaMs` from it too, and
-// writes the DB BEFORE the jsonl line (a crash between the two leaves the DB correct and the replica
-// merely lagging — never the reverse). `journal.jsonl` remains a continuously-verified REPLICA:
-// still fsync'd and hash-chained via `readReplica()`/`truncateTornTail()`, still what `reindex` and
-// the doctor read, still what the run.end parity check (parity.ts) diffs against the DB — but
-// nothing on the live control-flow path (`resume`, `projectState`, the drivers) depends on it any
-// more. Both writes are fatal: a failure at either step propagates and halts the run.
+// The database is the source of truth: `read()` queries the active `RunStore`, and `append()` writes
+// the db BEFORE the jsonl line, so a crash between the two leaves the db correct and the log merely
+// lagging. Both writes are fatal.
 //
-// `readReplica()` retains the original crash-only recovery semantics (PLAN-orchestrator-architecture
-// §5, Bernstein): a torn FINAL line (unparseable) is dropped; a break in the MIDDLE (parse error or
-// hash mismatch on a non-final line) is corruption and throws — tamper/truncation *detection*, no
-// HMAC/signing. `read()` has no such concept (DB transactions are atomic); `truncatedTail` is always
-// false there, kept only for API-shape compatibility.
+// `journal.jsonl` is the human- and doctor-readable log — still fsync'd and hash-chained, still what
+// `reindex` rebuilds from — but nothing on the live control-flow path depends on it. It is
+// deliberately not diffed against the db: that guarded a single-writer local SQLite file and bought
+// nothing `VACUUM INTO` backups do not.
+//
+// `readReplica()` keeps the crash-only recovery semantics: a torn FINAL line is dropped, while a
+// break MID-chain is corruption and throws. `read()` has no such concept, DB transactions being
+// atomic, so its `truncatedTail` is always false.
 
 import { createHash } from "node:crypto";
 import {
@@ -27,7 +25,6 @@ import {
 import { basename, dirname } from "node:path";
 import { getActiveRunStore } from "./run-store.js";
 import { validateState, type CareState } from "./state.js";
-import { assertParity, checkParity, parityWarning, type ParityPhase } from "./parity.js";
 
 export type EventType =
   | "run.start"
@@ -37,9 +34,8 @@ export type EventType =
   | "step.exit"
   | "gate.asked"
   | "gate.answered"
-  // The stage stopped at an unanswered gate and the process exited to free its concurrency slot
-  // ([[PLAN-loop-service]] §7). A pause, not a terminus: no `run.end` follows it, and the next
-  // journal event is written by the run resuming after the human answers.
+  // A pause, not a terminus: the process exited at an unanswered gate to free its slot. No
+  // `run.end` follows, and the next event is written by the run resuming.
   | "gate.suspended"
   | "plan.approved"
   | "spawn.start"
@@ -130,21 +126,13 @@ export class Journal {
     return lines;
   }
 
-  /**
-   * The authoritative read (§10 item 3): queries the active `RunStore` for this run's events,
-   * ordered by seq. No "torn tail" concept applies — DB transactions are atomic — so
-   * `truncatedTail` is always false, kept only for API-shape compatibility with `readReplica()`.
-   */
+  /** The authoritative read. `truncatedTail` is always false — see the header. */
   read(): ReadResult {
     return { events: getActiveRunStore().getEvents(this.runId), truncatedTail: false };
   }
 
-  /**
-   * Read + verify the jsonl REPLICA's own hash chain directly off disk, bypassing the DB entirely.
-   * Drops a torn final line; throws on mid-chain corruption. Used by `reindex` (rebuilding the DB
-   * FROM the replica) and the run.end parity check (diffing the replica against the DB) — NOT a
-   * live control-flow path any more.
-   */
+  /** Reads and verifies the log's own hash chain off disk, bypassing the db. Used by `reindex` and
+   *  by `run-context`'s pre-`run_id` peek — never on a live control-flow path. */
   readReplica(): ReadResult {
     const raw = this.rawLines();
     if (raw.length === 0) return { events: [], truncatedTail: false };
@@ -191,11 +179,8 @@ export class Journal {
     return events.length ? events[events.length - 1] : null;
   }
 
-  /**
-   * Return the intact raw lines, atomically truncating a torn FINAL line off disk if present
-   * (the durable form of §6 crash-only recovery — a half-written final line is never-committed
-   * data). Only the last line can be torn in practice, so we check just that.
-   */
+  /** Truncates a torn final line off disk: a half-written last line is never-committed data. Only
+   *  the last line can be torn in practice. */
   private truncateTornTail(): string[] {
     const raw = this.rawLines();
     if (raw.length === 0) return raw;
@@ -211,31 +196,21 @@ export class Journal {
     }
   }
 
-  /**
-   * Append one event. §10 (cutover): `seq`/`prev`/`deltaMs` are derived from the ACTIVE STORE's last
-   * event for this run — the source of truth — not from the jsonl tail. The DB write happens BEFORE
-   * the jsonl line, so a crash between the two leaves the DB correct and the replica merely lagging,
-   * never the reverse. Both writes are fatal: a failure at either step propagates and halts the run.
-   * Not concurrency-safe by itself — the orchestrator holds the per-run lockfile (§1) so there is
-   * exactly one writer.
-   */
+  /** Not concurrency-safe by itself: the orchestrator holds the per-run lockfile, so there is
+   *  exactly one writer. */
   append(ev: NewEvent): JournalEvent {
     const store = getActiveRunStore();
     const runId = ev.run_id ?? this.runId;
 
-    // Repair a prior crash's torn tail BEFORE anything reads it, so `prev` below is computed against
-    // a well-formed file. (This used to sit just above the jsonl write; it moved up when `prev`
-    // started depending on it.)
+    // Must precede the `prev` below, which has to hash a well-formed file.
     const raw = this.truncateTornTail();
 
     const last = store.getLastEvent(runId);
     const nextSeq = last ? last.seq + 1 : 0;
-    // `prev` comes from the REPLICA, not the DB — it is the file's own integrity checksum, a property
-    // of the bytes on disk rather than an ordering fact. §10 item 2 originally sourced it from the DB
-    // alongside `seq` and `deltaMs`; that was wrong, and it broke every REINDEXED LEGACY run: those
-    // events carry a pre-ULID `run_id` in the file, `reindex` backfills a ULID into the DB, and so
-    // `serializeEvent(dbEvent)` reproduces a line the file never contained. The chain broke on the
-    // first append to any migrated run. `seq` and `deltaMs` stay DB-owned; those ARE ordering facts.
+    // `prev` comes from the FILE, not the db: it checksums the bytes on disk rather than stating an
+    // ordering fact. Sourcing it from the db broke every reindexed legacy run — those events carry a
+    // pre-ULID `run_id` in the file while reindex backfills a ULID into the db, so re-serializing the
+    // db row reproduces a line the file never contained, and the chain broke on the first append.
     const prevHash = raw.length > 0 ? sha256(raw[raw.length - 1]) : GENESIS;
     const ts = ev.ts ?? new Date().toISOString();
     const deltaMs =
@@ -255,10 +230,9 @@ export class Journal {
       prev: prevHash,
     };
 
-    // DB FIRST — fatal, and authoritative for ordering (§10 items 1–2).
+    // DB first: fatal, and authoritative for ordering.
     if (full.event === "run.start" && full.data?.state) {
-      // Seed the `runs` row BEFORE the event row below, so the run_events FK never dangles on
-      // this very first event (§4 "appendEvent must seed the parent row").
+      // Before the event row below, so the run_events FK never dangles on this first event.
       const seeded = validateState(full.data.state as Partial<CareState>);
       store.seedRun(basename(dirname(this.path)), seeded);
     }
@@ -268,8 +242,7 @@ export class Journal {
         : 0;
     store.appendEvent(full.run_id, full, { deltaMs, costUsd });
 
-    // Replica SECOND — also fatal (§2: "both writes are fatal"). Its torn tail was already repaired
-    // at the top of this method, which is also where `prev` was taken from.
+    // Log second, also fatal. Its torn tail was repaired at the top of this method.
     const line = serializeEvent(full) + "\n";
     const fd = openSync(this.path, "a");
     try {
@@ -277,43 +250,6 @@ export class Journal {
       fsyncSync(fd); // §5: durability after every append
     } finally {
       closeSync(fd);
-    }
-
-    // §9/§10 items 6-7: the standing parity check, at the two points it can tell us something.
-    // run.resume is the one that matters — it is the moment the DB is trusted to RECONSTRUCT a run,
-    // and the only trigger that covers crash paths (a run killed mid-step never reaches run.end).
-    // See parity.ts's header for why the two phases differ.
-    if (full.event === "run.end" || full.event === "run.resume") {
-      const phase: ParityPhase = full.event;
-      let replicaEvents: JournalEvent[] | null = null;
-      try {
-        replicaEvents = this.readReplica().events;
-      } catch (err) {
-        // A missing or corrupt replica is a degraded BACKUP, not a corrupt truth: the DB is
-        // authoritative (§2). Refusing to finish or resume a run because its backup is unreadable
-        // would be worse than the fault it reports. Warn at both phases; never fatal.
-        console.error(
-          parityWarning(
-            phase,
-            `replica unreadable (${err instanceof Error ? err.message : String(err)})`,
-          ),
-        );
-      }
-      if (replicaEvents) {
-        const dbEvents = store.getEvents(full.run_id);
-        if (phase === "run.resume") {
-          assertParity(replicaEvents, dbEvents, phase); // throws — reconstruction would be wrong
-        } else {
-          // run.end: both writes are already committed and the run's work is done. A detector, not
-          // a guard — it cannot undo the divergence, so record it and let the run finish.
-          const result = checkParity(replicaEvents, dbEvents);
-          if (!result.ok) {
-            const reason = result.reason ?? "unknown";
-            console.error(parityWarning(phase, reason));
-            store.recordParityError(full.run_id, reason);
-          }
-        }
-      }
     }
 
     return full;

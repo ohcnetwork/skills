@@ -1,5 +1,4 @@
-// format.ts — display helpers. Kept out of components so the fleet table and the run header cannot
-// drift into formatting the same value two ways.
+// Kept out of components so the fleet table and the run header cannot format a value two ways.
 
 export function age(iso: string, now: number = Date.now()): string {
   const ms = now - new Date(iso).getTime();
@@ -20,8 +19,7 @@ export function duration(ms: number | null | undefined): string {
 
 export function cost(usd: number | null | undefined): string {
   if (usd === null || usd === undefined || usd === 0) return "—";
-  // Four decimals: individual skill calls land in the tenths of a cent, and rounding them to
-  // "$0.00" would make a real number look like an absent one.
+  // Individual skill calls land in tenths of a cent; "$0.00" would look like an absent number.
   return `$${usd.toFixed(4)}`;
 }
 
@@ -30,21 +28,13 @@ export function shortSha(sha: string | null | undefined): string {
   return sha.slice(0, 7);
 }
 
-/** The milestone steps, in order, for the progress strip.
- *
- *  This is a PRESENTATION choice, not a copy of the orchestrator's vocabulary: STEP_VOCAB also holds
- *  sub-states (`3-implementing`, `5-await`, `6b-applying`) that would make ten pips into seventeen
- *  without telling anyone more. Whether a run is FINISHED is deliberately not derived here — the
- *  server sends `terminal` on every run, so there is one answer to that question rather than one per
- *  layer. */
+/** A presentation choice, not a copy of STEP_VOCAB: its sub-states (`3-implementing`, `5-await`)
+ *  would turn ten pips into seventeen without telling anyone more. Whether a run is FINISHED is not
+ *  derived here — the server sends `terminal`, so that question has one answer, not one per layer. */
 export const PIPELINE = ["1", "2", "3", "4a", "4b", "4c", "5", "6a", "6b", "7"] as const;
 
-/** Where a step sits in the strip, or null if it is not on it.
- *
- *  Returns null rather than -1 for an unknown step so the caller has to handle it. A step this build
- *  predates (the orchestrator gained one, the frontend has not been redeployed) previously fell
- *  through as -1 and rendered as a strip of all-future pips — indistinguishable from a run that had
- *  not started, which is the wrong answer told confidently. */
+/** Null rather than -1 for an unknown step, so the caller has to handle it: a step this build
+ *  predates otherwise renders as all-future pips, indistinguishable from a run that never started. */
 export function pipelineIndex(step: string): number | null {
   if (step === "merged") return PIPELINE.length - 1;
   if (step === "aborted") return null;

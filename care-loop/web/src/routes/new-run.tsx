@@ -1,9 +1,6 @@
-// new-run.tsx — the form that replaces `terminalFront`'s questionnaire ([[PLAN-loop-service]] §8).
-//
-// The same four seed fields the CLI prompts for, validated by the SAME rules — server-side, by
-// `front-terminal.ts#validateSeed`, so a ticket that would fail the `[ENG-###]` PR-title assert or a
-// branch `git worktree add` would reject fails here, while a person is looking at the form, instead
-// of hours later inside a spawned child.
+// The same four seed fields the CLI prompts for, validated by the same rules server-side — so a
+// ticket that would fail the PR-title assert fails here, while a person is looking at the form,
+// rather than hours later inside a spawned child.
 
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -41,9 +38,8 @@ export function NewRunPage() {
   const create = useCreateRun();
   const [form, setForm] = useState({ ticket: "", branch: "", summary: "", task: "" });
 
-  // The server validates every field and names the offender in `error.code` (`bad_ticket`,
-  // `bad_branch`, …). Mapping that back onto the input is what makes the message land next to the
-  // thing that is wrong, rather than as a banner the eye has to correlate.
+  // The server names the offending field in `error.code` (`bad_ticket`, `bad_branch`, …); mapping it
+  // back lands the message next to the input rather than in a banner the eye has to correlate.
   const err = create.error instanceof ApiError ? create.error : null;
   const fieldError = (key: string): string | null =>
     err && err.code === `bad_${key}` ? err.message : null;
@@ -54,8 +50,8 @@ export function NewRunPage() {
     create.mutate(
       { ...form },
       {
-        // Straight to the run. It has a stable id before it has a process — that is what minting the
-        // ULID at enqueue buys — so there is a page to land on even while it is still queued.
+        // The run has a stable id before it has a process, so there is a page to land on while it
+        // is still queued.
         onSuccess: (res) => void navigate({ to: "/runs/$runId", params: { runId: res.run_id } }),
       },
     );

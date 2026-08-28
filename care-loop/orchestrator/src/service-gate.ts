@@ -1,15 +1,11 @@
-// service-gate.ts — the `PlanGate` the loop-service spawns its children with ([[PLAN-loop-service]] §7).
+// The `PlanGate` the service spawns its children with. HTTP is how the human answers, not how the
+// child listens: the child polls SQLite directly, which it already opens to write every run event, so
+// this needs no HTTP client, service URL, or credentials. Neither side holds state the other needs,
+// so a gate survives the service being restarted or crashed.
 //
-// The plan called this `HttpPlanGate`. HTTP is how the HUMAN answers; it is not how the child listens.
-// The child polls SQLite directly — it already opens the database to write every run event, so this
-// needs no HTTP client, no service URL, and no credentials in the child. The property that buys is
-// worth the naming pedantry: **a gate survives the service being restarted, redeployed, or crashed**,
-// because neither side holds state the other needs. Both talk only to `gate_asks`.
-//
-// The other half of the design is that a gate is a SUSPEND POINT, not a blocking wait. A run parked
-// on a human has already done every expensive thing it will do before approval — recon, interview,
-// draft, all written to disk — and holds a concurrency slot for nothing. So the child waits briefly,
-// then exits, and the run resumes when the answer arrives.
+// A gate is a SUSPEND POINT, not a blocking wait. A run parked on a human has already done every
+// expensive thing it will do before approval, and holds a slot for nothing — so the child waits
+// briefly, exits, and resumes when the answer arrives.
 
 import { createHash } from "node:crypto";
 import {
@@ -29,11 +25,9 @@ import type { GateKind, GateStore } from "./service/gate-store.js";
 export interface ServicePlanGateOptions {
   runId: string;
   store: GateStore;
-  /** How long to stay alive polling before suspending. Short, because this is the expensive wait —
-   *  it is tuned to "a human is probably looking at it right now", not to "someone will get to it". */
+  /** Short: tuned to "a human is probably looking at it right now", not "someone will get to it". */
   waitMs?: number;
-  /** Poll interval. A local read against a WAL database, so this is cheap; the 60s `pollPr` waits
-   *  between rounds is the cost of a GitHub API call and has no bearing here. */
+  /** A local read against a WAL database, so it can be far tighter than the loop's GitHub polls. */
   pollMs?: number;
   /** How long the ask stays answerable once posted. Long, because a suspended run costs nothing. */
   ttlMs?: number;
@@ -45,17 +39,13 @@ export interface ServicePlanGateOptions {
 const sleepReal = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * The ask id, derived from the CONTENT of the ask.
+ * Derived from the ask's CONTENT, so it is per attempt rather than a bare `approve` — with a shared
+ * id an amend re-asks, finds the previous row already answered "amend", and the planner amends
+ * forever at one model call per lap.
  *
- * It must be per attempt, never a bare `approve`: with a shared id, `amend` re-drafts, re-asks, finds
- * the previous row already answered `amend`, and the planner amends forever against an answer nobody
- * re-gave — through a `for (;;)` whose own comment says amend re-drafts unbounded, at one real
- * planner call per lap.
- *
- * Content-derived rather than counted, because a counter lives in memory and a re-spawned child
- * restarts it at 1 — which would make a *different* second draft collide with the first draft's
- * answer. A hash gets both cases right at once: identical content re-asks idempotently (what a
- * crash-only loop needs), different content asks afresh (what amend needs).
+ * Hashed rather than counted because a counter lives in memory, and a re-spawned child restarts it
+ * at 1 — colliding a different second draft with the first draft's answer. A hash gets both cases
+ * at once: identical content re-asks idempotently, different content asks afresh.
  */
 export function askIdFor(kind: GateKind, payload: unknown): string {
   const digest = createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 16);
@@ -67,9 +57,8 @@ export function servicePlanGate(o: ServicePlanGateOptions): PlanGate {
   const sleep = o.sleep ?? sleepReal;
   const waitMs = o.waitMs ?? 10 * 60_000;
   const pollMs = o.pollMs ?? 2_000;
-  // Ask ids this process has already taken an answer from. Guards the one case a content hash cannot:
-  // an amendment whose re-draft comes back byte-identical would hash to the ask just answered `amend`,
-  // and replay it. Rare, but the failure is the unbounded loop above, so it is worth two lines.
+  // Guards the one case a content hash cannot: an amendment whose re-draft returns byte-identical
+  // hashes to the ask just answered "amend" and would replay it into the unbounded loop above.
   const consumed = new Set<string>();
 
   const resolve = async (kind: GateKind, payload: unknown): Promise<unknown> => {
@@ -88,8 +77,8 @@ export function servicePlanGate(o: ServicePlanGateOptions): PlanGate {
       }
       if (state.state === "cancelled") throw new GateCancelledError(askId);
       if (state.state === "expired") throw new GateExpiredError(askId);
-      // `missing` cannot happen — we just wrote the row — but treating it as pending would spin
-      // silently against a row someone deleted, so it is loud instead.
+      // Unreachable — the row was just written — but silently treating it as pending would spin
+      // against a row someone deleted.
       if (state.state === "missing") throw new GateExpiredError(askId);
       if (now().getTime() >= deadline) throw new GateSuspendedError(askId);
       await sleep(pollMs);
@@ -99,9 +88,8 @@ export function servicePlanGate(o: ServicePlanGateOptions): PlanGate {
   return {
     async interview(questions: PlanQuestion[]): Promise<PlanAnswer[]> {
       if (questions.length === 0) return [];
-      // ONE row for the whole batch, not one per question: the frontend renders one form and the
-      // child wants one round-trip, so a row per question would be three representations of one
-      // interaction.
+      // One row for the whole batch: the frontend renders one form and the child wants one
+      // round-trip, so a row per question would be three representations of one interaction.
       return (await resolve("interview", questions)) as PlanAnswer[];
     },
     async approve(ask: ConsolidatedAsk): Promise<ApprovalDecision> {

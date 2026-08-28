@@ -1,8 +1,6 @@
-// Timeline — the run's events in order, grouped by step.
-//
 // Events carry an unbounded `data` blob, so a row shows a one-line summary and expands on demand.
-// Skill artifacts are refs, not bodies: opening one fetches it, which is how a run with 327 events
-// and 42 artifacts renders without pulling a megabyte nobody looked at.
+// Artifacts are refs: opening one fetches it, which is how a 327-event run renders without pulling a
+// megabyte nobody looked at.
 
 import { useState } from "react";
 import { useArtifact } from "../api/queries";
@@ -45,8 +43,7 @@ export function Timeline({
   );
 }
 
-/** Artifact refs hide inside `data` in two shapes: `input` on skill.invoke, `artifacts[]` on
- *  skill.result. Both are `{name, path, sha256}`. */
+/** Refs hide in `data` in two shapes: `input` on skill.invoke, `artifacts[]` on skill.result. */
 function refsOf(ev: JournalEvent): { name: string; sha256: string }[] {
   const out: { name: string; sha256: string }[] = [];
   const push = (v: unknown): void => {

@@ -1,9 +1,6 @@
-// api/types.ts — the shapes `care-loopd serve` returns ([[PLAN-loop-service]] §6).
-//
-// Hand-mirrored rather than imported from the orchestrator: the two are separate packages with
-// separate builds, and a type-only coupling across that boundary would drag the whole server
-// tsconfig into this one. The API contract is frozen and tested server-side, so this file is a
-// transcription of a fixed thing rather than a guess that can drift unnoticed.
+// The shapes `care-loopd serve` returns. Hand-mirrored rather than imported: the two are separate
+// packages, and a type-only coupling would drag the whole server tsconfig into this one. The contract
+// is tested server-side, so this transcribes a fixed thing rather than guessing.
 
 export interface RunSummary {
   runId: string;
@@ -21,7 +18,6 @@ export interface RunSummary {
   eventCount: number;
   costUsd: number | null;
   durationMs: number;
-  parityError: string | null;
   stale: boolean;
   /** Sent by the server rather than derived here — the step vocabulary is the orchestrator's. */
   terminal: boolean;
@@ -107,19 +103,17 @@ export interface RunFilters {
   dir?: "asc" | "desc";
   limit?: number;
   offset?: number;
-  /** Client-side only: show just the runs with an open gate. The API has no such filter — gates live
-   *  in their own table and the needs-you list is one small request. */
+  /** Client-side only — the API has no such filter, and the needs-you list is one small request. */
   gate?: boolean;
 }
 
-// ── Queue + gate ([[PLAN-loop-service]] §4, §7) ───────────────────────────────────────────────────
+// ── Queue + gate ─────────────────────────────────────────────────────────────────────────────────
 
 export type QueueStatus =
   | "pending"
   | "running"
-  /** Suspended at a gate: live, but waiting on a PERSON rather than on capacity. Distinct from
-   *  `pending` because the two need different UI — one has a queue position, the other has a
-   *  question. */
+  /** Live, but waiting on a person rather than on capacity — one has a queue position, the other a
+   *  question, so they render differently. */
   | "awaiting_gate"
   | "done"
   | "failed"

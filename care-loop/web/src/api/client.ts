@@ -1,8 +1,6 @@
-// api/client.ts — the one place that talks to the service.
-//
-// Every request is same-origin (`/api/...`): in development Vite proxies to the service, and in
-// production the service serves these assets itself. That is deliberate — it means the session
-// cookie needs no cross-origin handling and no CORS policy exists to get wrong.
+// The one place that talks to the service. Every request is same-origin — Vite proxies in dev, the
+// service serves these assets in production — so the session cookie needs no cross-origin handling
+// and no CORS policy exists to get wrong.
 
 import type { ApiErrorBody } from "./errors";
 
@@ -21,15 +19,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
-      // The cookie is same-origin, but being explicit means a future move to a separate API host
-      // fails loudly at CORS rather than silently dropping the session.
+      // Explicit, so a future move to a separate API host fails loudly at CORS rather than silently
+      // dropping the session.
       credentials: "same-origin",
       headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
       ...init,
     });
   } catch (cause) {
-    // fetch only rejects for network-level failures — the service being down is the common one, and
-    // it deserves a clearer message than "Failed to fetch".
+    // fetch rejects only for network-level failures — usually the service being down, which deserves
+    // better than "Failed to fetch".
     throw new ApiError(0, "unreachable", "cannot reach the care-loop service");
   }
 
@@ -47,8 +45,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-/** Serialize filters, dropping empties so the URL reflects only what is actually filtered — a
- *  querystring full of `&repo=` is noise in the address bar and in the query cache key alike. */
+/** Drops empties, so the URL reflects only what is actually filtered — a querystring full of
+ *  `&repo=` is noise in the address bar and in the cache key alike. */
 export function qs(params: object): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params) as [string, unknown][]) {

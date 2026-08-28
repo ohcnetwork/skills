@@ -1,9 +1,5 @@
-// router.tsx — routes, defined in code rather than by file convention.
-//
-// Two reasons. There are three of them, so a generated route tree would be more machinery than
-// content. And the fleet's filters live in the URL as validated search params — a link IS the
-// filtered view, shareable and back/forward-able — which is easier to read declared here than spread
-// across files.
+// Routes in code rather than by file convention: there are three of them, and the fleet's filters
+// live in the URL as validated search params — a link IS the filtered view.
 
 import {
   createRootRoute,
@@ -30,13 +26,10 @@ const rootRoute = createRootRoute({
 const fleetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  // Search params are the filter state. This NORMALISES the keys it knows about, so an unparseable
-  // `order` or `dir` degrades to the default rather than blanking the screen on a 400.
-  //
-  // It is not a whitelist: TanStack Router merges validated output over the raw search rather than
-  // replacing it, so keys not named here (e.g. `offset`, which the pager writes) survive into
-  // `useSearch()` and are forwarded by `qs`. That is load-bearing — pagination depends on it — and is
-  // safe because the API validates every parameter itself and 400s on anything malformed.
+  // Normalises the keys it knows, so an unparseable `order` degrades to the default rather than
+  // blanking the screen on a 400. NOT a whitelist: the router merges this over the raw search, so
+  // unnamed keys (`offset`, which the pager writes) survive — load-bearing for pagination, and safe
+  // because the API validates every parameter itself.
   validateSearch: (raw: Record<string, unknown>): RunFilters => {
     const s = (k: string): string | undefined => {
       const v = raw[k];
@@ -54,8 +47,7 @@ const fleetRoute = createRoute({
       stale: raw.stale === true || raw.stale === "true" ? true : undefined,
       order: ORDERS.includes(order as ListOrder) ? (order as ListOrder) : undefined,
       dir: dir === "asc" || dir === "desc" ? dir : undefined,
-      // Not a server filter: the API has no notion of "has an open gate". Narrowed client-side from
-      // the needs-you list, which is one small polled request either way.
+      // The API has no "has an open gate" filter; narrowed client-side from the needs-you list.
       gate: raw.gate === true || raw.gate === "true" ? true : undefined,
     };
   },
@@ -64,8 +56,7 @@ const fleetRoute = createRoute({
 
 const runRoute = createRoute({
   getParentRoute: () => rootRoute,
-  // Keyed by run_id, never the slug: slug has no unique constraint and a reused branch collides on
-  // it deterministically ([[PLAN-loop-service]] §6).
+  // Keyed by run_id: slug has no unique constraint, and a reused branch collides deterministically.
   path: "/runs/$runId",
   component: RunPage,
 });

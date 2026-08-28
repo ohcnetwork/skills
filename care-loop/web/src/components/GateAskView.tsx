@@ -1,9 +1,6 @@
-// GateAskView.tsx — the human gate, on a screen ([[PLAN-loop-service]] §7, §8).
-//
-// This is the one place in the app where a click authorizes something irreversible: approval lets
-// the loop push commits and open a PR on origin. So the ask is rendered in full — every acceptance
-// criterion, the test plan, and the `Planned by:` line the SKILL mandates — rather than summarised
-// into a yes/no. A gate that is easier to skim than to read is a rubber stamp.
+// The one place in the app where a click authorizes something irreversible: approval lets the loop
+// push commits and open a PR. So the ask is rendered in full rather than summarised into a yes/no —
+// a gate that is easier to skim than to read is a rubber stamp.
 
 import { useState } from "react";
 import { useAnswerGate } from "../api/queries";
@@ -131,8 +128,7 @@ function ApproveGate({
           />
           <div className="mt-3 flex gap-2">
             <Button
-              // An empty amendment would send the planner off to re-draft against no instruction —
-              // a model call spent to produce the same plan. The server refuses it too.
+              // Without one the planner re-drafts against no instruction. The server refuses it too.
               disabled={!amendment.trim() || answer.isPending}
               onClick={() => send({ decision: "amend", amendment: amendment.trim() })}
             >
@@ -176,8 +172,8 @@ function InterviewGate({
 }) {
   const answer = useAnswerGate(ask.run_id);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  // Every question, because a partial set reaches the planner as a silently shorter interview and
-  // the plan gets drafted against the gaps. The server enforces it; the button just agrees.
+  // A partial set reaches the planner as a silently shorter interview, and the plan gets drafted
+  // against the gaps. The server enforces this; the button just agrees.
   const complete = questions.every((q) => (answers[q.id] ?? "").trim() !== "");
 
   return (

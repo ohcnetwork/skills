@@ -1,18 +1,12 @@
-/* styles.css — Tailwind v4, CSS-first, themed with the Care UI tokens.
+/* Tailwind v4, themed with Care UI's tokens, transcribed from the live docs site's computed styles
+ * because its shadcn registry currently serves HTML instead of JSON. When that is fixed the real
+ * components drop in on these tokens with no visual change, consuming exactly these names.
  *
- * Care UI (careui.ohc.network) is the design system of record. Its components are published as a
- * shadcn registry, but the registry endpoints currently serve the docs SPA's HTML instead of JSON,
- * so `shadcn add` cannot install them (it fails parsing "<!doctype"). What IS usable — and is the
- * substance of a design system anyway — are the tokens, which were read directly off the live docs
- * site's computed styles and transcribed below. When the registry is fixed, the components drop in
- * on top of these tokens with no visual change, because they consume exactly these names.
- *
- * Worth noting: Care UI's --primary is EMERALD, not blue. */
+ * Care UI's --primary is EMERALD, not blue. */
 
 @import "tailwindcss";
 
-/* Figtree + Geist Mono are Care UI's faces. Loaded from Google Fonts with real fallbacks so the
- * layout does not depend on the network. */
+/* Care UI's faces, with real fallbacks so the layout does not depend on the network. */
 @import url("https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
 
 @theme {
@@ -80,8 +74,7 @@
   --warn: oklch(76.9% 0.188 70.08);
 }
 
-/* Expose the semantic tokens to Tailwind's utilities, so `bg-card` / `text-muted-foreground` /
- * `border-border` work exactly as they do in Care UI's own components. */
+/* Exposes the tokens to Tailwind, so `bg-card` and friends work as they do in Care UI itself. */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

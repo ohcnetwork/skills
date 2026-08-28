@@ -5,10 +5,9 @@ import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import "./styles.css";
 
-// Care UI switches themes on a CLASS (`.dark`), not on `prefers-color-scheme`, because it ships five
-// modes — light, dark, high-contrast, protanopia, tritanopia — and only two of those a media query
-// can express. Following the system preference is the default; the class is the seam a theme picker
-// would drive later without any CSS changing.
+// Care UI switches on a CLASS, not `prefers-color-scheme`, because it ships five modes — light,
+// dark, high-contrast, protanopia, tritanopia — and a media query expresses only two. The system
+// preference is the default; the class is the seam a theme picker would drive.
 const media = window.matchMedia("(prefers-color-scheme: dark)");
 const applyTheme = (dark: boolean): void => {
   document.documentElement.classList.toggle("dark", dark);
@@ -19,8 +18,8 @@ media.addEventListener("change", (e) => applyTheme(e.matches));
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // A 401/404 is an answer, not a hiccup. Retrying only makes sense for the transport failing,
-      // and one retry is enough to cover a service restart without making a real outage feel slow.
+      // A 401/404 is an answer, not a hiccup. One retry covers a service restart without making a
+      // real outage feel slow.
       retry: (failureCount, error) =>
         failureCount < 1 && (error as { status?: number }).status === 0,
       refetchOnWindowFocus: true,

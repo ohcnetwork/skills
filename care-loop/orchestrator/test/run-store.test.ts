@@ -4,6 +4,7 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  SCHEMA_VERSION,
   SqliteRunStore,
   NullRunStore,
   rollupsFromEvents,
@@ -186,4 +187,54 @@ test("setActiveRunStore / getActiveRunStore round-trip", () => {
   assert.equal(getActiveRunStore(), store);
   // reset to a fresh NullRunStore so other test files aren't affected by import order
   setActiveRunStore(new NullRunStore());
+});
+
+// ── migrate() ─────────────────────────────────────────────────────────────────────────────────────
+// Relocated here when parity.test.ts was deleted: these exercise the migration hook, not the
+// parity check that happened to be its first customer.
+
+test("migrate(): a legacy database drops parity_error and reaches the current user_version", () => {
+  const dbPath = tmpDbPath();
+  // Build a v6-shaped DB by hand: `runs` WITH parity_error, user_version = 6. SCHEMA's
+  // CREATE TABLE IF NOT EXISTS leaves it alone, so this is the real upgrade path.
+  const seed = new SqliteRunStore(dbPath);
+  seed.raw().exec("DROP TABLE runs");
+  seed.raw().exec(`
+    CREATE TABLE runs (
+      run_id TEXT PRIMARY KEY, slug TEXT NOT NULL, requested_by TEXT, repo TEXT NOT NULL,
+      branch TEXT NOT NULL, tier TEXT NOT NULL, step TEXT NOT NULL, round INTEGER NOT NULL,
+      pr INTEGER, started_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0, parity_error TEXT
+    );
+    PRAGMA user_version = 6;`);
+  seed.close();
+
+  const upgraded = new SqliteRunStore(dbPath);
+  const cols = upgraded
+    .raw()
+    .prepare("SELECT name FROM pragma_table_info('runs')")
+    .all() as unknown as { name: string }[];
+  assert.ok(
+    !cols.some((c) => c.name === "parity_error"),
+    "parity_error column was not dropped",
+  );
+  const [{ user_version: version }] = upgraded
+    .raw()
+    .prepare("PRAGMA user_version")
+    .all() as unknown as { user_version: number }[];
+  assert.equal(version, SCHEMA_VERSION);
+  upgraded.close();
+});
+
+test("migrate(): is idempotent — reopening an already-migrated DB is a no-op", () => {
+  const dbPath = tmpDbPath();
+  new SqliteRunStore(dbPath).close();
+  const reopened = new SqliteRunStore(dbPath); // must not throw
+  const [{ user_version: version }] = reopened
+    .raw()
+    .prepare("PRAGMA user_version")
+    .all() as unknown as { user_version: number }[];
+  assert.equal(version, SCHEMA_VERSION);
+  reopened.close();
 });

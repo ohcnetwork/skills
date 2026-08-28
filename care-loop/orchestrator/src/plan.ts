@@ -37,15 +37,14 @@ export interface RunPlanOptions {
   planner: Planner; // typically withSkillLog-wrapped (default-wiring)
   gate: PlanGate; // supplied by the front (terminal / jira / pr)
   lockOpts?: { pid?: number; isAlive?: (pid: number) => boolean };
-  /** Resume a stage that SUSPENDED at its gate ([[PLAN-loop-service]] §7) instead of re-running it.
-   *  Plain data assembled by the caller, so this resume path costs the loop no dependency on whatever
-   *  persisted it. */
+  /** Resumes a stage that suspended at its gate instead of re-running it. Plain data, so this costs
+   *  the loop no dependency on whatever persisted it. */
   restore?: PlanRestore | null;
 }
 
 export interface PlanResult {
-  /** `suspended` is not a failure: the plan is drafted and waiting on a human, and the caller should
-   *  exit so the run stops holding a concurrency slot. It resumes when the gate is answered. */
+  /** `suspended` is not a failure — the plan is drafted and waiting on a human. The caller should
+   *  exit so the run stops holding a slot; it resumes when the gate is answered. */
   outcome: "approved" | "rejected" | "aborted" | "suspended";
   reasonCode: string;
   classification?: Tier;
@@ -82,8 +81,7 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           updated_at: new Date().toISOString(),
           run_id: runId,
           requested_by: resolveRequestedBy(),
-          // ticket/summary are known at the plan stage (PlanInput always carries them) — promoted
-          // into CareState (PLAN-sqlite-run-store.md §6) instead of being event-only.
+          // Known at the plan stage, so they are projected into the row rather than event-only.
           ticket: input.ticket,
           summary: input.summary,
           started_at: new Date().toISOString(),
@@ -99,9 +97,8 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
 
       let spawn = 1; // monotonic spawn counter → distinct logging sidecars (interview=1, drafts=2..)
 
-      /** Record the approval and advance the journal to step 2. Shared by the normal path and by a
-       *  gate RESUME, which reaches this having called no planner at all — `plannedBy` and
-       *  `classification` are the only two fields it needs, and both are in the ask the human saw. */
+      /** Shared with the resume path, which reaches here having called no planner at all —
+       *  `plannedBy` and `classification` are its only inputs, and both are in the ask. */
       const finishApproved = (plannedBy: string | undefined, classification: string): PlanResult => {
         const tier = (classification ?? "standard") as Tier;
         j.append({
@@ -130,12 +127,11 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
         return { outcome: "approved", reasonCode: "plan_ready", classification: tier, runDir: input.runDir };
       };
 
-      /** End the stage the way a non-answer requires. Returns null for anything that is not a gate
-       *  outcome, so a real error still propagates. */
+      /** Null for anything that is not a gate outcome, so a real error still propagates. */
       const endAtGate = (err: unknown): PlanResult | null => {
         if (err instanceof GateSuspendedError) {
-          // NOT a failure. The plan is drafted, the artifacts are on disk, the ask is open — the run
-          // is simply not worth a concurrency slot while it waits on a person.
+          // Not a failure: the plan is drafted and the ask is open — the run is simply not worth a
+          // slot while it waits on a person.
           j.append({ event: "gate.suspended", step: "1", round: 1, data: { ask_id: err.askId } });
           projectAndWrite(input.runDir, j.read().events);
           return { outcome: "suspended", reasonCode: "gate_unanswered", runDir: input.runDir };
@@ -147,8 +143,8 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
               ? "gate_timeout"
               : null;
         if (reason === null) return null;
-        // Reached by unwinding, not by a signal — so the lock is released and the journal gets its
-        // terminal event, where a SIGTERM would have left both hanging.
+        // Reached by unwinding rather than by a signal, so the lock is released and the journal gets
+        // its terminal event — a SIGTERM would have left both hanging.
         j.append({
           event: "run.end",
           step: "1",
@@ -158,11 +154,9 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
         return { outcome: "aborted", reasonCode: reason, runDir: input.runDir };
       };
 
-      // ── Resume a stage that suspended at its approval gate (§7) ────────────────────────────────
-      // Everything the approval path needs was already durable: the artifacts are on disk from
-      // before the ask, and `plannedBy`/`classification` are in the ask itself. So approve and
-      // reject resume having called NO model; only amend re-invokes the planner, which is precisely
-      // the work the human just asked for.
+      // ── Resume a stage that suspended at its approval gate ─────────────────────────────────────
+      // Everything the approval path needs was already durable, so approve and reject resume having
+      // called NO model. Only amend re-invokes the planner, which is the work just asked for.
       const restored = o.restore ?? null;
       if (restored?.kind === "approve" && restored.answer && restored.ask) {
         const d = restored.answer;
@@ -180,8 +174,8 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
       }
 
       // ── Phase 1+2 — recon + interview ──────────────────────────────────────────────────────────
-      // A restore already has both, so it skips this planner call as well: re-running recon to
-      // rediscover questions a human has already answered is the most expensive way to learn nothing.
+      // A restore has both already: re-running recon to rediscover questions a human has answered is
+      // the most expensive way to learn nothing.
       let questions: PlanQuestion[];
       let answers: PlanAnswer[] = [];
       if (restored) {

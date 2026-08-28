@@ -1,13 +1,6 @@
-// run-index.ts — the fleet READ port ([[PLAN-loop-service]] §6, PLAN-sqlite-run-store §7).
-//
-// **Reads the database and nothing else.** No method touches a run directory, a `journal.jsonl`, or a
-// `state.json`: `run_events` mirrors the journal completely (same seq/ts/event/step/round/data/prev),
-// so the filesystem has nothing to add. This is what lets the service run anywhere the db is
-// reachable, with no run dirs mounted — and it is why `get` takes a run_id rather than a directory.
-//
-// An earlier `get` took the directory SLUG and read the journal file. Retired on both counts: slug has
-// no unique constraint (a reused branch collides on it deterministically), and reading files put the
-// filesystem back under an API with no other reason to know it exists.
+// The fleet read port. Reads the database and nothing else — `run_events` mirrors the journal
+// completely, so the filesystem has nothing to add. That is what lets the service run anywhere the db
+// is reachable with no run dirs mounted, and why `get` takes a run_id rather than a directory.
 
 import type { DatabaseSync } from "node:sqlite";
 import type { JournalEvent } from "./journal.js";
@@ -29,11 +22,9 @@ export interface RunSummary {
   eventCount: number;
   costUsd: number | null;
   durationMs: number;
-  parityError: string | null;
   stale: boolean;
-  /** Whether the run has reached a step it cannot advance from. Sent rather than left for the client
-   *  to derive: the step vocabulary is the orchestrator's, and a frontend recomputing it is a second
-   *  copy that drifts the moment a step is added. */
+  /** Sent rather than derived client-side: the step vocabulary is the orchestrator's, and a second
+   *  copy drifts the moment a step is added. */
   terminal: boolean;
 }
 
@@ -77,8 +68,7 @@ export interface ListFilter {
   offset?: number;
 }
 
-/** Distinct values with counts, for building filter controls without loading the fleet to derive
- *  them client-side. Cheap: four grouped scans of a table with one row per run. */
+/** Filter controls without loading the fleet to derive them — four grouped scans of one row per run. */
 export interface Facets {
   repos: { value: string; count: number }[];
   branches: { value: string; count: number }[];
@@ -87,8 +77,8 @@ export interface Facets {
 }
 
 export interface EventFilter {
-  /** Cursor: events with `seq` strictly greater than this. `seq` is dense and monotonic per run, so
-   *  it is a stabler cursor than an offset — a concurrent append cannot shift what it points at. */
+  /** `seq` is dense and monotonic per run, so it is a stabler cursor than an offset: a concurrent
+   *  append cannot shift what it points at. */
   afterSeq?: number;
   /** Restrict to these event types. Absent/empty means all. */
   events?: string[];
@@ -110,25 +100,21 @@ export interface ArtifactSummary {
 }
 
 export interface ArtifactBody extends ArtifactSummary {
-  /** The artifact's JSON value, already parsed — the column holds jsonb, and re-stringifying it for
-   *  the client to parse again would be two pointless round trips. */
+  /** Already parsed: the column holds jsonb, and re-stringifying it to be parsed again is waste. */
   content: unknown;
 }
 
 export interface RunIndex {
   list(filter?: ListFilter): RunSummary[];
   count(filter?: ListFilter): number;
-  /** Distinct values with counts, honouring the same filter — so narrowing to one repo shows only the
-   *  branches that repo actually has, rather than every branch in the fleet. */
+  /** Honours the same filter, so narrowing to one repo offers only that repo's branches. */
   facets(filter?: ListFilter): Facets;
   get(runId: string): RunRecord | null;
   events(runId: string, filter?: EventFilter): EventPage;
-  /** Artifact metadata for a run, body excluded — listing a timeline must not stream 1 MB of skill
-   *  envelopes nobody asked for. */
+  /** Body excluded: rendering a timeline must not stream 1 MB of skill envelopes. */
   artifacts(runId: string): ArtifactSummary[];
-  /** One artifact body by content hash (hex digest, with or without the `sha256:` prefix). Addressed
-   *  by hash rather than path because that is the handle the journal's artifact ref already carries,
-   *  so the frontend goes from a timeline event to a body without a second lookup. */
+  /** Addressed by hash because that is the handle the journal's artifact ref carries, so the frontend
+   *  goes from a timeline event to a body without a second lookup. */
   artifact(runId: string, sha256: string): ArtifactBody | null;
   close(): void;
 }
@@ -153,7 +139,6 @@ interface RunRow {
   event_count: number;
   cost_usd: number;
   duration_ms: number;
-  parity_error: string | null;
 }
 
 interface DetailRow {
@@ -193,7 +178,6 @@ function rowToSummary(row: RunRow): RunSummary {
     eventCount: row.event_count,
     costUsd: row.cost_usd > 0 ? row.cost_usd : null,
     durationMs: row.duration_ms,
-    parityError: row.parity_error,
     stale: row.slug.includes(".stale-"),
     terminal: isTerminalStep(row.step),
   };
@@ -218,12 +202,9 @@ function clamp(value: number | undefined, fallback: number, max: number): number
   return Math.min(Math.max(Math.trunc(value), 1), max);
 }
 
-/** The paging actually applied to a `list` call — defaults filled in, `limit` clamped to the ceiling.
- *
- *  Exported because the HTTP layer must echo back the EFFECTIVE values, not the requested ones. A
- *  response that says `limit: 999` while serving 200 rows breaks the most natural client-side
- *  pagination there is (`offset += limit`), and does it silently: the reader skips 799 rows per page
- *  and nothing errors. One resolver, used by the query and by the envelope, makes that impossible. */
+/** Exported so the HTTP layer echoes the EFFECTIVE paging: a response claiming `limit: 999` while
+ *  serving 200 rows silently breaks `offset += limit`. One resolver serves both the query and the
+ *  envelope, so they cannot disagree. */
 export function resolvePaging(filter: ListFilter = {}): { limit: number; offset: number } {
   return {
     limit: clamp(filter.limit, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
@@ -231,8 +212,8 @@ export function resolvePaging(filter: ListFilter = {}): { limit: number; offset:
   };
 }
 
-/** The shared WHERE for `list`/`count`, so one filter cannot mean two things in a single response —
- *  a paginated list whose `total` came from a different predicate is a subtly wrong page count. */
+/** Shared by `list` and `count`: a page whose `total` came from a different predicate is a subtly
+ *  wrong page count. */
 function whereFor(f: ListFilter): { sql: string; params: (string | number)[] } {
   const clauses: string[] = [];
   const params: (string | number)[] = [];
@@ -288,14 +269,10 @@ function whereFor(f: ListFilter): { sql: string; params: (string | number)[] } {
   return { sql: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", params };
 }
 
-/** `runs` LEFT JOIN `run_detail` — the shape both `list` and `count` query through, so a filter on a
- *  detail column (ticket, task, summary) means the same thing in the page and in its total. LEFT, not
- *  INNER: a run whose detail row is missing must still be listed, not silently dropped from the
- *  fleet. */
+/** LEFT, not INNER: a run whose detail row is missing must still be listed, not silently dropped. */
 const FROM = "FROM runs r LEFT JOIN run_detail d ON d.run_id = r.run_id";
 
-/** Whitelisted ORDER BY. The column name is chosen from a fixed set rather than interpolated from the
- *  query string — the one place in this file where user input would otherwise reach SQL as syntax. */
+/** Chosen from a fixed set, never interpolated: the one place user input could reach SQL as syntax. */
 function orderFor(f: ListFilter): string {
   const col: ListOrder = LIST_ORDERS.includes(f.order as ListOrder)
     ? (f.order as ListOrder)
@@ -327,8 +304,7 @@ export class SqliteRunIndex implements RunIndex {
   facets(filter: ListFilter = {}): Facets {
     const { sql, params } = whereFor(filter);
     const group = (col: string): { value: string; count: number }[] => {
-      // `whereFor` returns either "" or a leading " WHERE ..."; the NULL guard has to join on
-      // whichever it was. Building the clause explicitly beats patching the string afterwards.
+      // `whereFor` returns "" or a leading " WHERE ...", so the guard has to join on whichever.
       const where = sql ? `${sql} AND ${col} IS NOT NULL` : ` WHERE ${col} IS NOT NULL`;
       return this.db
         .prepare(
@@ -337,7 +313,7 @@ export class SqliteRunIndex implements RunIndex {
         )
         .all(...params) as unknown as { value: string; count: number }[];
     };
-    // Column names are literals from this file, never query-string input — see `orderFor`.
+    // Literals from this file, never query-string input — see `orderFor`.
     return {
       repos: group("r.repo"),
       branches: group("r.branch"),
@@ -351,8 +327,7 @@ export class SqliteRunIndex implements RunIndex {
       .prepare("SELECT * FROM runs WHERE run_id = ?")
       .get(runId) as unknown as RunRow | undefined;
     if (!run) return null;
-    // LEFT-JOIN semantics by hand: `run_detail` is seeded alongside the run, but a row that predates
-    // the detail table (or a partially-reindexed one) must still render rather than 404.
+    // A run whose detail row predates the table, or is partially reindexed, must still render.
     const detail = this.db
       .prepare(
         "SELECT task, ticket, summary, worktree, head_sha, last_reviewed_sha FROM run_detail WHERE run_id = ?",
@@ -401,11 +376,9 @@ export class SqliteRunIndex implements RunIndex {
   }
 
   artifact(runId: string, sha256: string): ArtifactBody | null {
-    // Accept both spellings: the journal ref carries `sha256:<hex>`, while a URL path segment is
-    // cleaner as the bare hex. Normalizing here means neither caller has to think about it.
+    // The journal ref carries `sha256:<hex>`; a URL path segment is cleaner as bare hex.
     const full = sha256.startsWith("sha256:") ? sha256 : `sha256:${sha256}`;
-    // json(content) decodes the jsonb BLOB back to text; parsed once here so the response carries a
-    // real JSON value rather than a string containing JSON.
+    // Parsed once here, so the response carries a JSON value rather than a string containing JSON.
     const row = this.db
       .prepare(
         "SELECT path, name, sha256, bytes, json(content) AS content FROM run_artifacts WHERE run_id = ? AND sha256 = ? LIMIT 1",

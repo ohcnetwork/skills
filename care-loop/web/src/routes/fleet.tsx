@@ -1,8 +1,5 @@
-// fleet.tsx — the run list. Read parity with the vanilla dashboard's table (Run · Step · Pipeline ·
-// Round · Tier · Age · Cost · Duration), plus the filters the API now supports.
-//
-// Filter state lives in the URL, not in component state: a filtered view is a link someone can paste
-// into Slack, and browser back does what it looks like it does.
+// Filter state lives in the URL rather than in component state: a filtered view is a link someone
+// can paste into Slack, and browser back does what it looks like it does.
 
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useFacets, useGates, useRuns } from "../api/queries";
@@ -24,8 +21,7 @@ export function FleetPage() {
   const runs = useRuns(serverFilters, { refetch: REFRESH_MS });
   const facets = useFacets(serverFilters);
   const gates = useGates();
-  // Gates live in their own table, so this is a client-side narrowing over one small polled list
-  // rather than a filter the runs query could carry.
+  // Gates live in their own table, so this narrows client-side over one small polled list.
   const waiting = new Set((gates.data?.items ?? []).map((a) => a.run_id));
 
   const setFilters = (next: Partial<RunFilters>): void => {
@@ -105,11 +101,6 @@ function RunRow({ run, waiting }: { run: RunSummary; waiting: boolean }) {
         <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
           <span>{run.requestedBy ?? "unattributed"}</span>
           {run.pr !== null && <span className="font-mono">#{run.pr}</span>}
-          {run.parityError && (
-            <Badge tone="warn" title={run.parityError}>
-              parity
-            </Badge>
-          )}
           {/* The one row state a person, rather than the fleet, is the bottleneck for. */}
           {waiting && <Badge tone="warn">needs you</Badge>}
         </div>

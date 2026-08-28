@@ -1,15 +1,5 @@
-// service/backup.ts — the durability the projection design deferred to this point
-// ([[PLAN-loop-service]] §12, [[PLAN-sqlite-run-store]] §10).
-//
-// Until now, losing `loops.db` cost nothing: `care-loopd reindex` rebuilt every row from the journals
-// on disk. `queue` (and later `gate_asks`) breaks that. A pending request is not a run yet, so no
-// journal describes it, and no rebuild can bring it back. That is the moment backups stop being
-// tidiness and start being the only recovery path for part of the database — which is why they land
-// with the queue rather than earlier or later.
-//
-// `VACUUM INTO` rather than copying the file: it takes a consistent snapshot of a live database
-// through SQLite itself, so it is safe with WAL and with readers and writers connected. Copying
-// `loops.db` while the service is running can capture a torn page or miss the WAL entirely.
+// Snapshots of loops.db. `queue`, `sessions`, and `gate_asks` have no journal behind them, so unlike
+// the run tables they cannot be rebuilt by `reindex` — backups are their only recovery path.
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -17,70 +7,60 @@ import type { DatabaseSync } from "node:sqlite";
 
 export interface BackupOptions {
   dir: string;
-  /** How many snapshots to keep. Older ones are pruned oldest-first after each successful backup. */
   keep?: number;
 }
 
 const PREFIX = "loops-";
 const SUFFIX = ".db";
+const DEFAULT_KEEP = 7;
 
-/** Take one snapshot. Returns its path.
+const isSnapshot = (file: string): boolean =>
+  file.startsWith(PREFIX) && file.endsWith(SUFFIX);
+
+/** ISO-8601 stamps are fixed-width, so lexicographic order is chronological — no stat per file, and
+ *  no dependence on mtime, which a copy or a restore would rewrite. */
+function snapshotsNewestFirst(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter(isSnapshot).sort().reverse();
+}
+
+/**
+ * `VACUUM INTO` takes a consistent snapshot through SQLite itself, so it is safe with WAL and with
+ * readers and writers connected; copying the file can capture a torn page or miss the WAL.
  *
- *  `node:sqlite` is SYNCHRONOUS, so this blocks the event loop for the duration of the vacuum — the
- *  whole service is unresponsive while it runs. At the current 1.3 MB that is single-digit
- *  milliseconds and irrelevant. Stated so it is not rediscovered as a mystery latency spike: if
- *  `loops.db` reaches the tens of megabytes, move this to a worker thread or a child process.
- *
- *  Snapshots default to `<db dir>/backups`, which sits inside the tree `reindex` scans — harmless,
- *  because `discoverRunDirs` skips non-run directories, but worth knowing before anything starts
- *  archiving the run tree wholesale. */
+ * `node:sqlite` is synchronous, so this blocks the event loop for the whole vacuum. Irrelevant at
+ * the current ~1 MB; move it to a worker if loops.db ever reaches tens of megabytes.
+ */
 export function backupNow(db: DatabaseSync, o: BackupOptions, now: Date = new Date()): string {
   mkdirSync(o.dir, { recursive: true });
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   const path = join(o.dir, `${PREFIX}${stamp}${SUFFIX}`);
-  // A parameter, not interpolation: the path is derived here rather than from input, but VACUUM INTO
-  // takes a bound value and there is no reason to hand SQLite a hand-built string.
   db.prepare("VACUUM INTO ?").run(path);
-  prune(o.dir, o.keep ?? 7);
+  prune(o.dir, o.keep ?? DEFAULT_KEEP);
   return path;
 }
 
-/** Keep the newest `keep` snapshots; delete the rest. */
 export function prune(dir: string, keep: number): string[] {
-  if (!existsSync(dir)) return [];
-  const snaps = readdirSync(dir)
-    .filter((f) => f.startsWith(PREFIX) && f.endsWith(SUFFIX))
-    // Sorting by NAME works because the stamp is ISO-8601 and fixed-width, so lexicographic order is
-    // chronological order — no stat call per file, and no dependence on mtime, which a copy or a
-    // restore would rewrite.
-    .sort()
-    .reverse();
-  const doomed = snaps.slice(Math.max(0, keep));
-  for (const f of doomed) {
+  const expired = snapshotsNewestFirst(dir).slice(Math.max(0, keep));
+  for (const file of expired) {
     try {
-      unlinkSync(join(dir, f));
+      unlinkSync(join(dir, file));
     } catch {
-      // A snapshot we cannot delete is a disk-space problem, not a correctness one. Pruning must
-      // never be the reason a backup cycle reports failure.
+      // A snapshot we cannot delete is a disk-space problem; it must never fail the backup cycle.
     }
   }
-  return doomed;
+  return expired;
 }
 
 export function listBackups(dir: string): { path: string; bytes: number }[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => f.startsWith(PREFIX) && f.endsWith(SUFFIX))
-    .sort()
-    .map((f) => ({ path: join(dir, f), bytes: statSync(join(dir, f)).size }));
+  return snapshotsNewestFirst(dir)
+    .reverse()
+    .map((file) => ({ path: join(dir, file), bytes: statSync(join(dir, file)).size }));
 }
 
-/** `PRAGMA integrity_check` — run at boot, before serving anything.
- *
- *  Reported, not fatal. A corrupt database that still answers most queries is more useful to a team
- *  than a service that refuses to start, and the run tables remain rebuildable with `reindex`. The
- *  point is that someone LEARNS about it: silent corruption discovered weeks later, after backups
- *  have rotated past the last good snapshot, is the failure this exists to prevent. */
+/** Run at boot and reported rather than thrown: a database that still answers most queries beats a
+ *  service that refuses to start, and the run tables stay rebuildable. The point is that someone
+ *  learns about it before backups rotate past the last good snapshot. */
 export function integrityCheck(db: DatabaseSync): { ok: boolean; problems: string[] } {
   const rows = db.prepare("PRAGMA integrity_check").all() as unknown as {
     integrity_check: string;

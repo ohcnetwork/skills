@@ -1,10 +1,6 @@
-// service/errors.ts — one error shape for the whole API ([[PLAN-loop-service]] §6).
-//
-// `code` is a stable string the frontend may branch on; `message` is for humans and may be reworded
-// freely. Keeping them separate is what lets the wording improve without breaking a client.
-
 import type { Response } from "express";
 
+/** `code` is stable and safe for clients to branch on; `message` is for humans and may be reworded. */
 export interface ApiErrorBody {
   error: { code: string; message: string };
 }
@@ -26,33 +22,38 @@ export const notFound = (code: string, message: string): ApiError =>
 export const conflict = (code: string, message: string): ApiError =>
   new ApiError(409, code, message);
 
+function clientErrorStatus(err: unknown): number | null {
+  const e = err as { status?: unknown; statusCode?: unknown };
+  const status = typeof e?.status === "number" ? e.status : e?.statusCode;
+  return typeof status === "number" && status >= 400 && status < 500 ? status : null;
+}
+
+/** `express.json()` rejects a malformed body with a SyntaxError carrying `body`. */
+function isMalformedJson(err: unknown): boolean {
+  return err instanceof SyntaxError && "body" in (err as object);
+}
+
 export function sendError(res: Response, err: unknown): void {
   if (err instanceof ApiError) {
     res.status(err.status).json({ error: { code: err.code, message: err.message } });
     return;
   }
 
-  // Errors thrown by middleware we did not write, which still carry a meaningful status — chiefly
-  // `express.json()`'s SyntaxError on a malformed body, which arrives with `status: 400`. Mapping it
-  // to 500 told the caller the server was broken when in fact they sent garbage, and §6 promises
-  // "400 malformed". Only 4xx is honoured: a 5xx from a dependency is still ours to own, and its
-  // message may carry internals.
-  const status = (err as { status?: unknown; statusCode?: unknown })?.status
-    ?? (err as { statusCode?: unknown })?.statusCode;
-  if (typeof status === "number" && status >= 400 && status < 500) {
-    const isJson = err instanceof SyntaxError && "body" in (err as object);
+  // Middleware we did not write can still classify the caller's fault correctly. Only 4xx is
+  // honoured — a dependency's 5xx is ours to own, and its message may carry internals.
+  const status = clientErrorStatus(err);
+  if (status !== null) {
+    const malformed = isMalformedJson(err);
     res.status(status).json({
       error: {
-        code: isJson ? "bad_json" : "bad_request",
-        message: isJson ? "request body is not valid JSON" : "bad request",
+        code: malformed ? "bad_json" : "bad_request",
+        message: malformed ? "request body is not valid JSON" : "bad request",
       },
     });
     return;
   }
-  // Anything unmodelled is ours, not the caller's. The message is deliberately NOT echoed: it can
-  // carry a file path or a SQL fragment, and this API is read-only to a whole team.
+
+  // Never echo an unmodelled message: it can carry a file path or a SQL fragment.
   console.error("[service] unhandled:", err);
-  res.status(500).json({
-    error: { code: "internal", message: "internal error" },
-  });
+  res.status(500).json({ error: { code: "internal", message: "internal error" } });
 }

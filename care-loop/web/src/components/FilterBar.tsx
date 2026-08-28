@@ -14,8 +14,8 @@ export function FilterBar({
   facets: Facets | undefined;
   onChange: (next: Partial<RunFilters>) => void;
 }) {
-  // Local state synced from the URL rather than driven by it: typing should not push a history
-  // entry per keystroke. Commits after a pause.
+  // Synced from the URL rather than driven by it, so typing does not push a history entry per
+  // keystroke. Commits after a pause.
   const [q, setQ] = useState(search.q ?? "");
   useEffect(() => setQ(search.q ?? ""), [search.q]);
   useEffect(() => {

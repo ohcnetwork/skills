@@ -34,10 +34,9 @@ export const STEP_VOCAB = [
 ] as const;
 export type Step = (typeof STEP_VOCAB)[number];
 
-/** Steps a run cannot advance from. The `satisfies` is the point: rename or remove a step in
- *  STEP_VOCAB above and this stops compiling, rather than silently becoming a set of strings that no
- *  longer match anything. Single-sourced here because "is this run finished?" is asked by the fleet
- *  query, the API, and the frontend, and three copies of the answer is how they drift apart. */
+/** `satisfies` is the point: renaming a step in STEP_VOCAB stops this compiling rather than silently
+ *  leaving a set of strings that match nothing. Single-sourced because the fleet query, the API, and
+ *  the frontend all ask "is this run finished?". */
 export const TERMINAL_STEPS = [
   "7",
   "merged",
@@ -51,9 +50,7 @@ export function isTerminalStep(step: string): boolean {
 export const TIERS = ["trivial", "standard", "complex"] as const;
 export type Tier = (typeof TIERS)[number];
 
-// Key order is significant — state.json is always written in exactly this order. Widened for the
-// SQLite run-store projection (PLAN-sqlite-run-store.md §6) — additive only, so any reader of the
-// pre-existing 11 keys is unaffected.
+// Key order is significant — state.json is always written in exactly this order.
 export const KEY_ORDER = [
   "task",
   "repo",
@@ -122,9 +119,8 @@ export function validateState(s: Partial<CareState>): CareState {
 
   const branch = s.branch ?? "unknown";
   const startedAt = s.started_at ?? s.updated_at ?? new Date().toISOString();
-  // Self-healing backfill (PLAN-sqlite-run-store.md §5/§8, ONE mechanism for both): a journal that
-  // predates run_id folds no `run_id` patch, so this deterministically derives the SAME id every
-  // time it is projected — live resume and `reindex` both land on it with no special-casing.
+  // A journal predating run_id folds no `run_id` patch, so this derives the same id every time it
+  // is projected — live resume and `reindex` land on it identically, with no special-casing.
   const runId = s.run_id ?? backfillRunId(startedAt, `${s.repo}-${branch}`);
 
   const full: CareState = {
@@ -185,12 +181,9 @@ export function projectState(events: JournalEvent[]): CareState {
     }
     acc.updated_at = ev.ts;
   }
-  // started_at is the journal's own first timestamp, re-asserted AFTER the fold rather than merely
-  // seeded before it. `run.start` carries a full CareState in `data.state`, built a moment before
-  // `append()` stamps the event's `ts` — so the fold's first patch used to overwrite this with a
-  // slightly EARLIER value (1ms in the live salvage run of 2026-08-19; unbounded in principle, since
-  // it is however long passes between constructing the state and appending the event). Asserting it
-  // here makes the invariant true rather than dependent on no event ever carrying the field.
+  // Re-asserted AFTER the fold, not merely seeded before it: `run.start` carries a CareState built a
+  // moment before `append()` stamps the event's `ts`, so the fold's first patch would otherwise
+  // overwrite this with an earlier value. Asserting it here makes the invariant hold unconditionally.
   acc.started_at = events[0].ts;
   return validateState(acc);
 }
@@ -206,12 +199,9 @@ export function writeStateFile(runDir: string, state: CareState): string {
   return path;
 }
 
-/** Project the journal head and write state.json in one call (the orchestrator's usual entry). Also
- *  mirrors the FULL rollup recompute into the active run store (PLAN-sqlite-run-store.md §4) — the
- *  reconciling write that corrects any drift the incremental `Journal.append` path left between step
- *  transitions. FATAL on failure (§2, revised): the DB is the source of truth for cross-run/fleet
- *  queries, so a failed reconcile must halt the run rather than let the DB silently drift. The
- *  state.json write above already succeeded and stands regardless. */
+/** Projects the journal head, writes state.json, and mirrors the full rollup recompute into the run
+ *  store — the reconciling write correcting any drift `Journal.append`'s incremental path left. Fatal
+ *  on failure: a failed reconcile must halt the run rather than let the db silently diverge. */
 export function projectAndWrite(
   runDir: string,
   events: JournalEvent[],

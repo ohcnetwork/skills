@@ -44,12 +44,10 @@ export interface LockStatus {
 }
 
 /**
- * Inspect a run's lock WITHOUT acquiring or stealing it.
- *
- * `acquireLock` already computes liveness, but only reachable by taking the lock — which is exactly
- * what a caller asking "is anything driving this run?" must not do. Needed because a `running` row in
- * the service's queue is a claim on a process, and after a crash that process is gone: the row is a
- * lie until something reconciles it. The lock is the ground truth ([[PLAN-loop-service]] §12).
+ * Answers "is anything driving this run?" without acquiring or stealing the lock — `acquireLock`
+ * computes the same liveness, but only by taking the lock, which is precisely what such a caller
+ * must not do. The queue's `running` rows are claims on processes that a crash may have ended, and
+ * the lock is the ground truth that reconciles them.
  */
 export function inspectLock(
   runDir: string,

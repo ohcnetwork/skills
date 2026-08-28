@@ -1,10 +1,6 @@
-// components/ui/primitives.tsx — the handful of Care UI primitives this app needs.
-//
-// Care UI publishes these as a shadcn registry, but its endpoints currently return the docs SPA's
-// HTML rather than registry JSON, so `shadcn add https://careui.ohc.network/r/button.json` fails on
-// `Unexpected token '<'`. These are written against the same token names Care UI's components
-// consume (`bg-primary`, `text-muted-foreground`, `rounded-md` off `--radius`, …), so when the
-// registry is fixed the real components can replace this file and nothing else changes.
+// Care UI publishes these as a shadcn registry, but its endpoints currently serve the docs SPA's
+// HTML instead of registry JSON, so `shadcn add` fails on `Unexpected token '<'`. Written against the
+// same token names Care UI's components consume, so the real ones can replace this file unchanged.
 
 import type { ButtonHTMLAttributes, InputHTMLAttributes, SelectHTMLAttributes } from "react";
 
@@ -51,9 +47,8 @@ export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElem
 }
 
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
-  // A native select rather than a listbox widget: it is keyboard- and screen-reader-correct for
-  // free, and uses the platform picker on mobile. Care UI's Select earns its complexity when an
-  // option needs rich content; these are plain strings with counts.
+  // Native rather than a listbox widget: keyboard- and screen-reader-correct for free, and the
+  // platform picker on mobile. These options are plain strings with counts.
   return (
     <select
       className={cn(

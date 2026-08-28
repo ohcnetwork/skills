@@ -1,18 +1,8 @@
-// service/identity.ts — resolve the caller, in ONE place ([[PLAN-loop-service]] §6).
+// Resolves the caller from a session cookie, falling back to the `X-Care-User` header for curl,
+// scripts, and the CLI. Both are claims, not authentication — the trust boundary is the network.
 //
-// Two ways in, both claims rather than authentication:
-//
-//   1. a session cookie, established by POST /api/auth/login (auth.ts);
-//   2. the `X-Care-User` header, for curl, scripts, and the CLI, which have no cookie jar.
-//
-// The session wins when both are present. The header is a deliberate affordance for a service whose
-// boundary is the network, and it is EXACTLY the thing to delete when real auth lands — a trusted
-// header alongside a verified session is a bypass, not a convenience. It is confined to this function
-// so that removal is a one-line change rather than a hunt.
-//
-// **No route may make an authorization decision.** `?requested_by=` is a filter, not a permission.
-// Keeping authorization entirely absent means adding it later is additive, rather than a hunt through
-// routes that quietly assumed a trusted header.
+// The header is confined to this function so that deleting it is a one-line change: alongside real
+// auth it would be a bypass rather than a convenience.
 
 import type { NextFunction, Request, Response } from "express";
 import { ApiError } from "./errors.js";
@@ -24,11 +14,11 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      /** The caller's claimed login, or null when neither a session nor a header identifies them. */
+      /** The caller's claimed login, or null when nothing identifies them. */
       user: string | null;
-      /** The full user row, present only for a real session — the header path has no roster entry. */
+      /** The roster row, present only for a session — the header path has none. */
       account: User | null;
-      /** The raw session token, so /auth/logout can revoke exactly the one it arrived on. */
+      /** So /auth/logout revokes exactly the token it arrived on. */
       sessionToken: string | null;
     }
   }
@@ -49,27 +39,22 @@ export function identity(sessions: SessionStore) {
         req.account = account;
         return next();
       }
-      // A cookie that no longer resolves (revoked, expired, or from a rebuilt db) falls through to
-      // the header rather than 401ing here: this middleware identifies, it does not gate.
+      // Identify, don't gate: a revoked or expired cookie falls through to the header.
     }
 
-    const raw = req.header(USER_HEADER);
-    const trimmed = typeof raw === "string" ? raw.trim() : "";
-    if (trimmed !== "") {
-      // The SAME rule `/auth/login` enforces. They write the same column, so two standards meant a
-      // login rejected at the form could walk in through the header and become a permanent
-      // `requested_by` value, a facet entry, and a filter option. React escapes it in the DOM, but it
-      // is still junk in the data and a needless injection surface for any future non-React consumer.
-      if (!isValidLogin(trimmed))
-        throw new ApiError(400, "bad_user", `X-Care-User '${trimmed}' is not a valid login`);
-      req.user = trimmed;
+    const claimedLogin = req.header(USER_HEADER)?.trim() ?? "";
+    if (claimedLogin !== "") {
+      // Held to the rule /auth/login enforces — they write the same column, and two standards would
+      // let a login rejected at the form walk in here and become a permanent `requested_by` value.
+      if (!isValidLogin(claimedLogin))
+        throw new ApiError(400, "bad_user", `X-Care-User '${claimedLogin}' is not a valid login`);
+      req.user = claimedLogin;
     }
     next();
   };
 }
 
-/** Routes that need SOMEONE, without caring who. Not authorization — it never asks what the caller is
- *  allowed to do, only that they said who they are. */
+/** Requires that the caller said who they are. Never asks what they are allowed to do. */
 export function requireUser(req: Request): string {
   if (!req.user) throw new ApiError(401, "not_authenticated", "not signed in");
   return req.user;

@@ -5,8 +5,8 @@ import { Badge, Button } from "./ui/primitives";
 export function AppHeader({ subtitle }: { subtitle?: string }) {
   const me = useMe();
   const logout = useLogout();
-  // Everywhere, not just on the fleet page: a gate nobody notices is a gate that expires, and expiry
-  // is the one outcome that throws away planning work that was already finished and paid for.
+  // Everywhere, not just the fleet page: a gate nobody notices expires, throwing away planning work
+  // already paid for.
   const gates = useGates();
   const waiting = gates.data?.total ?? 0;
 

@@ -1,12 +1,9 @@
-// reindex.ts — `care-loopd reindex`: rebuild loops.db from the run directories
-// (PLAN-sqlite-run-store.md §8). This is both the one-time migration for runs that predate the
-// SQLite projection AND the standing proof of §2's invariant: `rm loops.db && care-loopd reindex`
-// must be a complete, lossless recovery at any moment — exercised directly in
-// test/reindex.test.ts, not merely asserted here.
+// Rebuilds the run tables from the run directories: the migration for runs predating the SQLite
+// projection, and the recovery path for a lost or corrupted db.
 //
-// Per-run write order mirrors the live path exactly (seedRun → appendEvent per event, replaying the
-// SAME incremental deltas `Journal.append` would have computed → upsertRun with the authoritative
-// full recompute), so a reindexed DB and a lived-through DB are indistinguishable.
+// Per-run write order mirrors the live path exactly — seedRun, then appendEvent per event replaying
+// the same increments `Journal.append` would have computed, then upsertRun's full recompute — so a
+// reindexed db and a lived-through one are indistinguishable.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -26,15 +23,8 @@ export interface ReindexResult {
 export class ReindexUnsafeError extends Error {}
 
 /**
- * Runs that would be destroyed by a rebuild.
- *
- * `clearAll()` is `DELETE FROM runs`, cascading to `run_events`. A child that is mid-run then appends
- * an event whose FK parent no longer exists — a violation, and fatal by design (§2's "both writes are
- * fatal"), so the run dies hours in with an error about foreign keys.
- *
- * This was harmless when runs were driven one at a time by the person typing the command. With an
- * always-on service and N children it is a foot-gun, and `usage()` described reindex as "safe at any
- * time" — which was true of the design it was written for and stopped being true at the cutover.
+ * Runs a rebuild would destroy. `clearAll()` cascades to `run_events`, so a mid-run child's next
+ * append hits a dangling foreign key and the run dies hours in.
  */
 function liveRuns(store: SqliteRunStore, runsDir: string): string[] {
   const live: string[] = [];
@@ -46,10 +36,9 @@ function liveRuns(store: SqliteRunStore, runsDir: string): string[] {
     .all() as unknown as { run_id: string }[];
   live.push(...claimed.map((r) => r.run_id));
 
-  // And the ground truth, which covers CLI-started runs the queue knows nothing about. Deliberately
-  // NOT `runs.step NOT IN (terminal)`: a run abandoned a month ago sits at a non-terminal step
-  // forever, and refusing to rebuild because of it would make the guard useless noise. A held lock
-  // with a LIVE holder is the only thing that means "something is driving this right now".
+  // Ground truth, covering CLI runs the queue knows nothing about. Deliberately not
+  // `step NOT IN (terminal)`: a run abandoned a month ago sits at a non-terminal step forever, and
+  // refusing to rebuild over it would make this guard noise. Only a live lock holder is driving.
   for (const slug of discoverRunDirs(runsDir)) {
     const status = inspectLock(join(runsDir, slug));
     if (status.held && status.alive) live.push(slug);
@@ -72,8 +61,8 @@ function discoverRunDirs(runsDir: string): string[] {
     .sort();
 }
 
-/** Same increment rule `Journal.append` uses: 0 for the first event and across a run.resume
- *  boundary, else the gap to the previous event's ts; cost only on a skill.result event. */
+/** The rule `Journal.append` uses: zero for the first event and across a run.resume, else the gap
+ *  to the previous ts; cost only on a skill.result. */
 function incrementOf(prevTs: string | null, ev: JournalEvent): { deltaMs: number; costUsd: number } {
   const deltaMs =
     prevTs !== null && ev.event !== "run.resume"
@@ -84,15 +73,10 @@ function incrementOf(prevTs: string | null, ev: JournalEvent): { deltaMs: number
   return { deltaMs, costUsd };
 }
 
-/** Restore a run's skill artifact BODIES from the sidecars on disk ([[PLAN-loop-service]] §6).
- *
- *  Globbing `skills/` rather than walking the journal's artifact refs is deliberate: the directory is
- *  the ground truth for what was actually written, so a sidecar whose `skill.result` event never made
- *  it to disk (a crash between the two writes) is still recovered. `name`/`sha256` are recomputed with
- *  the same recipe `SkillLogger.artifact` uses, so a reindexed row is byte-identical to a lived one.
- *
- *  This is what keeps artifacts REBUILDABLE — the property that separates them from `queue` and
- *  `gate_asks`, which no reindex can restore. `rm loops.db && care-loopd reindex` stays lossless. */
+/** Globs `skills/` rather than walking the journal's artifact refs, because the directory is the
+ *  ground truth for what was written: a sidecar whose `skill.result` event never landed (a crash
+ *  between the two writes) is still recovered. `name` and `sha256` are recomputed with the recipe
+ *  `SkillLogger.artifact` uses, so a reindexed row matches a lived one. */
 function reindexArtifacts(store: SqliteRunStore, runDir: string, runId: string): number {
   const skillsDir = join(runDir, "skills");
   if (!existsSync(skillsDir)) return 0;
@@ -110,19 +94,16 @@ function reindexArtifacts(store: SqliteRunStore, runDir: string, runId: string):
       });
       n++;
     } catch {
-      // One unreadable or non-JSON sidecar must not cost the whole run its index entry — the journal,
-      // which the run's state is projected from, has already been replayed successfully by here.
-      // `putArtifact` encodes with jsonb(), which throws on malformed JSON: files written before
-      // `SkillLogger.artifact` took a value (and so could hold anything) land here rather than
-      // aborting the rebuild.
+      // One unreadable sidecar must not cost the run its index entry — the journal it projects from
+      // has already replayed by here. `putArtifact`'s jsonb() throws on malformed JSON, which files
+      // written before `SkillLogger.artifact` took a value can be.
     }
   }
   return n;
 }
 
-/** Rebuild `runs` / `run_detail` / `run_events` / `run_artifacts` from every run dir under `runsDir`.
- *  Clears existing rows first, so the result reflects ONLY what the journals say. Best-effort per
- *  run: a corrupt/unreadable/empty journal is skipped and reported, never fatal to the rebuild. */
+/** Clears existing rows first, so the result reflects only what the journals say. Best-effort per
+ *  run: a corrupt or empty journal is skipped and reported, never fatal to the rebuild. */
 export function reindexRuns(
   store: SqliteRunStore,
   runsDir: string,
@@ -148,8 +129,7 @@ export function reindexRuns(
     const journalPath = join(runsDir, slug, "journal.jsonl");
     if (!existsSync(journalPath)) continue;
     try {
-      // readReplica() (not read()): read() is DB-backed now (§10 item 3) and would query the very
-      // database this loop exists to rebuild — the replica file is the only remaining source here.
+      // readReplica(), not read(): read() would query the very database this exists to rebuild.
       const { events } = new Journal(journalPath, slug).readReplica();
       if (events.length === 0) continue;
       const state = projectState(events);
@@ -160,8 +140,8 @@ export function reindexRuns(
         store.appendEvent(state.run_id, ev, incrementOf(prevTs, ev));
         prevTs = ev.ts;
       }
-      // Authoritative overwrite: replaces whatever the incremental walk above landed on with the
-      // exact batch recompute, so float/ordering drift can never separate a reindex from a live run.
+      // Overwrites the incremental walk with the exact batch recompute, so float and ordering drift
+      // cannot separate a reindex from a live run.
       store.upsertRun(slug, state, rollupsFromEvents(events));
       artifacts += reindexArtifacts(store, join(runsDir, slug), state.run_id);
       indexed++;

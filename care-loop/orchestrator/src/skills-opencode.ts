@@ -28,6 +28,8 @@ import {
 } from "./skill-source.js";
 import type {
   Implementer,
+  PlannerInput,
+  TestGradeInput,
   Planner,
   Reviewer,
   Triager,
@@ -36,7 +38,9 @@ import type {
   CiFixer,
 } from "./ports.js";
 import type {
+  PlannerPayload,
   SkillResult,
+  TestGradePayload,
   TriageItem,
   CiFixPayload,
   CiFailure,
@@ -209,8 +213,7 @@ export function opencodeReviewer(models: SkillModels = {}): Reviewer {
   // 240s default (bounded exploration keeps it fast, but the richer criteria think longer). Override
   // via OC_REVIEWER_TIMEOUT_MS.
   const timeoutMs = Number(process.env.OC_REVIEWER_TIMEOUT_MS) || 360_000;
-  return async ({ diff, round }) => {
-    const startedAt = new Date().toISOString();
+  return defineSkill("care-reviewer", async ({ diff, round }) => {
     const { jobResult, modelReported, modelPinSatisfied, cost } =
       await runJudgmentSpawn({
         role: "care-reviewer",
@@ -227,11 +230,7 @@ export function opencodeReviewer(models: SkillModels = {}): Reviewer {
         // burned the full wall-clock (ENG-613 @240s, ENG-747 @360s) — it emits directly.
         tools: NO_EXPLORE_TOOLS,
       });
-    assertRightTier("care-reviewer", model, modelReported, modelPinSatisfied);
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "care-reviewer",
-      round,
       terminalState: jobResult.terminal_state,
       verdict: jobResult.verdict,
       reasonCode: jobResult.reason_code,
@@ -245,10 +244,9 @@ export function opencodeReviewer(models: SkillModels = {}): Reviewer {
       },
       cost,
       modelUsed: jobResult.model_used ?? modelReported,
-      startedAt,
-      endedAt: new Date().toISOString(),
+      pin: { model, reported: modelReported, satisfied: modelPinSatisfied },
     };
-  };
+  });
 }
 
 /** Default implementer: `opencode run` scoped to the worktree (tools on), model-pinned to the cheap tier.
@@ -319,8 +317,7 @@ function planContext(runDir: string): string {
 export function opencodeImplementer(models: SkillModels = {}): Implementer {
   const provider = models.provider ?? defaults.provider;
   const model = models.implementer ?? defaults.implementer;
-  return async ({ task, worktree, runDir, round, findings }) => {
-    const startedAt = new Date().toISOString();
+  return defineSkill("implementer", async ({ task, worktree, runDir, round, findings }) => {
     const before = git(worktree, "rev-parse", "HEAD").out.trim();
     const body = findings
       ? `${task}\n\nAddress these review/gate findings; change only what's needed:\n${findings}`
@@ -363,18 +360,13 @@ export function opencodeImplementer(models: SkillModels = {}): Implementer {
           .filter(Boolean)
       : [];
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "implementer",
-      round,
       terminalState: done ? "done" : "failed",
       verdict: done ? "implemented" : "failed",
       reasonCode: reason,
       payload: { filesChanged, staged: false, timedOut: r.exit === 124 },
       modelUsed: model,
-      startedAt,
-      endedAt: new Date().toISOString(),
     };
-  };
+  });
 }
 
 // Triager returns typed verdict tallies — its own structured shape (not the reviewer JobResult).
@@ -520,8 +512,7 @@ export function opencodeTriager(
   // The injected triage methodology + multi-item feedback push past the 240s default.
   // Same fix as the reviewer: give extra headroom, override via env for CI/slow models.
   const timeoutMs = Number(process.env.OC_TRIAGER_TIMEOUT_MS) || 360_000;
-  return async ({ round, feedbackPath, runDir }) => {
-    const startedAt = new Date().toISOString();
+  return defineSkill("care-triager", async ({ round, feedbackPath, runDir }) => {
     const feedback = readFileSync(feedbackPath, "utf8");
     const methodology = triagerMethodology();
     const { clusters, summary } = parseFeedbackClusters(feedback);
@@ -725,7 +716,6 @@ export function opencodeTriager(
       await runSingleSpawn();
     }
 
-    assertRightTier("care-triager", model, modelReported, modelPinSatisfied);
     // Tallies are DERIVED from the per-item verdicts (the FSM branches on these counts, ci-round.ts);
     // the items themselves are the dim-8 escape-attribution record persisted to verdicts.md.
     const items = rawItems.map((it: any) => ({
@@ -742,19 +732,15 @@ export function opencodeTriager(
     const addressCount = items.filter((i) => i.verdict === "address").length;
     const declineCount = items.filter((i) => i.verdict === "decline").length;
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "care-triager",
-      round,
       terminalState: "done",
       verdict: addressCount > 0 ? "address" : "clean",
       reasonCode: "triaged",
       payload: { addressCount, declineCount, items },
       cost,
       modelUsed: model,
-      startedAt,
-      endedAt: new Date().toISOString(),
+      pin: { model, reported: modelReported, satisfied: modelPinSatisfied },
     };
-  };
+  });
 }
 
 // ── Test-grader (Step 4b) ─────────────────────────────────────────────────────────────────────────
@@ -871,8 +857,7 @@ export function opencodeTestGrader(
   const provider = models.provider ?? defaults.provider;
   const model = models.testGrader ?? defaults.testGrader;
   const timeoutMs = Number(process.env.OC_TEST_GRADER_TIMEOUT_MS) || 360_000;
-  return async ({ diff, runDir, round }) => {
-    const startedAt = new Date().toISOString();
+  return defineSkill<TestGradeInput, TestGradePayload>("care-test-grader", async ({ diff, runDir, round }) => {
     const methodology = testGraderMethodology();
 
     // Pre-read criteria.md from the run dir (written by Step 1 planner).
@@ -908,9 +893,6 @@ export function opencodeTestGrader(
       const owed = testSurfaceOwed(runDir);
       const specsOwedGrades = owed ? unmetCriteriaGrades(runDir) : [];
       return {
-        schema: "care-loop/skill-result@1",
-        skill: "care-test-grader",
-        round,
         terminalState: "done",
         // advisory (never blocks — bias-toward-shipping / no perverse full-coverage gate), but the
         // `specs_owed` reason + Missing grades make the gap visible in the round + PR instead of a
@@ -919,8 +901,6 @@ export function opencodeTestGrader(
         reasonCode: owed ? "specs_owed" : "no_specs",
         payload: { hasSpecs: false, specsOwed: owed, criteriaGrades: specsOwedGrades },
         modelUsed: model,
-        startedAt,
-        endedAt: new Date().toISOString(),
       };
     }
 
@@ -962,16 +942,7 @@ export function opencodeTestGrader(
     const grades: any[] = Array.isArray(out.data?.criteria_grades)
       ? out.data.criteria_grades
       : [];
-    assertRightTier(
-      "care-test-grader",
-      model,
-      out.modelReported,
-      out.modelPinSatisfied,
-    );
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "care-test-grader",
-      round,
       terminalState: "done",
       verdict: (out.data?.verdict as string) ?? "advisory",
       reasonCode: "graded",
@@ -987,10 +958,9 @@ export function opencodeTestGrader(
       },
       cost: out.cost,
       modelUsed: out.modelReported ?? model,
-      startedAt,
-      endedAt: new Date().toISOString(),
+      pin: { model, reported: out.modelReported, satisfied: out.modelPinSatisfied },
     };
-  };
+  });
 }
 
 // ── UX-validator (Step 4c) ─────────────────────────────────────────────────────────────────────────
@@ -1035,8 +1005,7 @@ export function opencodeUxValidator(models: SkillModels = {}): UxValidator {
   const provider = models.provider ?? defaults.provider;
   const model = models.uxValidator ?? defaults.uxValidator;
   const timeoutMs = Number(process.env.OC_UX_VALIDATOR_TIMEOUT_MS) || 360_000;
-  return async ({ diff, round }) => {
-    const startedAt = new Date().toISOString();
+  return defineSkill("care-ux-validator", async ({ diff, round }) => {
     const methodology = uxValidatorMethodology();
     const system =
       "You are the care-loop UX-validator (Step 4c, judgment tier). The diff is supplied inline and is " +
@@ -1065,16 +1034,7 @@ export function opencodeUxValidator(models: SkillModels = {}): UxValidator {
     const findings: any[] = Array.isArray(out.data?.findings)
       ? out.data.findings
       : [];
-    assertRightTier(
-      "care-ux-validator",
-      model,
-      out.modelReported,
-      out.modelPinSatisfied,
-    );
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "care-ux-validator",
-      round,
       terminalState: "done",
       verdict: (out.data?.verdict as string) ?? "findings",
       reasonCode: (out.data?.reason_code as string) ?? "ux_reviewed",
@@ -1088,10 +1048,9 @@ export function opencodeUxValidator(models: SkillModels = {}): UxValidator {
       },
       cost: out.cost,
       modelUsed: out.modelReported ?? model,
-      startedAt,
-      endedAt: new Date().toISOString(),
+      pin: { model, reported: out.modelReported, satisfied: out.modelPinSatisfied },
     };
-  };
+  });
 }
 
 // ── CI-fixer (Step 6b ci-fix track) ─────────────────────────────────────────────────────────────
@@ -1154,14 +1113,13 @@ export function opencodeCiFixer(
 ): CiFixer {
   const provider = models.provider ?? defaults.provider;
   const model = models.ciFixer ?? models.implementer ?? defaults.implementer;
-  return async ({
+  return defineSkill("care-ci-fix", async ({
     ciFailures,
     runDir,
     round,
     findings: gateFindingsOverride,
     failingSpecs,
   }) => {
-    const startedAt = new Date().toISOString();
     const methodology = ciFixerMethodology();
     const before = worktree
       ? git(worktree, "rev-parse", "HEAD").out.trim()
@@ -1285,9 +1243,6 @@ export function opencodeCiFixer(
       r.exit === 0 && changed ? "fixed" : r.exit === 0 ? "noop" : "handoff";
 
     return {
-      schema: "care-loop/skill-result@1",
-      skill: "care-ci-fix",
-      round,
       terminalState: outcome === "handoff" ? "failed" : "done",
       verdict: outcome,
       reasonCode:
@@ -1300,10 +1255,8 @@ export function opencodeCiFixer(
             : `ci_fix_exit_${r.exit}`,
       payload: { outcome, filesChanged, timedOut: r.exit === 124 },
       modelUsed: model,
-      startedAt,
-      endedAt: new Date().toISOString(),
     };
-  };
+  });
 }
 
 // ── Planner (Step 1) ─────────────────────────────────────────────────────────────────────────────
@@ -1445,7 +1398,7 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
   // Planning is heavier than a reviewer/triager spawn (recon over the repo), so it gets a more
   // generous cap than the default 240s judgment timeout. Override via OC_PLANNER_TIMEOUT_MS.
   const timeoutMs = Number(process.env.OC_PLANNER_TIMEOUT_MS) || 480_000;
-  return async ({
+  return defineSkill<PlannerInput, PlannerPayload>("care-planner", async ({
     task,
     ticket,
     mainRepoPath,
@@ -1456,26 +1409,22 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
     attachments,
     round,
   }) => {
-    const startedAt = new Date().toISOString();
-    const envelope = (
-      payload: import("./skill-result.js").PlannerPayload,
+    // `plannedBy` is the model that actually drafted, not the one it was pinned to — the approval
+    // gate rejects a not-Opus plan by reading it, so it must report what ran.
+    const outcome = (
+      payload: PlannerPayload,
       verdict: string,
       reasonCode: string,
       usedModel: string,
       plannedBy?: string,
-      cost?: import("./opencode-runner.js").SpawnCost,
-    ) => ({
-      schema: "care-loop/skill-result@1" as const,
-      skill: "care-planner",
-      round,
-      terminalState: "done" as const,
+      cost?: SpawnCost,
+    ): SkillOutcome<PlannerPayload> => ({
+      terminalState: "done",
       verdict,
       reasonCode,
       payload,
       cost,
       modelUsed: plannedBy ?? usedModel,
-      startedAt,
-      endedAt: new Date().toISOString(),
     });
 
     if (phase === "interview") {
@@ -1499,7 +1448,7 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
         PLANNER_INTERVIEW_SCHEMA,
       );
       const questions = Array.isArray(data.questions) ? data.questions : [];
-      return envelope(
+      return outcome(
         { phase: "interview", questions },
         "questions",
         "interview",
@@ -1546,7 +1495,7 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
       );
     const plannedBy =
       (typeof data.plannedBy === "string" && data.plannedBy) || modelReported;
-    return envelope(
+    return outcome(
       {
         phase: "plan",
         scope: data.scope,
@@ -1566,7 +1515,7 @@ export function opencodePlanner(models: SkillModels = {}): Planner {
       plannedBy,
       cost,
     );
-  };
+  });
 }
 
 // ── Intent reconstruction (care-intent, maker tier) — PLAN-pr-salvage §3.1 ─────────────────────────

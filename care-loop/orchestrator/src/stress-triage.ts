@@ -6,11 +6,27 @@
 
 import { opencodeTriager } from "./skills-opencode.js";
 
+/** These need a real worktree and a real feedback.md to run against. Defaulting to whichever run dir
+ *  happened to be open when this was written left both pointing at a branch that has since been
+ *  deleted, so the harness failed on a path rather than saying what it wanted. */
+function required(name: string): string {
+  const v = process.env[name]?.trim();
+  if (!v) {
+    console.error(
+      `${name} is required.\n` +
+        `  FEEDBACK_PATH  a feedback.md from a real run (care-loop/runs/<slug>/feedback.md)\n` +
+        `  WORKTREE       the matching repo worktree\n` +
+        `  BASE           base branch for the diff (default: develop)`,
+    );
+    process.exit(2);
+  }
+  return v;
+}
+
 const N = Number(process.env.N ?? 5);
 const FEEDBACK_PATH =
-  process.env.FEEDBACK_PATH ||
-  "/Users/jacob/Desktop/skills/care-loop/runs/care_fe-eng-642-questionnaire-value-cleanup/feedback.md";
-const WORKTREE = process.env.WORKTREE || "/Users/jacob/Desktop/care_fe-eng-642-questionnaire-value-cleanup";
+required("FEEDBACK_PATH");
+const WORKTREE = required("WORKTREE");
 const BASE = process.env.BASE || "develop";
 
 async function runOnce(i: number): Promise<{ ok: boolean; wall: number; verdict: string; a: number; d: number }> {

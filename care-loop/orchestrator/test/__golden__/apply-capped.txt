@@ -1,0 +1,22 @@
+outcome=capped rounds=1
+---
+run.start step=5-await round=1
+step.enter step=5-await round=1
+ci.wait
+ci.done
+step.exit step=5-await round=1 reason=ci_green
+decision signal=advance 5-await->6a
+step.enter step=6a round=1
+helper.exec step=6a cmd=collect-feedback
+spawn.result step=6a reason=triaged role=care-triager verdict=address=1 decline=0
+step.exit step=6a round=1 reason=address_verdicts
+decision signal=advance 6a->6b
+step.enter step=6b round=1
+spawn.result step=6b reason=applied role=implementer verdict=failed
+step.exit step=6b round=1 reason=apply_retry_1
+decision signal=retry 6b->6b
+step.enter step=6b round=1
+spawn.result step=6b reason=applied role=implementer verdict=failed
+step.exit step=6b round=1 reason=apply_exhausted
+decision signal=retry 6b->aborted
+run.end reason=apply_exhausted outcome=capped

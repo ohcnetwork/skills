@@ -36,6 +36,7 @@ import type {
   CiFixer,
 } from "./ports.js";
 import type {
+  SkillResult,
   TriageItem,
   CiFixPayload,
   CiFailure,
@@ -149,6 +150,55 @@ function buildReviewerSystem(diff: string): string {
     "model_used. Respond ONLY as the required JobResult.";
   if (!methodology) return base;
   return `${base}\n\n=== REVIEW METHODOLOGY (apply its CRITERIA to the inline diff; ignore its file-reading/exploration steps) ===\n${methodology}\n=== END METHODOLOGY ===`;
+}
+
+// ── The skill envelope ────────────────────────────────────────────────────────────────────────────
+
+/** What a role body actually decides. Everything else on `SkillResult` is mechanical and is stamped
+ *  by `defineSkill` — which is why eight adapters were each spelling out the same eleven fields. */
+export interface SkillOutcome<P = unknown> {
+  terminalState: SkillResult["terminalState"];
+  verdict: string;
+  reasonCode: string;
+  payload: P;
+  modelUsed?: string;
+  cost?: SpawnCost;
+  /** Present for judgment-tier roles, where running on the wrong engine must halt the run. Checked
+   *  after the body returns and before the envelope is built — the same point each adapter used to
+   *  call `assertRightTier` by hand. */
+  pin?: { model: string; reported?: string; satisfied?: boolean };
+}
+
+/**
+ * Wrap a role body in the shared `SkillResult` envelope.
+ *
+ * `startedAt` is stamped before the body runs and `endedAt` after it, so the recorded duration covers
+ * the whole call rather than whatever each adapter remembered to measure. The role id is given once
+ * and reused for both the `skill` field and the tier assertion, which cannot then disagree.
+ */
+export function defineSkill<I extends { round: number }, P>(
+  skill: string,
+  run: (input: I) => Promise<SkillOutcome<P>>,
+): (input: I) => Promise<SkillResult<P>> {
+  return async (input: I): Promise<SkillResult<P>> => {
+    const startedAt = new Date().toISOString();
+    const outcome = await run(input);
+    if (outcome.pin)
+      assertRightTier(skill, outcome.pin.model, outcome.pin.reported, outcome.pin.satisfied);
+    return {
+      schema: "care-loop/skill-result@1",
+      skill,
+      round: input.round,
+      terminalState: outcome.terminalState,
+      verdict: outcome.verdict,
+      reasonCode: outcome.reasonCode,
+      payload: outcome.payload,
+      cost: outcome.cost,
+      modelUsed: outcome.modelUsed,
+      startedAt,
+      endedAt: new Date().toISOString(),
+    };
+  };
 }
 
 /** Default reviewer: opencode structured output (JobResult), model-pinned to the judgment tier. */

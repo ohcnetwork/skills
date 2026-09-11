@@ -69,10 +69,10 @@ export interface SkillModels {
 const defaults = {
   provider: "github-copilot",
   reviewer: "claude-opus-4.8",
-  implementer: "claude-sonnet-4.6",
+  implementer: "claude-sonnet-5",
   triager: "claude-opus-4.8",
   planner: "claude-opus-4.8",
-  plannerRecon: "claude-sonnet-4.6",
+  plannerRecon: "claude-sonnet-5",
   testGrader: "claude-opus-4.8",
   uxValidator: "claude-opus-4.8",
 };

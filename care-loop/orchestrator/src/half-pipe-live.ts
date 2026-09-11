@@ -26,7 +26,7 @@ import { runJudgmentSpawn } from "./opencode-runner.js";
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../.."); // care-loop/
 const RUN_GATE = join(SKILL_DIR, "run_gate.sh");
 const CARE_FE = process.env.CARE_FE ?? join(homedir(), "Desktop/care_fe");
-const IMPL_MODEL = process.env.IMPL_MODEL ?? "claude-sonnet-4.6"; // cheap maker tier
+const IMPL_MODEL = process.env.IMPL_MODEL ?? "claude-sonnet-5"; // cheap maker tier
 const REVIEW_MODEL = process.env.REVIEW_MODEL ?? "claude-opus-4.8"; // judgment tier
 const PROVIDER = "github-copilot";
 const STAMP = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);

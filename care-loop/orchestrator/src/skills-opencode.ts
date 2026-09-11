@@ -47,8 +47,8 @@ import type {
 } from "./skill-result.js";
 import type { Tier } from "./state.js";
 
-// Test seam (same idiom as opencode-runner's `setOpencodeLauncher`): the two `opencode run` roles go
-// through `cli`, so a test can record their argv, env, and timeout without spawning opencode.
+// Test seam, in the `setActiveRunStore` idiom: the two `opencode run` roles go through `cli`, so a test
+// can fake the maker run without spawning opencode.
 let cli: typeof runHelper = runHelper;
 export function setCliRunner(fn?: typeof runHelper): void {
   cli = fn ?? runHelper;

@@ -7,7 +7,7 @@
 // Deliberately thin: no FSM, no journal, no retry ladder yet (those are later phases). It only
 // stands up the transport + the schema boundary + the model-pin cross-check (IMP-1, belt+suspenders).
 
-import { createOpencode as sdkCreateOpencode } from "@opencode-ai/sdk";
+import { createOpencode } from "@opencode-ai/sdk";
 import { createServer } from "node:net";
 import { readFileSync } from "node:fs";
 import {
@@ -15,15 +15,6 @@ import {
   validateJobResult,
   type JobResult,
 } from "./jobresult.js";
-
-// Test seam, in the `setActiveRunStore` idiom: every server this module starts goes through
-// `createOpencode`, so a test can swap in an in-process fake and record exactly what each role sends.
-type CreateOpencode = typeof sdkCreateOpencode;
-let launchOpencode: CreateOpencode = sdkCreateOpencode;
-const createOpencode: CreateOpencode = (...args) => launchOpencode(...args);
-export function setOpencodeLauncher(fn?: CreateOpencode): void {
-  launchOpencode = fn ?? sdkCreateOpencode;
-}
 
 export interface SpawnSpec {
   role: JobResult["role"];
@@ -231,14 +222,6 @@ function startOpencodeOnFreePortAt(
   return createOpencode({ port, config: {} as any });
 }
 
-// Test seam: lets a recording fake note each drive's deadline — per-role timeouts are tuned from
-// incidents, so they are part of what the characterization test pins.
-type DriveObserver = (e: { sessionId: string; timeoutMs: number }) => void;
-let driveObserver: DriveObserver | undefined;
-export function setDriveObserver(fn?: DriveObserver): void {
-  driveObserver = fn;
-}
-
 /** Drive ONE prompt to completion via opencode's async transport (see the transport-model note above):
  *  subscribe to the `/event` bus, fire `promptAsync` (returns immediately), wait for `session.idle`,
  *  then fetch the finished assistant message. Returns that message's `info` (carries `structured`,
@@ -252,7 +235,6 @@ export async function driveToCompletion(
   body: any,
   timeoutMs: number,
 ): Promise<any> {
-  driveObserver?.({ sessionId, timeoutMs });
   const ac = new AbortController();
   let assistantMsgId: string | undefined;
   let settle!: () => void;
@@ -670,8 +652,8 @@ export async function promptAgenticThenStructured(
  * — same warm session — emits the structured `DoctorOutput` manifest that the deterministic scaffold
  * acts on. Mirrors `promptAgenticThenStructured`, but with edit allowed and `task: false` kept (the
  * doctor explores directly; no subagents). The scaffold owns git/gh/tests/evals — this only edits +
- * reports. Its call contract and failure paths are pinned by the characterization test (against a fake
- * server); the model's behaviour is exercised by the Phase-3 `--doctor-dry` live smoke.
+ * reports. Not covered by unit tests (it needs a live opencode server + a real run dir); it is exercised
+ * by the Phase-3 `--doctor-dry` live smoke.
  */
 export async function driveDoctorSpawn(
   spec: {

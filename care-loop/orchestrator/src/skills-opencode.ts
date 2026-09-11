@@ -48,6 +48,13 @@ import type {
 } from "./skill-result.js";
 import type { Tier } from "./state.js";
 
+// Test seam (same idiom as opencode-runner's `setOpencodeLauncher`): the two `opencode run` roles go
+// through `cli`, so a test can record their argv, env, and timeout without spawning opencode.
+let cli: typeof runHelper = runHelper;
+export function setCliRunner(fn?: typeof runHelper): void {
+  cli = fn ?? runHelper;
+}
+
 export interface SkillModels {
   provider?: string; // default "github-copilot"
   reviewer?: string; // judgment tier
@@ -323,7 +330,7 @@ export function opencodeImplementer(models: SkillModels = {}): Implementer {
       ? `${task}\n\nAddress these review/gate findings; change only what's needed:\n${findings}`
       : task;
     const prompt = IMPLEMENTER_PREAMBLE + body + planContext(runDir);
-    const r = runHelper({
+    const r = cli({
       cmd: "opencode",
       args: [
         "run",
@@ -1203,7 +1210,7 @@ export function opencodeCiFixer(
       methodologyBlock +
       playwrightBlock;
 
-    const r = runHelper({
+    const r = cli({
       cmd: "opencode",
       args: [
         "run",

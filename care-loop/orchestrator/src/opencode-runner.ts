@@ -109,6 +109,10 @@ const JUDGMENT_PERMISSION = {
   bash: "deny",
   webfetch: "deny",
   external_directory: "allow",
+  // opencode's default is "ask": three identical tool calls in one step raise a prompt no one can answer,
+  // and the session sits silent until the watchdog kills it (probed 2026-09-11). "deny" fails the whole
+  // session instead. Our deadline and inactivity watchdog already bound a runaway loop.
+  doom_loop: "allow",
 } as const;
 
 // Edit-enabled permission for the END-OF-RUN DOCTOR only (auto-doctor.ts). Unlike judgment roles, the
@@ -123,6 +127,7 @@ const DOCTOR_PERMISSION = {
   bash: "deny",
   webfetch: "deny",
   external_directory: "allow",
+  doom_loop: "allow", // see JUDGMENT_PERMISSION
 } as const;
 
 // Transport model: `session.prompt` (POST /session/{id}/message) is a BLOCKING request — the server

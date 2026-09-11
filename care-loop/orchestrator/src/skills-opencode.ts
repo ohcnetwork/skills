@@ -283,6 +283,9 @@ const IMPLEMENTER_PERMISSION = JSON.stringify({
     "git merge*": "deny",
     "git tag*": "deny",
   },
+  // opencode's default "ask" is auto-rejected by `opencode run`, which then exits 1: the step fails even
+  // with good edits on disk (probed 2026-09-11). The maker's timeout already bounds a runaway loop.
+  doom_loop: "allow",
 });
 const IMPLEMENTER_PREAMBLE =
   "You are the implementer. ONLY edit source files in this worktree to accomplish the task. Do NOT " +

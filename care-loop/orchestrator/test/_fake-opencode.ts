@@ -9,6 +9,10 @@ export interface FakeReply {
   structured?: unknown;
   error?: { name: string; message?: string };
   sessionError?: boolean;
+  /** Emit nothing after the prompt, so the session never goes idle (a transport stall). */
+  hang?: boolean;
+  /** Answer promptAsync with an HTTP failure the way the SDK does with throwOnError off: returned, not thrown. */
+  httpError?: { status: number; body: unknown };
   modelID?: string;
   cost?: number;
   tokens?: { input?: number; output?: number; cache?: { read?: number; write?: number } };
@@ -64,6 +68,9 @@ export function fakeOpencode(script: FakeScript) {
           rec.calls.push({ op: "promptAsync", session: sessionId, body: a.body });
           const reply = script({ sessionId, body: a.body, forkedFrom: forkParent.get(sessionId) });
           replies.set(sessionId, reply);
+          if (reply.httpError)
+            return { error: reply.httpError.body, response: { status: reply.httpError.status } };
+          if (reply.hang) return;
           const messageId = `m${rec.calls.length}-${sessionId}`;
           setImmediate(() => {
             emit({

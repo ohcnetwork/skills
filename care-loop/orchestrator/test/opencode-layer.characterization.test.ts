@@ -17,10 +17,12 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeOpencode, type FakeReply } from "./_fake-opencode.ts";
+import { fakeOpencode, type FakeReply, type FakeScript } from "./_fake-opencode.ts";
 import {
   setOpencodeLauncher,
   setDriveObserver,
+  promptStructured,
+  promptAgenticThenStructured,
   driveDoctorSpawn,
   startEvalServer,
 } from "../src/opencode-runner.ts";
@@ -242,8 +244,12 @@ test("the opencode layer sends exactly what the golden records", async () => {
   const DIFF = git(WT, "diff", "develop...HEAD");
 
   const cases: unknown[] = [];
-  const record = async (name: string, run: () => Promise<unknown>) => {
-    const fake = fakeOpencode(({ body }) => reply(body));
+  const record = async (
+    name: string,
+    run: () => Promise<unknown>,
+    script: FakeScript = ({ body }) => reply(body),
+  ) => {
+    const fake = fakeOpencode(script);
     const cli: unknown[] = [];
     setOpencodeLauncher(fake.launcher as any);
     setDriveObserver(fake.observeDrive);
@@ -260,7 +266,12 @@ test("the opencode layer sends exactly what the golden records", async () => {
       writeFileSync(join(WT, "src/Foo.tsx"), "export const Foo = () => <div>edited</div>;\n");
       return { cmd: o.cmd, args: o.args ?? [], exit: 0, summary: "ok", logPath: o.logPath };
     });
-    const result = stripTimes(await run());
+    let result: unknown;
+    try {
+      result = stripTimes(await run());
+    } catch (e) {
+      result = { threw: (e as Error).message };
+    }
     git(WT, "checkout", "--", ".");
     cases.push({
       name,
@@ -356,7 +367,86 @@ test("the opencode layer sends exactly what the golden records", async () => {
       await s.close();
       return "started+closed";
     });
+
+    // ── Failure paths ─────────────────────────────────────────────────────────────────────────────
+    // What each session shape does when a turn errors, emits nothing, stalls, or the prompt is refused
+    // over HTTP: which error surfaces, and whether the spawn is retried on a fresh server.
+    const SCHEMA = { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } };
+    const oneTurn = { role: "probe", providerID: "p", modelID: "m", system: "SYS", task: "TASK", round: 1, timeoutMs: 60_000 };
+    const twoTurn = {
+      role: "probe",
+      providerID: "p",
+      modelID: "m",
+      reconSystem: "RECON",
+      task: "TASK",
+      emitSystem: "EMIT",
+      emitInstruction: "EMIT-NOW",
+      round: 1,
+      timeoutMs: 60_000,
+    };
+    const doctor = {
+      providerID: "p",
+      modelID: "m",
+      editSystem: "EDIT",
+      editInstruction: "EDIT-NOW",
+      emitSystem: "EMIT",
+      emitInstruction: "EMIT-NOW",
+      timeoutMs: 60_000,
+    };
+    const isEmit = (body: any) => !!body?.format;
+    const emitReturns =
+      (r: FakeReply): FakeScript =>
+      ({ body }) =>
+        isEmit(body) ? r : reply(body);
+    const structuredOutputError = emitReturns({ error: { name: "StructuredOutputError", message: "schema mismatch" } });
+    const noStructuredOutput = emitReturns({ modelID: "m" });
+    const exploreErrors: FakeScript = ({ body }) =>
+      isEmit(body) ? reply(body) : { error: { name: "ProviderAuthError", message: "token expired" } };
+    const stallsOnce = (): FakeScript => {
+      let stalled = false;
+      return ({ body }) => {
+        if (stalled) return reply(body);
+        stalled = true;
+        return { hang: true };
+      };
+    };
+    const httpStatus =
+      (status: number): FakeScript =>
+      () => ({ httpError: { status, body: { name: "ServerError", data: { message: `HTTP ${status}` } } } });
+
+    // A stall is caught by the inactivity watchdog; shorten it so these cases take milliseconds.
+    process.env.OC_INACTIVITY_TIMEOUT_MS = "200";
+    const one = () => promptStructured(oneTurn, SCHEMA);
+    const two = () => promptAgenticThenStructured(twoTurn, SCHEMA);
+    const doc = () => driveDoctorSpawn(doctor, SCHEMA);
+    await record("one-turn: StructuredOutputError", one, structuredOutputError);
+    await record("one-turn: no structured output", one, noStructuredOutput);
+    await record("one-turn: stall, retried on a fresh server", one, stallsOnce());
+    await record("one-turn: promptAsync answers HTTP 400", one, httpStatus(400));
+    await record("one-turn: promptAsync answers HTTP 500", one, httpStatus(500));
+    await record("two-turn: explore turn errors", two, exploreErrors);
+    await record("two-turn: StructuredOutputError", two, structuredOutputError);
+    await record("two-turn: no structured output", two, noStructuredOutput);
+    await record("two-turn: stall, retried on a fresh server", two, stallsOnce());
+    await record("doctor: edit turn errors", doc, exploreErrors);
+    await record("doctor: StructuredOutputError", doc, structuredOutputError);
+    await record("doctor: no structured output", doc, noStructuredOutput);
+    await record("doctor: stall, not retried", doc, stallsOnce());
+    delete process.env.OC_INACTIVITY_TIMEOUT_MS;
+
+    // Triager fan-out degradation: every per-file fork fails, and then the reduce as well.
+    const isFork = (body: any) =>
+      !!body?.format?.schema?.properties?.items?.items?.required?.includes("needs_cross_file");
+    const triage = () =>
+      opencodeTriager(MODELS, WT, "develop")({ pr: 1, round: 1, runDir: RUN, feedbackPath: join(RUN, "feedback.md") });
+    await record("triager (fan-out): every fork fails", triage, ({ body }) =>
+      isFork(body) ? { modelID: MODELS.plannerRecon } : reply(body),
+    );
+    await record("triager (fan-out): every fork and the reduce fail", triage, ({ body }) =>
+      isEmit(body) ? { modelID: body.model.modelID } : reply(body),
+    );
   } finally {
+    delete process.env.OC_INACTIVITY_TIMEOUT_MS;
     setOpencodeLauncher();
     setDriveObserver();
     setCliRunner();

@@ -3,7 +3,7 @@
 // `opencode run` argv/env/timeout for the two CLI roles — plus how each adapter maps the reply back.
 //
 // The transport workarounds (two-turn explore→emit, NO_EXPLORE_TOOLS, `task` off, external_directory,
-// fork prime, per-role timeouts, the implementer's git denies) all live in this contract, so a refactor
+// the triager's pre-reads, per-role timeouts, the implementer's git denies) all live in this contract, so a refactor
 // of the layer must leave the golden byte-identical, and an intended change shows up as a reviewable
 // diff. Skill text is replaced by `<<skill:…>>` placeholders so skill edits don't churn it.
 //
@@ -292,7 +292,7 @@ test("the opencode layer sends exactly what the golden records", async () => {
         findings: "- [correctness] src/Foo.tsx:1 — null deref",
       }),
     );
-    await record("triager (fan-out)", () =>
+    await record("triager (pre-read)", () =>
       opencodeTriager(MODELS, WT, "develop")({
         pr: 1,
         round: 1,
@@ -434,17 +434,15 @@ test("the opencode layer sends exactly what the golden records", async () => {
     await record("doctor: stall, not retried", doc, stallsOnce());
     delete process.env.OC_INACTIVITY_TIMEOUT_MS;
 
-    // Triager fan-out degradation: every per-file fork fails, and then the reduce as well.
-    const isFork = (body: any) =>
-      !!body?.format?.schema?.properties?.items?.items?.required?.includes("needs_cross_file");
+    // Triager fallback: the pre-read spawn's emit comes back empty, so the agentic single-spawn re-triages.
     const triage = () =>
       opencodeTriager(MODELS, WT, "develop")({ pr: 1, round: 1, runDir: RUN, feedbackPath: join(RUN, "feedback.md") });
-    await record("triager (fan-out): every fork fails", triage, ({ body }) =>
-      isFork(body) ? { modelID: MODELS.plannerRecon } : reply(body),
-    );
-    await record("triager (fan-out): every fork and the reduce fail", triage, ({ body, forkedFrom }) =>
-      forkedFrom ? { modelID: body.model.modelID } : reply(body),
-    );
+    let emptied = false;
+    await record("triager (pre-read): fails, falls back to single-spawn", triage, ({ body }) => {
+      if (!isEmit(body) || emptied) return reply(body);
+      emptied = true;
+      return { modelID: body.model.modelID };
+    });
   } finally {
     delete process.env.OC_INACTIVITY_TIMEOUT_MS;
     setOpencodeLauncher();

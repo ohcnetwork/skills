@@ -348,11 +348,10 @@ export function parseUnanchoredFindings(
   return out;
 }
 
-/** Group the rendered feedback.md into per-FILE clusters for the triager fan-out (PLAN-triager-fanout
- *  §2): the "## Inline comments" section is emitted grouped by `path:line`, so a fork can own all of a
- *  file's findings and read it once. Returns the per-file blocks (verbatim markdown) plus the
- *  file-less "## Summary comments" body (bot walkthroughs) for the reduce pass. Pure — parses OUR own
- *  stable `renderFeedback` format, not arbitrary markdown. */
+/** Group the rendered feedback.md into per-FILE clusters: the "## Inline comments" section is emitted
+ *  grouped by `path:line`, and the triager pre-reads each cluster's file into its prompt. Returns the
+ *  per-file blocks (verbatim markdown) plus the file-less "## Summary comments" body (bot
+ *  walkthroughs). Pure — parses OUR own stable `renderFeedback` format, not arbitrary markdown. */
 export function parseFeedbackClusters(md: string): {
   clusters: { file: string; text: string }[];
   summary: string;

@@ -357,11 +357,6 @@ export async function driveToCompletion(
   return msg?.info ?? msg;
 }
 
-/** Generic structured spawn: one model-pinned opencode session that returns JSON matching `schema`,
- *  driven over the async transport (driveToCompletion). The single opencode transport used by every
- *  role skill; the per-role shape is the caller's schema. No retry ladder — startOpencodeOnFreePort
- *  handles server-startup races, the SSE bus auto-reconnects transient drops, and a real failure
- *  (session.error / timeout) fails fast and journaled rather than silently re-running an expensive spawn. */
 /** A transport STALL (inactivity watchdog fired), a dropped connection, or a server-start race — all
  *  transient, all fixed by re-running the whole spawn on a FRESH server. A genuine model/schema failure
  *  does NOT match and propagates immediately (fail fast + journaled, never loop on a real error). */
@@ -385,6 +380,115 @@ async function withStallRetry<T>(
   throw lastErr;
 }
 
+/** What a structured spawn returns: the schema-valid output, the engine opencode reports having run
+ *  (for the model-pin cross-check), and the best-effort cost summed over the session's turns. */
+export interface StructuredResult {
+  data: any;
+  modelReported: string | undefined;
+  modelPinSatisfied: boolean;
+  cost?: SpawnCost;
+}
+
+/** One turn of a structured session; `label` names it in error messages. */
+interface Turn {
+  system: string;
+  parts: unknown[];
+  label?: string;
+}
+
+/**
+ * The session every structured spawn runs: a fresh server, one model-pinned session, an optional
+ * agentic `explore` turn with NO `format`, then the `emit` turn WITH `format` — same session, same
+ * model (why two turns: promptAgenticThenStructured). Driven over the async transport
+ * (driveToCompletion). No retry ladder: startOpencodeOnFreePort handles server-startup races, the SSE
+ * bus auto-reconnects transient drops, and a real failure (session.error / timeout / no structured
+ * output) fails fast and journaled. Whether a transport stall is retried is the caller's call.
+ */
+async function runStructuredSession(
+  s: {
+    permission: object;
+    tools: Record<string, boolean>;
+    title: string;
+    providerID: string;
+    modelID: string;
+    timeoutMs?: number;
+    explore?: Turn;
+    emit: Turn;
+  },
+  schema: object,
+): Promise<StructuredResult> {
+  const oc = await startOpencodeOnFreePort({
+    permission: s.permission,
+    tools: s.tools,
+  });
+  const timeoutMs = s.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
+  const model = { providerID: s.providerID, modelID: s.modelID };
+  try {
+    const session = unwrap<any>(
+      await oc.client.session.create({ body: { title: s.title } }),
+    );
+    const sessionId = session.id ?? session.sessionID;
+    if (!sessionId) throw new Error("opencode: session.create returned no id");
+
+    let exploreCost: SpawnCost | undefined;
+    if (s.explore) {
+      const info = await driveToCompletion(
+        oc.client,
+        sessionId,
+        { model, system: s.explore.system, parts: s.explore.parts },
+        timeoutMs,
+      );
+      if (info?.error?.name) {
+        throw new Error(
+          `opencode ${s.explore.label} turn error: ${info.error.name}: ${info.error.message ?? "unknown"}`,
+        );
+      }
+      exploreCost = extractCost(info);
+    }
+
+    // `format` (structured output) is in the runtime API + docs but missing from this SDK version's
+    // published body type, so the body is cast. Proven live (spike-reviewer + probe-async-prompt).
+    const info = await driveToCompletion(
+      oc.client,
+      sessionId,
+      {
+        model,
+        system: s.emit.system,
+        parts: s.emit.parts,
+        format: { type: "json_schema", schema },
+      },
+      timeoutMs,
+    );
+    if (info?.error?.name === "StructuredOutputError") {
+      throw new Error(
+        `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
+      );
+    }
+    const structured = info?.structured ?? info?.structured_output;
+    if (structured == null) {
+      const turn = s.emit.label ? ` on ${s.emit.label} turn` : "";
+      throw new Error(
+        `opencode returned no structured output${turn}. info keys: ${Object.keys(info ?? {}).join(", ")}`,
+      );
+    }
+    const modelReported: string | undefined =
+      info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
+    return {
+      data: structured,
+      modelReported,
+      modelPinSatisfied: modelReported
+        ? modelReported.includes(s.modelID)
+        : true,
+      cost: sumCost(exploreCost, extractCost(info)),
+    };
+  } finally {
+    await oc.server?.close?.();
+  }
+}
+
+/** One-turn structured spawn: a model-pinned session whose single turn returns JSON matching `schema`.
+ *  Suited to a role that reasons from inline inputs; one that must explore first uses
+ *  promptAgenticThenStructured. A transport stall is retried once on a fresh server. */
 export async function promptStructured(
   spec: {
     role: string;
@@ -397,33 +501,7 @@ export async function promptStructured(
     tools?: Record<string, boolean>;
   },
   schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  return withStallRetry(() => promptStructuredImpl(spec, schema));
-}
-
-async function promptStructuredImpl(
-  spec: {
-    role: string;
-    providerID: string;
-    modelID: string;
-    system: string;
-    task: string;
-    round: number;
-    timeoutMs?: number;
-    tools?: Record<string, boolean>;
-  },
-  schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
+): Promise<StructuredResult> {
   // `tools: { task: false }` disables the subagent-spawn tool for judgment spawns. SSE-traced: the
   // planner recon spent ~90s of a 146s run inside two serial `task` subagents (each its own slow agentic
   // loop) — pure latency the planner doesn't need (direct batched grep/glob/read is faster). Harmless for
@@ -431,59 +509,23 @@ async function promptStructuredImpl(
   // planner prompt, this is the "explore in parallel like Claude Code" fix (no index, no accuracy loss).
   // A caller may pass its own `spec.tools` to gate further — the reviewer passes NO_EXPLORE_TOOLS so a
   // structured-output spawn can't enter the format+tools serial-tool death-spiral (see NO_EXPLORE_TOOLS).
-  const oc = await startOpencodeOnFreePort({
-    permission: JUDGMENT_PERMISSION,
-    tools: spec.tools ?? { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({
-        body: { title: `${spec.role} r${spec.round}` },
-      }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // `format` (structured output) is in the runtime API + docs but missing from this SDK version's
-    // published body type, so the body is cast. Proven live (spike-reviewer + probe-async-prompt).
-    const info = await driveToCompletion(
-      oc.client,
-      sessionId,
+  return withStallRetry(() =>
+    runStructuredSession(
       {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.system,
-        parts: [{ type: "text", text: spec.task }],
-        format: { type: "json_schema", schema },
+        permission: JUDGMENT_PERMISSION,
+        tools: spec.tools ?? { task: false },
+        title: `${spec.role} r${spec.round}`,
+        providerID: spec.providerID,
+        modelID: spec.modelID,
+        timeoutMs: spec.timeoutMs,
+        emit: {
+          system: spec.system,
+          parts: [{ type: "text", text: spec.task }],
+        },
       },
-      timeoutMs,
-    );
-
-    if (info?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = info?.structured ?? info?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output. info keys: ${Object.keys(info ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
-    const modelPinSatisfied = modelReported
-      ? modelReported.includes(spec.modelID)
-      : true;
-    return {
-      data: structured,
-      modelReported,
-      modelPinSatisfied,
-      cost: extractCost(info),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+      schema,
+    ),
+  );
 }
 
 /** Sum two best-effort SpawnCosts (either may be undefined) into one, so a two-turn spawn reports the
@@ -568,109 +610,37 @@ export async function promptAgenticThenStructured(
     attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
   },
   schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  return withStallRetry(() => promptAgenticThenStructuredImpl(spec, schema));
-}
-
-async function promptAgenticThenStructuredImpl(
-  spec: {
-    role: string;
-    providerID: string;
-    modelID: string;
-    reconSystem: string; // Turn A — agentic exploration prompt (no format)
-    task: string; // Turn A — user message
-    emitSystem: string; // Turn B — "emit as JSON, don't explore further"
-    emitInstruction: string; // Turn B — user message
-    round: number;
-    timeoutMs?: number;
-    attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
-  },
-  schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  const oc = await startOpencodeOnFreePort({
-    permission: JUDGMENT_PERMISSION,
-    tools: { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({
-        body: { title: `${spec.role} r${spec.round}` },
-      }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // Turn A — AGENTIC recon, NO `format`. This is the whole fix: let the tool loop run unconstrained.
-    // Any ticket images ride here as `file` parts (probed to reach the model on Copilot) so recon forms
-    // its understanding WITH the mockups/screenshots. Empty attachments ⇒ byte-identical text-only path.
-    const reconInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
+): Promise<StructuredResult> {
+  return withStallRetry(() =>
+    runStructuredSession(
       {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.reconSystem,
-        parts: [
-          { type: "text", text: spec.task },
-          ...fileParts(spec.attachments),
-        ],
+        permission: JUDGMENT_PERMISSION,
+        tools: { task: false },
+        title: `${spec.role} r${spec.round}`,
+        providerID: spec.providerID,
+        modelID: spec.modelID,
+        timeoutMs: spec.timeoutMs,
+        // Turn A — AGENTIC recon, NO `format`. This is the whole fix: let the tool loop run unconstrained.
+        // Any ticket images ride here as `file` parts (probed to reach the model on Copilot) so recon forms
+        // its understanding WITH the mockups/screenshots. Empty attachments ⇒ byte-identical text-only path.
+        explore: {
+          label: "recon",
+          system: spec.reconSystem,
+          parts: [
+            { type: "text", text: spec.task },
+            ...fileParts(spec.attachments),
+          ],
+        },
+        // Turn B — SAME warm session, WITH `format`. No exploration left: it serialises Turn A's findings.
+        emit: {
+          label: "emit",
+          system: spec.emitSystem,
+          parts: [{ type: "text", text: spec.emitInstruction }],
+        },
       },
-      timeoutMs,
-    );
-    if (reconInfo?.error?.name) {
-      throw new Error(
-        `opencode recon turn error: ${reconInfo.error.name}: ${reconInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const reconCost = extractCost(reconInfo);
-
-    // Turn B — SAME warm session, WITH `format`. No exploration left: it serialises Turn A's findings.
-    const emitInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.emitSystem,
-        parts: [{ type: "text", text: spec.emitInstruction }],
-        format: { type: "json_schema", schema },
-      },
-      timeoutMs,
-    );
-    if (emitInfo?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${emitInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = emitInfo?.structured ?? emitInfo?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output on emit turn. info keys: ${Object.keys(emitInfo ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      emitInfo?.modelID ?? emitInfo?.model?.modelID ?? emitInfo?.providerModel;
-    const modelPinSatisfied = modelReported
-      ? modelReported.includes(spec.modelID)
-      : true;
-    return {
-      data: structured,
-      modelReported,
-      modelPinSatisfied,
-      cost: sumCost(reconCost, extractCost(emitInfo)),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+      schema,
+    ),
+  );
 }
 
 /**
@@ -679,8 +649,8 @@ async function promptAgenticThenStructuredImpl(
  * — same warm session — emits the structured `DoctorOutput` manifest that the deterministic scaffold
  * acts on. Mirrors `promptAgenticThenStructured`, but with edit allowed and `task: false` kept (the
  * doctor explores directly; no subagents). The scaffold owns git/gh/tests/evals — this only edits +
- * reports. Not covered by unit tests (it needs a live opencode server + a real run dir); it is exercised
- * by the Phase-3 `--doctor-dry` live smoke.
+ * reports. Its call contract and failure paths are pinned by the characterization test (against a fake
+ * server); the model's behaviour is exercised by the Phase-3 `--doctor-dry` live smoke.
  */
 export async function driveDoctorSpawn(
   spec: {
@@ -694,69 +664,32 @@ export async function driveDoctorSpawn(
   },
   schema: object,
 ): Promise<{ data: any; modelReported: string | undefined; cost?: SpawnCost }> {
-  const oc = await startOpencodeOnFreePort({
-    permission: DOCTOR_PERMISSION,
-    tools: { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({ body: { title: "auto-doctor" } }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // Turn A — agentic + EDIT. The model reads the run dir and writes its file changes here.
-    const editInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
+  // Not wrapped in withStallRetry: Turn A edits files in place, and a retry would re-run it over a
+  // partially edited tree.
+  const { data, modelReported, cost } = await runStructuredSession(
+    {
+      permission: DOCTOR_PERMISSION,
+      tools: { task: false },
+      title: "auto-doctor",
+      providerID: spec.providerID,
+      modelID: spec.modelID,
+      timeoutMs: spec.timeoutMs,
+      // Turn A — agentic + EDIT. The model reads the run dir and writes its file changes here.
+      explore: {
+        label: "doctor edit",
         system: spec.editSystem,
         parts: [{ type: "text", text: spec.editInstruction }],
       },
-      timeoutMs,
-    );
-    if (editInfo?.error?.name) {
-      throw new Error(
-        `opencode doctor edit turn error: ${editInfo.error.name}: ${editInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const editCost = extractCost(editInfo);
-
-    // Turn B — SAME session, structured emit of the manifest describing what it just did.
-    const emitInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
+      // Turn B — SAME session, structured emit of the manifest describing what it just did.
+      emit: {
+        label: "doctor emit",
         system: spec.emitSystem,
         parts: [{ type: "text", text: spec.emitInstruction }],
-        format: { type: "json_schema", schema },
       },
-      timeoutMs,
-    );
-    if (emitInfo?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${emitInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = emitInfo?.structured ?? emitInfo?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output on doctor emit turn. info keys: ${Object.keys(emitInfo ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      emitInfo?.modelID ?? emitInfo?.model?.modelID ?? emitInfo?.providerModel;
-    return {
-      data: structured,
-      modelReported,
-      cost: sumCost(editCost, extractCost(emitInfo)),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+    },
+    schema,
+  );
+  return { data, modelReported, cost };
 }
 
 export async function runJudgmentSpawn(spec: SpawnSpec): Promise<SpawnOutcome> {

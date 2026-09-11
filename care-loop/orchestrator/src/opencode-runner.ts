@@ -256,6 +256,10 @@ export async function driveToCompletion(
     settle = res;
     fail = rej;
   });
+  // `done` can be rejected before anything awaits it: by a timer while promptAsync is still in flight,
+  // or by the pump once a failed promptAsync has aborted the stream. Node treats that as an unhandled
+  // rejection and exits the process, so mark it handled here; `await done` below still sees the failure.
+  done.catch(() => {});
 
   const deadline = setTimeout(() => {
     // Stop the server-side run (best-effort) so a hung/slow spawn stops accruing cost, then reject.
@@ -328,7 +332,17 @@ export async function driveToCompletion(
   })();
 
   try {
-    await client.session.promptAsync({ path: { id: sessionId }, body });
+    const sent = await client.session.promptAsync({
+      path: { id: sessionId },
+      body,
+    });
+    // The SDK returns an HTTP failure as `{ error, response }` rather than throwing. Unchecked, a refused
+    // prompt never runs, nothing goes idle, and the refusal surfaced 90s later as a "stalled" error.
+    if (sent?.error) {
+      throw new Error(
+        `opencode promptAsync failed (HTTP ${sent.response?.status ?? "?"}): ${JSON.stringify(sent.error).slice(0, 300)}`,
+      );
+    }
     await done;
   } finally {
     clearTimeout(deadline);
@@ -357,11 +371,12 @@ export async function driveToCompletion(
   return msg?.info ?? msg;
 }
 
-/** A transport STALL (inactivity watchdog fired), a dropped connection, or a server-start race — all
- *  transient, all fixed by re-running the whole spawn on a FRESH server. A genuine model/schema failure
- *  does NOT match and propagates immediately (fail fast + journaled, never loop on a real error). */
+/** A transport STALL (inactivity watchdog fired), a dropped connection, a server-start race, or a 5xx
+ *  from promptAsync — all transient, all fixed by re-running the whole spawn on a FRESH server. A genuine
+ *  model/schema failure, or a 4xx (the same request would be refused again), does NOT match and
+ *  propagates immediately (fail fast + journaled, never loop on a real error). */
 const STALL_RE =
-  /stalled|fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Server exited|EADDRINUSE|other side closed|terminated/i;
+  /stalled|fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Server exited|EADDRINUSE|other side closed|terminated|HTTP 5\d\d/i;
 async function withStallRetry<T>(
   fn: () => Promise<T>,
   attempts = 2,

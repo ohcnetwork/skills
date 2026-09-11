@@ -2014,74 +2014,6 @@
             }
           },
           {
-            "op": "session.abort",
-            "session": "s1"
-          },
-          {
-            "op": "server.close"
-          }
-        ]
-      },
-      {
-        "config": {
-          "permission": {
-            "edit": "deny",
-            "bash": "deny",
-            "webfetch": "deny",
-            "external_directory": "allow"
-          },
-          "tools": {
-            "task": false
-          }
-        },
-        "closed": true,
-        "calls": [
-          {
-            "op": "session.create",
-            "id": "s2",
-            "title": "probe r1"
-          },
-          {
-            "op": "drive",
-            "session": "s2",
-            "timeoutMs": 60000
-          },
-          {
-            "op": "promptAsync",
-            "session": "s2",
-            "body": {
-              "model": {
-                "providerID": "p",
-                "modelID": "m"
-              },
-              "system": "SYS",
-              "parts": [
-                {
-                  "type": "text",
-                  "text": "TASK"
-                }
-              ],
-              "format": {
-                "type": "json_schema",
-                "schema": {
-                  "type": "object",
-                  "required": [
-                    "ok"
-                  ],
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          {
-            "op": "session.abort",
-            "session": "s2"
-          },
-          {
             "op": "server.close"
           }
         ]
@@ -2089,7 +2021,7 @@
     ],
     "cli": [],
     "result": {
-      "threw": "opencode session s2 stalled: no stream activity for 200ms"
+      "threw": "opencode promptAsync failed (HTTP 400): {\"name\":\"ServerError\",\"data\":{\"message\":\"HTTP 400\"}}"
     }
   },
   {
@@ -2151,10 +2083,6 @@
             }
           },
           {
-            "op": "session.abort",
-            "session": "s1"
-          },
-          {
             "op": "server.close"
           }
         ]
@@ -2215,10 +2143,6 @@
             }
           },
           {
-            "op": "session.abort",
-            "session": "s2"
-          },
-          {
             "op": "server.close"
           }
         ]
@@ -2226,7 +2150,7 @@
     ],
     "cli": [],
     "result": {
-      "threw": "opencode session s2 stalled: no stream activity for 200ms"
+      "threw": "opencode promptAsync failed (HTTP 500): {\"name\":\"ServerError\",\"data\":{\"message\":\"HTTP 500\"}}"
     }
   },
   {

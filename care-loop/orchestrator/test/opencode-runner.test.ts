@@ -10,6 +10,7 @@ function fakeClient(opts: {
   hangAfterEvents?: boolean; // if set, block on the abort signal instead of ending (for timeout tests)
   messageInfo?: any; // what session.message returns as the finished assistant message
   messagesList?: any[]; // what session.messages (list) returns for the fallback path
+  promptAsync?: () => Promise<unknown>; // override promptAsync's outcome (throw, or return an HTTP error)
 }) {
   const calls: {
     promptAsync: any[];
@@ -34,6 +35,7 @@ function fakeClient(opts: {
     session: {
       promptAsync: async (a: any) => {
         calls.promptAsync.push(a);
+        return opts.promptAsync?.();
       },
       abort: async (a: any) => {
         calls.abort.push(a);
@@ -125,4 +127,46 @@ test("driveToCompletion: rejects if the event stream ends before idle", async ()
     () => driveToCompletion(client, "S", {}, 5000),
     /ended before session\.idle/,
   );
+});
+
+test("driveToCompletion: a promptAsync that throws rejects with that error, and nothing else escapes", async () => {
+  // A network failure throws out of the SDK client (it does not catch fetch errors). The event stream
+  // then ends without idle; that second failure must not surface as an unhandled rejection, which
+  // would kill the process before the stall retry could run.
+  const stray: unknown[] = [];
+  const onStray = (r: unknown) => stray.push(r);
+  process.on("unhandledRejection", onStray);
+  try {
+    const { client } = fakeClient({
+      events: [],
+      hangAfterEvents: true,
+      promptAsync: async () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+    await assert.rejects(() => driveToCompletion(client, "S", {}, 5000), /fetch failed/);
+    await new Promise((r) => setTimeout(r, 50)); // time for a stray rejection to surface
+    assert.deepEqual(stray, []);
+  } finally {
+    process.off("unhandledRejection", onStray);
+  }
+});
+
+test("driveToCompletion: an HTTP error from promptAsync fails at once, with the server's answer", async () => {
+  // The SDK returns an HTTP failure as { error, response } rather than throwing. Unchecked, the prompt
+  // never runs, the session never goes idle, and the failure surfaced only as a watchdog stall.
+  const { client } = fakeClient({
+    events: [],
+    hangAfterEvents: true,
+    promptAsync: async () => ({
+      error: { name: "BadRequest", data: { message: "invalid body" } },
+      response: { status: 400 },
+    }),
+  });
+  const started = Date.now();
+  await assert.rejects(
+    () => driveToCompletion(client, "S", {}, 5000),
+    /promptAsync failed \(HTTP 400\).*invalid body/,
+  );
+  assert.ok(Date.now() - started < 1000, "fails on the response, not at a timeout");
 });

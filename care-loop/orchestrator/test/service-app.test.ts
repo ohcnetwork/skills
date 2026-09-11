@@ -1,0 +1,1123 @@
+// test/service-app.test.ts — the HTTP contract ([[PLAN-loop-service]] §6). Drives the REAL Express
+// app over an ephemeral port and an in-memory database: no mocked router, no fixture run dirs. The
+// point of this file is that the contract the frontend is written against is frozen by tests before
+// the frontend exists.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
+import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import { buildApp } from "../src/service/app.ts";
+import {
+  SqliteRunIndex,
+  DEFAULT_LIST_LIMIT,
+  MAX_LIST_LIMIT,
+} from "../src/run-index.ts";
+import { mintRunId, isValidRunId } from "../src/run-id.ts";
+import { SessionStore } from "../src/service/auth.ts";
+import { QueueStore } from "../src/service/queue.ts";
+import { GateStore } from "../src/service/gate-store.ts";
+import { validateState, type CareState } from "../src/state.ts";
+import type { SqliteRunStore } from "../src/run-store.ts";
+import { useRealStore } from "./_store.ts";
+
+function stateFor(over: Partial<CareState>): CareState {
+  return validateState({
+    task: "seed a run",
+    repo: "ohcnetwork/care_fe",
+    branch: "my-branch",
+    worktree: "/tmp/wt",
+    tier: "standard",
+    pr: 42,
+    round: 1,
+    step: "2",
+    head_sha: "abc",
+    last_reviewed_sha: "",
+    run_id: mintRunId(),
+    requested_by: null,
+    ticket: "ENG-747",
+    summary: "do the thing",
+    ...over,
+  });
+}
+
+function seed(store: SqliteRunStore, slug: string, over: Partial<CareState> = {}): string {
+  const state = stateFor(over);
+  store.seedRun(slug, state);
+  return state.run_id;
+}
+
+interface Res {
+  status: number;
+  body: any;
+  cookie: string | null;
+}
+
+interface Harness {
+  store: SqliteRunStore;
+  queue: QueueStore;
+  /** Run ids the fake supervisor was asked to cancel, so a route test can assert the CALL rather than
+   *  the process side effect — the route's job is to reach the supervisor, not to kill anything. */
+  cancelled: string[];
+  gates: GateStore;
+  base: string;
+  get: (path: string, headers?: Record<string, string>) => Promise<Res>;
+  post: (path: string, body?: unknown, headers?: Record<string, string>) => Promise<Res>;
+  close: () => Promise<void>;
+}
+
+/** Pull the session token out of a Set-Cookie so a test can act as that signed-in caller. */
+function cookieValue(setCookie: string | null): string | null {
+  const m = setCookie?.match(/care_session=([^;]*)/);
+  return m ? m[1] : null;
+}
+
+async function harness(): Promise<Harness> {
+  const store = useRealStore();
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  const queue = new QueueStore(db);
+  const gates = new GateStore(db);
+  // A fake supervisor with the real status-write behaviour and no processes: cancellation's contract
+  // at this layer is "the row moves and the supervisor is told", and the signalling half belongs to
+  // supervisor.test.ts where a fake child can observe it.
+  const cancelled: string[] = [];
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    queue,
+    gates,
+    version: "test",
+    // Enqueue is gated on a supervisor existing; most tests want it present so they can exercise the
+    // route. The gate itself has its own test.
+    supervisor: {
+      running: true,
+      cancel: (runId: string) => {
+        cancelled.push(runId);
+        return { cancelled: queue.cancel(runId), signalled: false };
+      },
+    },
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const read = async (res: Response): Promise<Res> => ({
+    status: res.status,
+    body: res.status === 204 ? null : await res.json(),
+    cookie: res.headers.get("set-cookie"),
+  });
+  return {
+    store,
+    queue,
+    cancelled,
+    gates,
+    base,
+    get: async (path, headers) => read(await fetch(base + path, { headers })),
+    post: async (path, body, headers) =>
+      read(
+        await fetch(base + path, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify(body ?? {}),
+        }),
+      ),
+    close: () => new Promise((r) => server.close(() => r(undefined))),
+  };
+}
+
+test("GET /api/health reports db reachability, not merely process liveness", async () => {
+  const h = await harness();
+  try {
+    const { status, body } = await h.get("/api/health");
+    assert.equal(status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.db, true);
+    assert.equal(body.version, "test");
+    assert.equal(body.supervisor, true, "reports whether work would actually be picked up");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/auth/me echoes the claimed identity, null when nothing identifies the caller", async () => {
+  const h = await harness();
+  try {
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "octocat" })).body.login, "octocat");
+    // 200-with-null, not 401 — the frontend makes one unconditional call and branches on the answer.
+    const anon = await h.get("/api/auth/me");
+    assert.equal(anon.status, 200);
+    assert.equal(anon.body.login, null);
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "   " })).body.login, null);
+    // Trimmed, so a stray space in a header cannot create a second "user".
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": " octocat " })).body.login, "octocat");
+    // The header path has no roster entry — only a real session does.
+    assert.equal((await h.get("/api/auth/me", { "X-Care-User": "octocat" })).body.account, null);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs returns an envelope with a filter-consistent total", async () => {
+  const h = await harness();
+  try {
+    for (let i = 0; i < 3; i++) seed(h.store, `care_fe-${i}`, { requested_by: "octocat" });
+    seed(h.store, "care_fe-other", { requested_by: "someone" });
+
+    const all = await h.get("/api/runs");
+    assert.equal(all.body.total, 4);
+    assert.equal(all.body.items.length, 4);
+
+    const mine = await h.get("/api/runs?requested_by=octocat");
+    assert.equal(mine.body.total, 3);
+
+    const paged = await h.get("/api/runs?requested_by=octocat&limit=2");
+    assert.equal(paged.body.items.length, 2);
+    assert.equal(paged.body.total, 3, "total describes the filter, not the page");
+    assert.equal(paged.body.limit, 2);
+    assert.equal(paged.body.offset, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs rejects malformed query values instead of coercing them", async () => {
+  const h = await harness();
+  try {
+    const limit = await h.get("/api/runs?limit=abc");
+    assert.equal(limit.status, 400);
+    assert.equal(limit.body.error.code, "bad_query");
+
+    const negative = await h.get("/api/runs?offset=-5");
+    assert.equal(negative.status, 400);
+
+    // The bug this prevents: a non-empty string being truthy, so `?active=false` means "active".
+    const active = await h.get("/api/runs?active=maybe");
+    assert.equal(active.status, 400);
+    assert.equal((await h.get("/api/runs?active=false")).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id distinguishes a malformed id (400) from an unknown one (404)", async () => {
+  const h = await harness();
+  try {
+    const bad = await h.get("/api/runs/not-a-ulid");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_run_id");
+
+    const missing = await h.get(`/api/runs/${mintRunId()}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "run_not_found");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id returns the run with its detail fields and a queue slot", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a", { requested_by: "octocat" });
+    const { status, body } = await h.get(`/api/runs/${runId}`);
+    assert.equal(status, 200);
+    assert.equal(body.run.runId, runId);
+    assert.equal(body.run.ticket, "ENG-747");
+    assert.equal(body.run.pr, 42);
+    assert.equal(body.run.requestedBy, "octocat");
+    // The frontend renders live-vs-finished from THIS, rather than keeping its own copy of the step
+    // vocabulary — so the field is part of the contract, not an incidental extra.
+    assert.equal(body.run.terminal, false);
+    assert.equal(body.queue, null, "no queue row for a run the CLI made");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id/events paginates by seq and 404s for an unknown run", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a");
+    for (let seq = 0; seq < 4; seq++)
+      h.store.appendEvent(
+        runId,
+        { seq, ts: `2026-08-01T00:00:0${seq}.000Z`, run_id: runId, event: "step.enter", step: "2", prev: "sha256:x" },
+        { deltaMs: 0, costUsd: 0 },
+      );
+
+    const first = await h.get(`/api/runs/${runId}/events?limit=2`);
+    assert.deepEqual(first.body.items.map((e: { seq: number }) => e.seq), [0, 1]);
+    assert.equal(first.body.next_seq, 1);
+
+    const next = await h.get(`/api/runs/${runId}/events?limit=2&after_seq=1`);
+    assert.deepEqual(next.body.items.map((e: { seq: number }) => e.seq), [2, 3]);
+    assert.equal(next.body.next_seq, null);
+
+    // An empty timeline must not read as a missing run — it is the normal state of a fresh run.
+    const empty = seed(h.store, "care_fe-fresh");
+    const none = await h.get(`/api/runs/${empty}/events`);
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.body.items, []);
+
+    assert.equal((await h.get(`/api/runs/${mintRunId()}/events`)).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an unknown route returns the same error envelope as every other failure", async () => {
+  const h = await harness();
+  try {
+    const { status, body } = await h.get("/api/nope");
+    assert.equal(status, 404);
+    assert.equal(body.error.code, "not_found");
+    assert.equal(typeof body.error.message, "string");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id/artifacts lists metadata, and /:sha returns one parsed body", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a");
+    const sha = "sha256:" + "e".repeat(64);
+    h.store.putArtifact(runId, {
+      path: "skills/care-reviewer-r1.result.json",
+      name: "care-reviewer-r1.result",
+      sha256: sha,
+      content: JSON.stringify({ verdict: "pass", findings: [] }),
+    });
+
+    const list = await h.get(`/api/runs/${runId}/artifacts`);
+    assert.equal(list.status, 200);
+    assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.items[0].sha256, sha);
+    assert.equal(list.body.items[0].content, undefined, "the list must not carry bodies");
+
+    // addressed by the bare hex, which is what a URL segment should hold
+    const body = await h.get(`/api/runs/${runId}/artifacts/${"e".repeat(64)}`);
+    assert.equal(body.status, 200);
+    assert.deepEqual(body.body.content, { verdict: "pass", findings: [] });
+  } finally {
+    await h.close();
+  }
+});
+
+test("artifact routes reject a malformed sha (400) and report an unknown one (404)", async () => {
+  const h = await harness();
+  try {
+    const runId = seed(h.store, "care_fe-a");
+    const bad = await h.get(`/api/runs/${runId}/artifacts/nope`);
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_sha");
+
+    const missing = await h.get(`/api/runs/${runId}/artifacts/${"f".repeat(64)}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "artifact_not_found");
+
+    assert.equal((await h.get(`/api/runs/${mintRunId()}/artifacts`)).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the paging envelope reports what was APPLIED, never what was asked for", async () => {
+  const h = await harness();
+  try {
+    for (let i = 0; i < 3; i++) seed(h.store, `care_fe-${i}`);
+
+    // Omitted limit must still report the default in force — a client cannot page by a null.
+    const bare = await h.get("/api/runs");
+    assert.equal(bare.body.limit, DEFAULT_LIST_LIMIT);
+    assert.equal(bare.body.offset, 0);
+
+    // Over the ceiling: the response must say 200, not 999. A client doing `offset += limit` on the
+    // requested value would skip 799 rows per page and never see an error.
+    const over = await h.get("/api/runs?limit=999");
+    assert.equal(over.body.limit, MAX_LIST_LIMIT);
+
+    // Zero rows is not a meaningful page — it used to be clamped up to 1 and reported as 0.
+    const zero = await h.get("/api/runs?limit=0");
+    assert.equal(zero.status, 400);
+    assert.equal(zero.body.error.code, "bad_query");
+    assert.equal((await h.get(`/api/runs/${seed(h.store, "care_fe-z")}/events?limit=0`)).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+// ── auth ─────────────────────────────────────────────────────────────────────────────────────────
+
+test("login establishes a session cookie that /auth/me then resolves", async () => {
+  const h = await harness();
+  try {
+    const login = await h.post("/api/auth/login", { login: "octocat" });
+    assert.equal(login.status, 201);
+    assert.equal(login.body.user.login, "octocat");
+    assert.equal(typeof login.body.user.id, "number");
+
+    const raw = login.cookie ?? "";
+    assert.match(raw, /HttpOnly/, "the token must not be readable from JS");
+    assert.match(raw, /SameSite=Lax/);
+    assert.doesNotMatch(raw, /Secure/, "plain HTTP on loopback by default");
+
+    const me = await h.get("/api/auth/me", { cookie: `care_session=${cookieValue(raw)}` });
+    assert.equal(me.body.login, "octocat");
+    assert.equal(me.body.account.login, "octocat", "a real session carries the roster entry");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the raw token is never stored — only its hash", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const db = (h.store as unknown as { db: DatabaseSync }).db;
+    const rows = db.prepare("SELECT token_sha256 FROM sessions").all() as { token_sha256: string }[];
+    assert.equal(rows.length, 1);
+    assert.notEqual(rows[0].token_sha256, token, "a leaked db must not be a set of live logins");
+    assert.equal(
+      rows[0].token_sha256,
+      createHash("sha256").update(token, "utf8").digest("hex"),
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("logout revokes the session and clears the cookie, and is idempotent", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const jar = { cookie: `care_session=${token}` };
+
+    const out = await h.post("/api/auth/logout", {}, jar);
+    assert.equal(out.status, 204);
+    assert.match(out.cookie ?? "", /Max-Age=0/);
+
+    // the token no longer identifies anyone
+    assert.equal((await h.get("/api/auth/me", jar)).body.login, null);
+    // revoked, not deleted — "who was signed in when" survives the sign-out
+    const db = (h.store as unknown as { db: DatabaseSync }).db;
+    const row = db.prepare("SELECT revoked_at FROM sessions").get() as { revoked_at: string | null };
+    assert.notEqual(row.revoked_at, null);
+
+    // a second logout, and a logout with no cookie at all, both succeed
+    assert.equal((await h.post("/api/auth/logout", {}, jar)).status, 204);
+    assert.equal((await h.post("/api/auth/logout")).status, 204);
+  } finally {
+    await h.close();
+  }
+});
+
+test("login rejects a value that could not be a GitHub login", async () => {
+  const h = await harness();
+  try {
+    for (const bad of ["", "   ", "-leading", "trailing-", "two--hyphens", "a".repeat(40), "has space"]) {
+      const res = await h.post("/api/auth/login", { login: bad });
+      assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
+      assert.equal(res.body.error.code, "bad_login");
+    }
+    assert.equal((await h.post("/api/auth/login", {})).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("logging in twice reuses the user row and issues a second session", async () => {
+  const h = await harness();
+  try {
+    const a = await h.post("/api/auth/login", { login: "octocat" });
+    const b = await h.post("/api/auth/login", { login: "octocat" });
+    assert.equal(a.body.user.id, b.body.user.id, "the roster must not grow a duplicate");
+    assert.notEqual(cookieValue(a.cookie), cookieValue(b.cookie));
+    // both remain valid — signing in on a second machine must not evict the first
+    for (const c of [a, b])
+      assert.equal(
+        (await h.get("/api/auth/me", { cookie: `care_session=${cookieValue(c.cookie)}` })).body.login,
+        "octocat",
+      );
+  } finally {
+    await h.close();
+  }
+});
+
+test("a session beats the header, and an unresolvable cookie falls back to it", async () => {
+  const h = await harness();
+  try {
+    const token = cookieValue((await h.post("/api/auth/login", { login: "octocat" })).cookie)!;
+    const both = await h.get("/api/auth/me", {
+      cookie: `care_session=${token}`,
+      "X-Care-User": "someone-else",
+    });
+    assert.equal(both.body.login, "octocat", "the session is the stronger claim");
+
+    // a dead cookie must not lock out a caller who also sent a header — identify, do not gate
+    const stale = await h.get("/api/auth/me", {
+      cookie: "care_session=deadbeef",
+      "X-Care-User": "someone-else",
+    });
+    assert.equal(stale.status, 200);
+    assert.equal(stale.body.login, "someone-else");
+  } finally {
+    await h.close();
+  }
+});
+
+// ── list filters ─────────────────────────────────────────────────────────────────────────────────
+
+test("filters compose across runs and run_detail columns", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { requested_by: "octocat", branch: "feat-a", ticket: "ENG-1", task: "add pagination" });
+    seed(h.store, "care_fe-b", { requested_by: "octocat", branch: "feat-b", ticket: "ENG-2", task: "fix the date format" });
+    seed(h.store, "care_fe-c", { requested_by: "someone", branch: "feat-c", ticket: "ENG-3", task: "add pagination again" });
+
+    assert.equal((await h.get("/api/runs?requested_by=octocat")).body.total, 2);
+    assert.equal((await h.get("/api/runs?ticket=ENG-2")).body.total, 1);
+    assert.equal((await h.get("/api/runs?branch=feat-c")).body.total, 1);
+    // free text reaches the detail table, which the list joins for exactly this
+    assert.equal((await h.get("/api/runs?q=pagination")).body.total, 2);
+    assert.equal((await h.get("/api/runs?q=pagination&requested_by=octocat")).body.total, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("q escapes LIKE wildcards so a literal % is searched for, not matched with", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { task: "handle 100% of cases" });
+    seed(h.store, "care_fe-b", { task: "something else entirely" });
+    assert.equal((await h.get("/api/runs?q=100%25")).body.total, 1, "literal percent");
+    assert.equal((await h.get("/api/runs?q=%25")).body.total, 1, "a bare % must not match everything");
+  } finally {
+    await h.close();
+  }
+});
+
+test("requested_by=me resolves to the caller, and 400s when nobody is signed in", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { requested_by: "octocat" });
+    seed(h.store, "care_fe-b", { requested_by: "someone" });
+
+    const viaHeader = await h.get("/api/runs?requested_by=me", { "X-Care-User": "octocat" });
+    assert.equal(viaHeader.body.total, 1);
+    assert.equal(viaHeader.body.items[0].requestedBy, "octocat");
+
+    const token = cookieValue((await h.post("/api/auth/login", { login: "someone" })).cookie)!;
+    const viaSession = await h.get("/api/runs?requested_by=me", { cookie: `care_session=${token}` });
+    assert.equal(viaSession.body.items[0].requestedBy, "someone");
+
+    // 400 not 401: it is a filter that cannot be expanded, not a permission being refused.
+    const anon = await h.get("/api/runs?requested_by=me");
+    assert.equal(anon.status, 400);
+    assert.equal(anon.body.error.code, "bad_query");
+  } finally {
+    await h.close();
+  }
+});
+
+test("order and dir are whitelisted, never interpolated from the query string", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { started_at: "2026-08-01T00:00:00.000Z" });
+    seed(h.store, "care_fe-b", { started_at: "2026-08-02T00:00:00.000Z" });
+
+    const desc = await h.get("/api/runs");
+    assert.deepEqual(desc.body.items.map((r: { slug: string }) => r.slug), ["care_fe-b", "care_fe-a"]);
+    const asc = await h.get("/api/runs?dir=asc");
+    assert.deepEqual(asc.body.items.map((r: { slug: string }) => r.slug), ["care_fe-a", "care_fe-b"]);
+
+    assert.equal((await h.get("/api/runs?order=updated_at")).status, 200);
+    const bad = await h.get("/api/runs?order=cost_usd;DROP+TABLE+runs");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_query");
+    assert.equal((await h.get("/api/runs?dir=sideways")).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("since/until bound started_at as a half-open range", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { started_at: "2026-08-01T00:00:00.000Z" });
+    seed(h.store, "care_fe-b", { started_at: "2026-08-02T00:00:00.000Z" });
+    seed(h.store, "care_fe-c", { started_at: "2026-08-03T00:00:00.000Z" });
+    assert.equal((await h.get("/api/runs?since=2026-08-02T00:00:00.000Z")).body.total, 2);
+    assert.equal((await h.get("/api/runs?until=2026-08-02T00:00:00.000Z")).body.total, 1);
+    assert.equal(
+      (await h.get("/api/runs?since=2026-08-02T00:00:00.000Z&until=2026-08-03T00:00:00.000Z")).body.total,
+      1,
+      "half-open: since is inclusive, until is not",
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("facets honour the active filter, so narrowing does not offer dead options", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-a", { repo: "ohcnetwork/care_fe", branch: "x", requested_by: "octocat" });
+    seed(h.store, "care_fe-b", { repo: "ohcnetwork/care_fe", branch: "y", requested_by: "octocat" });
+    seed(h.store, "care_fe-c", { repo: "ohcnetwork/care", branch: "z", requested_by: "someone" });
+
+    const all = await h.get("/api/runs/facets");
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.body.repos, [
+      { value: "ohcnetwork/care_fe", count: 2 },
+      { value: "ohcnetwork/care", count: 1 },
+    ]);
+
+    // filtered to one repo, only that repo's branches are offered
+    const narrowed = await h.get("/api/runs/facets?repo=ohcnetwork/care");
+    assert.deepEqual(narrowed.body.branches, [{ value: "z", count: 1 }]);
+    assert.deepEqual(narrowed.body.users, [{ value: "someone", count: 1 }]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/runs/facets is not swallowed by the /runs/:id route", async () => {
+  const h = await harness();
+  try {
+    // "facets" is a plausible path segment; declared after :id it would 400 as a bad run id.
+    const res = await h.get("/api/runs/facets");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.repos));
+  } finally {
+    await h.close();
+  }
+});
+
+// ── static frontend ──────────────────────────────────────────────────────────────────────────────
+
+test("the SPA fallback serves client routes but never disguises a missing asset", async () => {
+  const store = useRealStore();
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  const dir = mkdtempSync(join(tmpdir(), "careloopd-static-"));
+  writeFileSync(join(dir, "index.html"), "<!doctype html><title>app</title>");
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    queue: new QueueStore(db),
+    gates: new GateStore(db),
+    staticDir: dir,
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    // a client-side route resolves to the app shell
+    const route = await fetch(`${base}/runs/${mintRunId()}`);
+    assert.equal(route.status, 200);
+    assert.match(route.headers.get("content-type") ?? "", /text\/html/);
+
+    // REGRESSION: a missing asset must 404 as an asset. Answering 200-with-HTML makes the browser
+    // execute a document as JavaScript, and the MIME error it then reports says nothing about the
+    // real problem — a stale asset reference after a redeploy.
+    const missing = await fetch(`${base}/assets/nope.js`);
+    assert.equal(missing.status, 404);
+
+    // and /api keeps its own envelope rather than being swallowed by the fallback
+    const api = await fetch(`${base}/api/nope`);
+    assert.equal(api.status, 404);
+    assert.equal((await api.json()).error.code, "not_found");
+  } finally {
+    await new Promise((r) => server.close(() => r(undefined)));
+  }
+});
+
+// ── enqueue / queue / stats ──────────────────────────────────────────────────────────────────────
+
+const REQ = { branch: "feat-a", task: "do the thing", ticket: "ENG-1", summary: "does the thing" };
+
+async function signedIn(h: Harness, login = "octocat"): Promise<Record<string, string>> {
+  const res = await h.post("/api/auth/login", { login });
+  return { cookie: `care_session=${cookieValue(res.cookie)}` };
+}
+
+test("POST /api/runs enqueues and returns the run id it minted", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    assert.equal(res.status, 201);
+    assert.equal(isValidRunId(res.body.run_id), true);
+    assert.equal(typeof res.body.queue_id, "number");
+    assert.equal(res.body.blocked_by_branch, null);
+    assert.equal(res.body.queue_position, 0, "first in line");
+
+    // and the run is immediately addressable by that id, before any process exists for it
+    const queue = await h.get("/api/queue", jar);
+    assert.equal(queue.body.items[0].runId, res.body.run_id);
+    assert.equal(queue.body.items[0].status, "pending");
+    assert.equal(queue.body.items[0].requestedBy, "octocat");
+  } finally {
+    await h.close();
+  }
+});
+
+test("enqueue requires a caller — an unattributed run is one nobody can be asked about", async () => {
+  const h = await harness();
+  try {
+    const anon = await h.post("/api/runs", REQ);
+    assert.equal(anon.status, 401);
+    assert.equal(anon.body.error.code, "not_authenticated");
+    // the header path counts as saying who you are, same as a session
+    assert.equal((await h.post("/api/runs", REQ, { "X-Care-User": "octocat" })).status, 201);
+  } finally {
+    await h.close();
+  }
+});
+
+test("enqueue applies the LOOP's own field rules, not a second copy of them", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    // A ticket that would fail the [ENG-###] PR-title assert must fail HERE, while a human is
+    // looking at the form — not hours later inside a spawned child.
+    const badTicket = await h.post("/api/runs", { ...REQ, ticket: "nope" }, jar);
+    assert.equal(badTicket.status, 400);
+    assert.equal(badTicket.body.error.code, "bad_ticket");
+    assert.match(badTicket.body.error.message, /ENG-123/);
+
+    // likewise a branch `git worktree add` would reject
+    for (const branch of ["has space", "-leading", "trailing/", "a..b"]) {
+      const res = await h.post("/api/runs", { ...REQ, branch }, jar);
+      assert.equal(res.status, 400, `expected 400 for branch ${JSON.stringify(branch)}`);
+      assert.equal(res.body.error.code, "bad_branch");
+    }
+
+    // ticket is normalized the same way the CLI normalizes it
+    const ok = await h.post("/api/runs", { ...REQ, ticket: "eng-42" }, jar);
+    assert.equal(ok.status, 201);
+    const queued = await h.get("/api/queue", jar);
+    assert.equal(queued.body.items[0].ticket, "ENG-42");
+
+    for (const missing of ["task", "summary"]) {
+      const body = { ...REQ } as Record<string, unknown>;
+      delete body[missing];
+      assert.equal((await h.post("/api/runs", body, jar)).status, 400);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("enqueue rejects a repo outside the allowlist", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", { ...REQ, repo: "attacker/evil" }, jar);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error.code, "bad_repo");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a second request on a busy branch is QUEUED and told so, not rejected", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const first = await h.post("/api/runs", REQ, jar);
+    const second = await h.post("/api/runs", REQ, jar);
+
+    // Queue behind, don't reject (§12) — the queue exists to absorb exactly this.
+    assert.equal(second.status, 201);
+    assert.equal(second.body.blocked_by_branch, first.body.run_id);
+    assert.equal(second.body.queue_position, 1);
+
+    // a different branch is unaffected by the BRANCH block, but is still behind in line — the two
+    // reasons are independent, which is why reporting only the first told three of five callers
+    // "nothing is ahead of you" while they waited on the concurrency cap.
+    const other = await h.post("/api/runs", { ...REQ, branch: "feat-b" }, jar);
+    assert.equal(other.body.blocked_by_branch, null);
+    assert.equal(other.body.queue_position, 2);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /api/runs/:id/cancel moves the row and tells the supervisor — one route, both states", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+
+    const cancel = await h.post(`/api/runs/${runId}/cancel`, {}, jar);
+    // 202, not 204: the row is certain, the child's exit is not. Reporting completion here would show
+    // a finished run in the UI seconds before the process actually stops.
+    assert.equal(cancel.status, 202);
+    assert.equal(cancel.body.cancelled, true);
+    assert.deepEqual(h.cancelled, [runId], "the route's job is to REACH the supervisor");
+    assert.equal(h.queue.byRunId(runId)?.status, "cancelled");
+
+    // Already terminal — saying so beats a 202 that did nothing.
+    const again = await h.post(`/api/runs/${runId}/cancel`, {}, jar);
+    assert.equal(again.status, 400);
+    assert.equal(again.body.error.code, "not_cancellable");
+  } finally {
+    await h.close();
+  }
+});
+
+test("cancel is attributed and 404s on a run the queue never saw", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    assert.equal((await h.post(`/api/runs/${res.body.run_id}/cancel`)).status, 401);
+
+    // A CLI-started run has no queue row. Permanent and legitimate — the child is the same binary
+    // either way — so this is a 404 about the QUEUE, not about the run.
+    const missing = await h.post(`/api/runs/${mintRunId()}/cancel`, {}, jar);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "run_not_found");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a queued run is addressable before any process exists for it", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+
+    // Minting the run id at enqueue is what lets POST answer synchronously — so the id is a valid
+    // address BEFORE a journal exists, and the new-run form navigates straight to it. 404 here made
+    // a successful enqueue look like a failure for the first few seconds of every run's life.
+    const detail = await h.get(`/api/runs/${runId}`, jar);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.run, null, "no journal yet");
+    assert.equal(detail.body.queue.status, "pending");
+    assert.equal(detail.body.queue.task, REQ.task);
+
+    // Neither half existing is still a 404 — that is a genuinely unknown id.
+    assert.equal((await h.get(`/api/runs/${mintRunId()}`, jar)).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id/gate answers null for a run with no open question", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    // `null`, not 404: "no open question" is a normal answer to a poll the FE makes of every run it
+    // shows, and a 404 would make the ordinary case look like an error.
+    const gate = await h.get(`/api/runs/${res.body.run_id}/gate`, jar);
+    assert.equal(gate.status, 200);
+    assert.equal(gate.body.ask, null);
+  } finally {
+    await h.close();
+  }
+});
+
+test("answering an approve gate re-admits the suspended run in one transaction", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    const row = h.queue.byRunId(runId)!;
+    h.queue.claim();
+    h.queue.suspend(row.id);
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: { summary: "do it" } });
+
+    const gate = await h.get(`/api/runs/${runId}/gate`, jar);
+    assert.equal(gate.body.ask.ask_id, "approve:x");
+    assert.deepEqual(gate.body.ask.payload, { summary: "do it" });
+
+    const answer = await h.post(`/api/runs/${runId}/gate`, { decision: "approve" }, jar);
+    assert.equal(answer.status, 202);
+    assert.equal(answer.body.readmitted, true);
+    // The answer IS the re-admission. Splitting them would leave a window where the gate is settled
+    // and the run is still awaiting_gate — waiting on a question nobody will ask again.
+    assert.equal(h.queue.byRunId(runId)?.status, "pending");
+    assert.equal(h.gates.get(runId, "approve:x")?.answeredBy, "octocat");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a second answer loses the race and is told so", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: {} });
+
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, { decision: "approve" }, jar)).status, 202);
+    // Two people had the gate view open. The loser must learn they did not unblock the run.
+    const second = await h.post(`/api/runs/${runId}/gate`, { decision: "reject" }, jar);
+    assert.equal(second.status, 404, "the ask is no longer pending");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the gate answer is validated — it authorizes a push to origin", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    h.gates.ask({ runId, askId: "approve:x", kind: "approve", payload: {} });
+
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, {}, jar)).body.error.code, "bad_decision");
+    assert.equal(
+      (await h.post(`/api/runs/${runId}/gate`, { decision: "maybe" }, jar)).body.error.code,
+      "bad_decision",
+    );
+    // An empty amendment sends the planner off to re-draft against no instruction — a model call
+    // spent to produce the same plan. The terminal gate re-prompts for exactly this.
+    assert.equal(
+      (await h.post(`/api/runs/${runId}/gate`, { decision: "amend", amendment: "  " }, jar)).body.error.code,
+      "bad_amendment",
+    );
+    assert.equal((await h.post(`/api/runs/${runId}/gate`, { decision: "approve" })).status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test("an interview gate needs an answer to every question it asked", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const res = await h.post("/api/runs", REQ, jar);
+    const runId = res.body.run_id as string;
+    const questions = [
+      { id: "q1", prompt: "which?" },
+      { id: "q2", prompt: "when?" },
+    ];
+    h.gates.ask({ runId, askId: "interview:x", kind: "interview", payload: questions });
+
+    // A partial set would reach the planner as a silently shorter interview, and the plan would be
+    // drafted against the gaps.
+    const partial = await h.post(`/api/runs/${runId}/gate`, { answers: [{ id: "q1", answer: "this" }] }, jar);
+    assert.equal(partial.status, 400);
+    assert.match(partial.body.error.message, /q2/);
+
+    const full = await h.post(
+      `/api/runs/${runId}/gate`,
+      { answers: [{ id: "q2", answer: "now" }, { id: "q1", answer: "this" }] },
+      jar,
+    );
+    assert.equal(full.status, 202);
+    // Correlated by id and returned in the order ASKED, not the order answered.
+    assert.deepEqual(h.gates.get(runId, "interview:x")?.answer, [
+      { id: "q1", answer: "this" },
+      { id: "q2", answer: "now" },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/gates is the needs-you list", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    const a = await h.post("/api/runs", { ...REQ, branch: "feat-a" }, jar);
+    const b = await h.post("/api/runs", { ...REQ, branch: "feat-b" }, jar);
+    h.gates.ask({ runId: a.body.run_id, askId: "approve:x", kind: "approve", payload: {} });
+    h.gates.ask({ runId: b.body.run_id, askId: "approve:y", kind: "approve", payload: {} });
+    await h.post(`/api/runs/${b.body.run_id}/gate`, { decision: "approve" }, jar);
+
+    // A gate nobody sees is a gate that expires — and expiry is the one outcome here that throws
+    // away finished planning work.
+    const gates = await h.get("/api/gates", jar);
+    assert.equal(gates.body.total, 1);
+    assert.equal(gates.body.items[0].run_id, a.body.run_id);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/queue carries the same envelope as every other list route", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    for (const branch of ["feat-a", "feat-b", "feat-c"])
+      await h.post("/api/runs", { ...REQ, branch }, jar);
+
+    const page = await h.get("/api/queue?limit=2", jar);
+    assert.equal(page.body.items.length, 2);
+    // `total` counts the FILTER, not the page — the difference only shows up on page two, which is
+    // why a bare `{items}` array is a breaking change waiting to happen (§6).
+    assert.equal(page.body.total, 3);
+    assert.equal(page.body.limit, 2);
+    assert.equal(page.body.offset, 0);
+
+    const second = await h.get("/api/queue?limit=2&offset=2", jar);
+    assert.equal(second.body.items.length, 1);
+    assert.equal(second.body.offset, 2);
+
+    // Echo the EFFECTIVE limit: a response claiming 999 would make `offset += limit` skip rows.
+    assert.equal((await h.get("/api/queue?limit=999", jar)).body.limit, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/queue defaults to live rows and validates the status filter", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    await h.post("/api/runs", REQ, jar);
+    const done = await h.post("/api/runs", { ...REQ, branch: "feat-b" }, jar);
+    h.queue.finish(h.queue.byRunId(done.body.run_id)!.id, "done");
+
+    // "what is the queue doing" is the question — a month of finished rows buries it
+    const live = await h.get("/api/queue", jar);
+    assert.equal(live.body.items.length, 1);
+
+    const all = await h.get("/api/queue?status=pending&status=done", jar);
+    assert.equal(all.body.items.length, 2);
+
+    const bad = await h.get("/api/queue?status=exploded", jar);
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_query");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/runs/:id carries the queue row, and null for a CLI run that never queued", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    // a run that exists only because the CLI made it — a real and permanent case, not a gap
+    const cliRun = seed(h.store, "care_fe-cli");
+    const detail = await h.get(`/api/runs/${cliRun}`, jar);
+    assert.equal(detail.body.queue, null);
+    assert.equal(detail.body.run.runId, cliRun);
+    // The mirror case — a queued run with no `runs` row — has its own test above. BOTH halves are
+    // nullable, which is why neither is "the record" and the other a decoration.
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/stats summarises the fleet and the queue", async () => {
+  const h = await harness();
+  try {
+    const jar = await signedIn(h);
+    seed(h.store, "care_fe-live", { step: "6a" });
+    seed(h.store, "care_fe-done", { step: "7" });
+    await h.post("/api/runs", REQ, jar);
+
+    const { body } = await h.get("/api/stats", jar);
+    assert.equal(body.runs, 2);
+    assert.equal(body.active, 1);
+    assert.deepEqual(body.by_step, { "6a": 1, "7": 1 });
+    assert.deepEqual(body.queue, { pending: 1, running: 0 });
+  } finally {
+    await h.close();
+  }
+});
+
+test("RunSummary carries `terminal`, so no client needs its own step vocabulary", async () => {
+  const h = await harness();
+  try {
+    seed(h.store, "care_fe-live", { step: "6a" });
+    seed(h.store, "care_fe-done", { step: "7" });
+    seed(h.store, "care_fe-merged", { step: "merged" });
+    seed(h.store, "care_fe-aborted", { step: "aborted" });
+
+    const byStep = new Map(
+      (await h.get("/api/runs")).body.items.map((r: { step: string; terminal: boolean }) => [
+        r.step,
+        r.terminal,
+      ]),
+    );
+    assert.deepEqual(
+      [...byStep.entries()].sort(),
+      [["6a", false], ["7", true], ["aborted", true], ["merged", true]],
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("enqueue refuses when no supervisor would ever run the row", async () => {
+  const store = useRealStore();
+  const db = (store as unknown as { db: DatabaseSync }).db;
+  // No `supervisor` — the deployed-today state, where the route was live and nothing consumed it.
+  const app = buildApp({
+    index: new SqliteRunIndex(db),
+    sessions: new SessionStore(db),
+    queue: new QueueStore(db),
+    gates: new GateStore(db),
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Care-User": "octocat" },
+      body: JSON.stringify({ branch: "feat-a", task: "t", ticket: "ENG-1", summary: "s" }),
+    });
+    // A queued row nobody will execute is a silent black hole: the requester cannot tell it from a
+    // slow start, and the run never happens.
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error.code, "no_supervisor");
+
+    // and health says so rather than leaving it to be discovered
+    const health = await (await fetch(`${base}/api/health`)).json();
+    assert.equal(health.supervisor, false);
+  } finally {
+    await new Promise((r) => server.close(() => r(undefined)));
+  }
+});
+
+test("a malformed JSON body is the caller's fault (400), not the server's (500)", async () => {
+  const h = await harness();
+  try {
+    const res = await fetch(`${h.base}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error.code, "bad_json");
+  } finally {
+    await h.close();
+  }
+});
+
+test("X-Care-User is held to the same rule as /auth/login — they write the same column", async () => {
+  const h = await harness();
+  try {
+    const bad = await h.get("/api/auth/me", { "X-Care-User": "<script>alert(1)</script> not a login" });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "bad_user");
+
+    // junk must not be able to reach requested_by, where it becomes a facet and a filter value
+    const enqueued = await h.post(
+      "/api/runs",
+      { branch: "feat-a", task: "t", ticket: "ENG-1", summary: "s" },
+      { "X-Care-User": "not a login" },
+    );
+    assert.equal(enqueued.status, 400);
+    assert.equal((await h.get("/api/queue", { "X-Care-User": "octocat" })).body.items.length, 0);
+  } finally {
+    await h.close();
+  }
+});

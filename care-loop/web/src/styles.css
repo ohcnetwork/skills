@@ -1,0 +1,118 @@
+/* Tailwind v4, themed with Care UI's tokens, transcribed from the live docs site's computed styles
+ * because its shadcn registry currently serves HTML instead of JSON. When that is fixed the real
+ * components drop in on these tokens with no visual change, consuming exactly these names.
+ *
+ * Care UI's --primary is EMERALD, not blue. */
+
+@import "tailwindcss";
+
+/* Care UI's faces, with real fallbacks so the layout does not depend on the network. */
+@import url("https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
+
+@theme {
+  --font-sans: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root {
+  --background: #fff;
+  --foreground: oklch(14.5% 0 0);
+  --card: #fff;
+  --card-foreground: oklch(14.5% 0 0);
+  --popover: #fff;
+  --popover-foreground: oklch(14.5% 0 0);
+  --primary: oklch(43.2% 0.095 166.913);
+  --primary-foreground: oklch(97.9% 0.021 166.113);
+  --secondary: oklch(97% 0 0);
+  --secondary-foreground: oklch(20.5% 0 0);
+  --muted: oklch(97% 0 0);
+  --muted-foreground: oklch(37.1% 0 0);
+  --accent: oklch(97% 0 0);
+  --accent-foreground: oklch(20.5% 0 0);
+  --destructive: oklch(57.7% 0.245 27.325);
+  --destructive-foreground: oklch(97.1% 0.013 17.38);
+  --border: oklch(92.2% 0 0);
+  --input: oklch(87% 0 0);
+  --ring: color-mix(in oklab, oklch(58.5% 0.233 277.117) 75%, transparent);
+  --radius: 0.625rem;
+  --chart-1: oklch(64.6% 0.222 41.116);
+  --chart-2: oklch(59.6% 0.145 163.225);
+  --chart-3: oklch(39.8% 0.07 227.392);
+  --chart-4: oklch(82.8% 0.189 84.429);
+  --chart-5: oklch(79.5% 0.184 86.047);
+  /* Run-state colours, derived from the chart ramp so they belong to the same family rather than
+     being invented alongside it. */
+  --live: oklch(59.6% 0.145 163.225);
+  --warn: oklch(66.6% 0.179 58.318);
+}
+
+.dark {
+  --background: oklch(14.5% 0 0);
+  --foreground: oklch(98.5% 0 0);
+  --card: oklch(20.5% 0 0);
+  --card-foreground: #fff;
+  --popover: oklch(14.5% 0 0);
+  --popover-foreground: oklch(98.5% 0 0);
+  --primary: oklch(76.5% 0.177 163.223);
+  --primary-foreground: oklch(26.2% 0.051 172.552);
+  --secondary: oklch(26.9% 0 0);
+  --secondary-foreground: oklch(98.5% 0 0);
+  --muted: oklch(26.9% 0 0);
+  --muted-foreground: oklch(92.2% 0 0);
+  --accent: oklch(37.1% 0 0);
+  --accent-foreground: oklch(98.5% 0 0);
+  --destructive: oklch(70.4% 0.191 22.216);
+  --destructive-foreground: oklch(97.1% 0.013 17.38);
+  --border: color-mix(in oklab, #fff 9%, transparent);
+  --input: color-mix(in oklab, #fff 15%, transparent);
+  --chart-1: oklch(48.8% 0.243 264.376);
+  --chart-2: oklch(72.3% 0.219 149.579);
+  --chart-3: oklch(76.9% 0.188 70.08);
+  --chart-4: oklch(62.7% 0.265 303.9);
+  --chart-5: oklch(64.5% 0.246 16.439);
+  --live: oklch(72.3% 0.219 149.579);
+  --warn: oklch(76.9% 0.188 70.08);
+}
+
+/* Exposes the tokens to Tailwind, so `bg-card` and friends work as they do in Care UI itself. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-live: var(--live);
+  --color-warn: var(--warn);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+@layer base {
+  * { border-color: var(--border); }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    /* Care UI describes its type scale as "tuned for clinical density" — 14px base with a tight
+       rhythm, which is also what a fleet table full of numbers wants. */
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+}

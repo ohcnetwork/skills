@@ -61,12 +61,33 @@ export interface DerivedPaths {
 /** The (repo, main checkout, worktree, run dir) convention, derived from a branch + optional overrides.
  *  Shared by the terminal front (`plan`/`run`) and `cmdStart` so both stages resolve to the SAME run dir
  *  + worktree for a given branch — the single source of the convention, so it can't drift between them. */
+/** Exported because the supervisor derives the same directory the child will, from a queue row
+ *  rather than from flags — two copies would have the service checking one path's lock while the
+ *  child takes another's. */
+export function runSlug(repo: string, branch: string): string {
+  const name = repo.split("/")[1] ?? repo;
+  return `${name}-${branch.replace(/\//g, "-")}`;
+}
+
+/**
+ * Flag, then environment, then a laptop-shaped default. The environment rung exists for the deployed
+ * service, where `~/Desktop` is nonsense — these are properties of the MACHINE rather than of a run,
+ * so the unit sets them declaratively and the supervisor never has to know them.
+ */
+function pathRoots(): { main: string; worktrees: string } {
+  const desktop = join(homedir(), "Desktop");
+  return {
+    main: process.env.CARE_MAIN_REPO?.trim() || join(desktop, "care_fe"),
+    worktrees: process.env.CARE_WORKTREE_ROOT?.trim() || desktop,
+  };
+}
+
 export function derivePaths(branch: string, flags: Flags): DerivedPaths {
   const repo = typeof flags.repo === "string" ? flags.repo : "ohcnetwork/care_fe";
-  const name = repo.split("/")[1];
-  const slug = `${name}-${branch.replace(/\//g, "-")}`;
-  const mainRepoPath = typeof flags.main === "string" ? flags.main : join(homedir(), "Desktop/care_fe");
-  const worktree = typeof flags.worktree === "string" ? flags.worktree : join(homedir(), `Desktop/${slug}`);
+  const slug = runSlug(repo, branch);
+  const roots = pathRoots();
+  const mainRepoPath = typeof flags.main === "string" ? flags.main : roots.main;
+  const worktree = typeof flags.worktree === "string" ? flags.worktree : join(roots.worktrees, slug);
   const runDir = typeof flags["run-dir"] === "string" ? flags["run-dir"] : join(SKILL_DIR, "runs", slug);
   return { repo, mainRepoPath, worktree, runDir };
 }

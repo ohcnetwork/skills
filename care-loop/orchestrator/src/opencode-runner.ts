@@ -100,6 +100,10 @@ const JUDGMENT_PERMISSION = {
   bash: "deny",
   webfetch: "deny",
   external_directory: "allow",
+  // opencode's default is "ask": three identical tool calls in one step raise a prompt no one can answer,
+  // and the session sits silent until the watchdog kills it (probed 2026-09-11). "deny" fails the whole
+  // session instead. Our deadline and inactivity watchdog already bound a runaway loop.
+  doom_loop: "allow",
 } as const;
 
 // Edit-enabled permission for the END-OF-RUN DOCTOR only (auto-doctor.ts). Unlike judgment roles, the
@@ -114,6 +118,7 @@ const DOCTOR_PERMISSION = {
   bash: "deny",
   webfetch: "deny",
   external_directory: "allow",
+  doom_loop: "allow", // see JUDGMENT_PERMISSION
 } as const;
 
 // Transport model: `session.prompt` (POST /session/{id}/message) is a BLOCKING request — the server
@@ -238,6 +243,10 @@ export async function driveToCompletion(
     settle = res;
     fail = rej;
   });
+  // `done` can be rejected before anything awaits it: by a timer while promptAsync is still in flight,
+  // or by the pump once a failed promptAsync has aborted the stream. Node treats that as an unhandled
+  // rejection and exits the process, so mark it handled here; `await done` below still sees the failure.
+  done.catch(() => {});
 
   const deadline = setTimeout(() => {
     // Stop the server-side run (best-effort) so a hung/slow spawn stops accruing cost, then reject.
@@ -310,7 +319,17 @@ export async function driveToCompletion(
   })();
 
   try {
-    await client.session.promptAsync({ path: { id: sessionId }, body });
+    const sent = await client.session.promptAsync({
+      path: { id: sessionId },
+      body,
+    });
+    // The SDK returns an HTTP failure as `{ error, response }` rather than throwing. Unchecked, a refused
+    // prompt never runs, nothing goes idle, and the refusal surfaced 90s later as a "stalled" error.
+    if (sent?.error) {
+      throw new Error(
+        `opencode promptAsync failed (HTTP ${sent.response?.status ?? "?"}): ${JSON.stringify(sent.error).slice(0, 300)}`,
+      );
+    }
     await done;
   } finally {
     clearTimeout(deadline);
@@ -339,16 +358,12 @@ export async function driveToCompletion(
   return msg?.info ?? msg;
 }
 
-/** Generic structured spawn: one model-pinned opencode session that returns JSON matching `schema`,
- *  driven over the async transport (driveToCompletion). The single opencode transport used by every
- *  role skill; the per-role shape is the caller's schema. No retry ladder — startOpencodeOnFreePort
- *  handles server-startup races, the SSE bus auto-reconnects transient drops, and a real failure
- *  (session.error / timeout) fails fast and journaled rather than silently re-running an expensive spawn. */
-/** A transport STALL (inactivity watchdog fired), a dropped connection, or a server-start race — all
- *  transient, all fixed by re-running the whole spawn on a FRESH server. A genuine model/schema failure
- *  does NOT match and propagates immediately (fail fast + journaled, never loop on a real error). */
+/** A transport STALL (inactivity watchdog fired), a dropped connection, a server-start race, or a 5xx
+ *  from promptAsync — all transient, all fixed by re-running the whole spawn on a FRESH server. A genuine
+ *  model/schema failure, or a 4xx (the same request would be refused again), does NOT match and
+ *  propagates immediately (fail fast + journaled, never loop on a real error). */
 const STALL_RE =
-  /stalled|fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Server exited|EADDRINUSE|other side closed|terminated/i;
+  /stalled|fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Server exited|EADDRINUSE|other side closed|terminated|HTTP 5\d\d/i;
 async function withStallRetry<T>(
   fn: () => Promise<T>,
   attempts = 2,
@@ -367,6 +382,115 @@ async function withStallRetry<T>(
   throw lastErr;
 }
 
+/** What a structured spawn returns: the schema-valid output, the engine opencode reports having run
+ *  (for the model-pin cross-check), and the best-effort cost summed over the session's turns. */
+export interface StructuredResult {
+  data: any;
+  modelReported: string | undefined;
+  modelPinSatisfied: boolean;
+  cost?: SpawnCost;
+}
+
+/** One turn of a structured session; `label` names it in error messages. */
+interface Turn {
+  system: string;
+  parts: unknown[];
+  label?: string;
+}
+
+/**
+ * The session every structured spawn runs: a fresh server, one model-pinned session, an optional
+ * agentic `explore` turn with NO `format`, then the `emit` turn WITH `format` — same session, same
+ * model (why two turns: promptAgenticThenStructured). Driven over the async transport
+ * (driveToCompletion). No retry ladder: startOpencodeOnFreePort handles server-startup races, the SSE
+ * bus auto-reconnects transient drops, and a real failure (session.error / timeout / no structured
+ * output) fails fast and journaled. Whether a transport stall is retried is the caller's call.
+ */
+async function runStructuredSession(
+  s: {
+    permission: object;
+    tools: Record<string, boolean>;
+    title: string;
+    providerID: string;
+    modelID: string;
+    timeoutMs?: number;
+    explore?: Turn;
+    emit: Turn;
+  },
+  schema: object,
+): Promise<StructuredResult> {
+  const oc = await startOpencodeOnFreePort({
+    permission: s.permission,
+    tools: s.tools,
+  });
+  const timeoutMs = s.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
+  const model = { providerID: s.providerID, modelID: s.modelID };
+  try {
+    const session = unwrap<any>(
+      await oc.client.session.create({ body: { title: s.title } }),
+    );
+    const sessionId = session.id ?? session.sessionID;
+    if (!sessionId) throw new Error("opencode: session.create returned no id");
+
+    let exploreCost: SpawnCost | undefined;
+    if (s.explore) {
+      const info = await driveToCompletion(
+        oc.client,
+        sessionId,
+        { model, system: s.explore.system, parts: s.explore.parts },
+        timeoutMs,
+      );
+      if (info?.error?.name) {
+        throw new Error(
+          `opencode ${s.explore.label} turn error: ${info.error.name}: ${info.error.message ?? "unknown"}`,
+        );
+      }
+      exploreCost = extractCost(info);
+    }
+
+    // `format` (structured output) is in the runtime API + docs but missing from this SDK version's
+    // published body type, so the body is cast. Proven live (spike-reviewer + probe-async-prompt).
+    const info = await driveToCompletion(
+      oc.client,
+      sessionId,
+      {
+        model,
+        system: s.emit.system,
+        parts: s.emit.parts,
+        format: { type: "json_schema", schema },
+      },
+      timeoutMs,
+    );
+    if (info?.error?.name === "StructuredOutputError") {
+      throw new Error(
+        `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
+      );
+    }
+    const structured = info?.structured ?? info?.structured_output;
+    if (structured == null) {
+      const turn = s.emit.label ? ` on ${s.emit.label} turn` : "";
+      throw new Error(
+        `opencode returned no structured output${turn}. info keys: ${Object.keys(info ?? {}).join(", ")}`,
+      );
+    }
+    const modelReported: string | undefined =
+      info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
+    return {
+      data: structured,
+      modelReported,
+      modelPinSatisfied: modelReported
+        ? modelReported.includes(s.modelID)
+        : true,
+      cost: sumCost(exploreCost, extractCost(info)),
+    };
+  } finally {
+    await oc.server?.close?.();
+  }
+}
+
+/** One-turn structured spawn: a model-pinned session whose single turn returns JSON matching `schema`.
+ *  Suited to a role that reasons from inline inputs; one that must explore first uses
+ *  promptAgenticThenStructured. A transport stall is retried once on a fresh server. */
 export async function promptStructured(
   spec: {
     role: string;
@@ -379,33 +503,7 @@ export async function promptStructured(
     tools?: Record<string, boolean>;
   },
   schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  return withStallRetry(() => promptStructuredImpl(spec, schema));
-}
-
-async function promptStructuredImpl(
-  spec: {
-    role: string;
-    providerID: string;
-    modelID: string;
-    system: string;
-    task: string;
-    round: number;
-    timeoutMs?: number;
-    tools?: Record<string, boolean>;
-  },
-  schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
+): Promise<StructuredResult> {
   // `tools: { task: false }` disables the subagent-spawn tool for judgment spawns. SSE-traced: the
   // planner recon spent ~90s of a 146s run inside two serial `task` subagents (each its own slow agentic
   // loop) — pure latency the planner doesn't need (direct batched grep/glob/read is faster). Harmless for
@@ -413,59 +511,23 @@ async function promptStructuredImpl(
   // planner prompt, this is the "explore in parallel like Claude Code" fix (no index, no accuracy loss).
   // A caller may pass its own `spec.tools` to gate further — the reviewer passes NO_EXPLORE_TOOLS so a
   // structured-output spawn can't enter the format+tools serial-tool death-spiral (see NO_EXPLORE_TOOLS).
-  const oc = await startOpencodeOnFreePort({
-    permission: JUDGMENT_PERMISSION,
-    tools: spec.tools ?? { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({
-        body: { title: `${spec.role} r${spec.round}` },
-      }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // `format` (structured output) is in the runtime API + docs but missing from this SDK version's
-    // published body type, so the body is cast. Proven live (spike-reviewer + probe-async-prompt).
-    const info = await driveToCompletion(
-      oc.client,
-      sessionId,
+  return withStallRetry(() =>
+    runStructuredSession(
       {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.system,
-        parts: [{ type: "text", text: spec.task }],
-        format: { type: "json_schema", schema },
+        permission: JUDGMENT_PERMISSION,
+        tools: spec.tools ?? { task: false },
+        title: `${spec.role} r${spec.round}`,
+        providerID: spec.providerID,
+        modelID: spec.modelID,
+        timeoutMs: spec.timeoutMs,
+        emit: {
+          system: spec.system,
+          parts: [{ type: "text", text: spec.task }],
+        },
       },
-      timeoutMs,
-    );
-
-    if (info?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${info.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = info?.structured ?? info?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output. info keys: ${Object.keys(info ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      info?.modelID ?? info?.model?.modelID ?? info?.providerModel;
-    const modelPinSatisfied = modelReported
-      ? modelReported.includes(spec.modelID)
-      : true;
-    return {
-      data: structured,
-      modelReported,
-      modelPinSatisfied,
-      cost: extractCost(info),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+      schema,
+    ),
+  );
 }
 
 /** Sum two best-effort SpawnCosts (either may be undefined) into one, so a two-turn spawn reports the
@@ -548,111 +610,40 @@ export async function promptAgenticThenStructured(
     round: number;
     timeoutMs?: number;
     attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
+    tools?: Record<string, boolean>; // default { task: false }; NO_EXPLORE_TOOLS when every input is inline
   },
   schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  return withStallRetry(() => promptAgenticThenStructuredImpl(spec, schema));
-}
-
-async function promptAgenticThenStructuredImpl(
-  spec: {
-    role: string;
-    providerID: string;
-    modelID: string;
-    reconSystem: string; // Turn A — agentic exploration prompt (no format)
-    task: string; // Turn A — user message
-    emitSystem: string; // Turn B — "emit as JSON, don't explore further"
-    emitInstruction: string; // Turn B — user message
-    round: number;
-    timeoutMs?: number;
-    attachments?: PromptAttachment[]; // images sent as file parts on Turn A (recon)
-  },
-  schema: object,
-): Promise<{
-  data: any;
-  modelReported: string | undefined;
-  modelPinSatisfied: boolean;
-  cost?: SpawnCost;
-}> {
-  const oc = await startOpencodeOnFreePort({
-    permission: JUDGMENT_PERMISSION,
-    tools: { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({
-        body: { title: `${spec.role} r${spec.round}` },
-      }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // Turn A — AGENTIC recon, NO `format`. This is the whole fix: let the tool loop run unconstrained.
-    // Any ticket images ride here as `file` parts (probed to reach the model on Copilot) so recon forms
-    // its understanding WITH the mockups/screenshots. Empty attachments ⇒ byte-identical text-only path.
-    const reconInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
+): Promise<StructuredResult> {
+  return withStallRetry(() =>
+    runStructuredSession(
       {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.reconSystem,
-        parts: [
-          { type: "text", text: spec.task },
-          ...fileParts(spec.attachments),
-        ],
+        permission: JUDGMENT_PERMISSION,
+        tools: spec.tools ?? { task: false },
+        title: `${spec.role} r${spec.round}`,
+        providerID: spec.providerID,
+        modelID: spec.modelID,
+        timeoutMs: spec.timeoutMs,
+        // Turn A — AGENTIC recon, NO `format`. This is the whole fix: let the tool loop run unconstrained.
+        // Any ticket images ride here as `file` parts (probed to reach the model on Copilot) so recon forms
+        // its understanding WITH the mockups/screenshots. Empty attachments ⇒ byte-identical text-only path.
+        explore: {
+          label: "recon",
+          system: spec.reconSystem,
+          parts: [
+            { type: "text", text: spec.task },
+            ...fileParts(spec.attachments),
+          ],
+        },
+        // Turn B — SAME warm session, WITH `format`. No exploration left: it serialises Turn A's findings.
+        emit: {
+          label: "emit",
+          system: spec.emitSystem,
+          parts: [{ type: "text", text: spec.emitInstruction }],
+        },
       },
-      timeoutMs,
-    );
-    if (reconInfo?.error?.name) {
-      throw new Error(
-        `opencode recon turn error: ${reconInfo.error.name}: ${reconInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const reconCost = extractCost(reconInfo);
-
-    // Turn B — SAME warm session, WITH `format`. No exploration left: it serialises Turn A's findings.
-    const emitInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
-        system: spec.emitSystem,
-        parts: [{ type: "text", text: spec.emitInstruction }],
-        format: { type: "json_schema", schema },
-      },
-      timeoutMs,
-    );
-    if (emitInfo?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${emitInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = emitInfo?.structured ?? emitInfo?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output on emit turn. info keys: ${Object.keys(emitInfo ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      emitInfo?.modelID ?? emitInfo?.model?.modelID ?? emitInfo?.providerModel;
-    const modelPinSatisfied = modelReported
-      ? modelReported.includes(spec.modelID)
-      : true;
-    return {
-      data: structured,
-      modelReported,
-      modelPinSatisfied,
-      cost: sumCost(reconCost, extractCost(emitInfo)),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+      schema,
+    ),
+  );
 }
 
 /**
@@ -676,69 +667,32 @@ export async function driveDoctorSpawn(
   },
   schema: object,
 ): Promise<{ data: any; modelReported: string | undefined; cost?: SpawnCost }> {
-  const oc = await startOpencodeOnFreePort({
-    permission: DOCTOR_PERMISSION,
-    tools: { task: false },
-  });
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  try {
-    const session = unwrap<any>(
-      await oc.client.session.create({ body: { title: "auto-doctor" } }),
-    );
-    const sessionId = session.id ?? session.sessionID;
-    if (!sessionId) throw new Error("opencode: session.create returned no id");
-
-    // Turn A — agentic + EDIT. The model reads the run dir and writes its file changes here.
-    const editInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
+  // Not wrapped in withStallRetry: Turn A edits files in place, and a retry would re-run it over a
+  // partially edited tree.
+  const { data, modelReported, cost } = await runStructuredSession(
+    {
+      permission: DOCTOR_PERMISSION,
+      tools: { task: false },
+      title: "auto-doctor",
+      providerID: spec.providerID,
+      modelID: spec.modelID,
+      timeoutMs: spec.timeoutMs,
+      // Turn A — agentic + EDIT. The model reads the run dir and writes its file changes here.
+      explore: {
+        label: "doctor edit",
         system: spec.editSystem,
         parts: [{ type: "text", text: spec.editInstruction }],
       },
-      timeoutMs,
-    );
-    if (editInfo?.error?.name) {
-      throw new Error(
-        `opencode doctor edit turn error: ${editInfo.error.name}: ${editInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const editCost = extractCost(editInfo);
-
-    // Turn B — SAME session, structured emit of the manifest describing what it just did.
-    const emitInfo = await driveToCompletion(
-      oc.client,
-      sessionId,
-      {
-        model: { providerID: spec.providerID, modelID: spec.modelID },
+      // Turn B — SAME session, structured emit of the manifest describing what it just did.
+      emit: {
+        label: "doctor emit",
         system: spec.emitSystem,
         parts: [{ type: "text", text: spec.emitInstruction }],
-        format: { type: "json_schema", schema },
       },
-      timeoutMs,
-    );
-    if (emitInfo?.error?.name === "StructuredOutputError") {
-      throw new Error(
-        `opencode StructuredOutputError after retries: ${emitInfo.error.message ?? "unknown"}`,
-      );
-    }
-    const structured = emitInfo?.structured ?? emitInfo?.structured_output;
-    if (structured == null) {
-      throw new Error(
-        `opencode returned no structured output on doctor emit turn. info keys: ${Object.keys(emitInfo ?? {}).join(", ")}`,
-      );
-    }
-    const modelReported: string | undefined =
-      emitInfo?.modelID ?? emitInfo?.model?.modelID ?? emitInfo?.providerModel;
-    return {
-      data: structured,
-      modelReported,
-      cost: sumCost(editCost, extractCost(emitInfo)),
-    };
-  } finally {
-    await oc.server?.close?.();
-  }
+    },
+    schema,
+  );
+  return { data, modelReported, cost };
 }
 
 export async function runJudgmentSpawn(spec: SpawnSpec): Promise<SpawnOutcome> {
@@ -757,293 +711,4 @@ export async function runJudgmentSpawn(spec: SpawnSpec): Promise<SpawnOutcome> {
     cost,
     sessionId: "",
   };
-}
-
-// ── forkedFanOut — run-scoped warm fan-out (PLAN-forked-fanout.md) ────────────────────────────────
-// N independent structured judgments over ONE large shared context, fired within the prompt-cache
-// TTL: warm a base session with `base.system` (+ optional big `base.context`) ONCE → `cacheWrite`;
-// `session.fork` per map task so each inherits that warm prefix (`cacheRead`, verified live 2026-07-15)
-// and stays isolated from sibling forks; optional reduce off the same base. One server per call (one
-// port, killable-on-hang deadline), so no persistent-pool / Tier-A prerequisite. Consumers: the
-// triager (per file-cluster) and — later — the care-review lenses. `map.model` is what the prefix is
-// warmed under, so map forks read the cache; a `reduce.model` that differs runs cold vs the base
-// prefix (fine — reduce reads no code).
-
-export interface FanOutTask {
-  id: string;
-  prompt: string; // the ONLY per-fork-unique text; the shared prefix lives in base.system/context
-}
-export interface FanOutCache {
-  read?: number;
-  write?: number;
-}
-export interface FanOutMapResult {
-  id: string;
-  data: any; // null when error is set (the fork failed after retries)
-  error?: string; // degrade-and-flag (PLAN-forked-fanout.md §6): one bad fork never aborts the run
-  modelReported?: string;
-  cost?: SpawnCost;
-  cache: FanOutCache;
-  ms: number; // wall time of this fork (fork + prompt), for the parallel-vs-serial check
-}
-export interface ForkedFanOutSpec {
-  provider: string; // e.g. "github-copilot"
-  base: { system: string; context?: string };
-  map: {
-    model: string;
-    schema: object;
-    tasks: FanOutTask[];
-    forkTimeoutMs?: number;
-  };
-  reduce?: {
-    model: string;
-    schema: object;
-    prompt: (results: FanOutMapResult[]) => string;
-    timeoutMs?: number; // hard cap for the reduce spawn (default 90_000); the reduce runs cold vs the
-    // warm base prefix when reduce.model differs from map.model, so a large diff + judgment-tier model
-    // can legitimately exceed 90s — give it headroom rather than degrade-and-flatten.
-  };
-  concurrency?: number; // fork cap (default 5)
-  timeoutMs?: number; // run-scoped wall-clock deadline
-}
-export interface ForkedFanOutResult {
-  map: FanOutMapResult[];
-  reduce?: { data: any; cost?: SpawnCost; cache: FanOutCache };
-  baseCache: FanOutCache;
-  baseMs: number; // warm-up duration (serial, before the fan-out) — separates warm cost from map parallelism
-}
-
-function cacheTokens(res: any): FanOutCache {
-  const info = res?.info ?? res;
-  const c = info?.tokens?.cache ?? {};
-  return {
-    read: typeof c.read === "number" ? c.read : undefined,
-    write: typeof c.write === "number" ? c.write : undefined,
-  };
-}
-
-/** Fork the warm base and run one map task over the async transport (driveToCompletion). Single
- *  attempt: on ANY failure it degrades-and-flags (returns { data: null, error }) so one bad fork never
- *  aborts the fan-out. No retry — the SSE bus auto-reconnects transient drops, and a real fork failure
- *  is terminal for this fork only, not the run. */
-async function fanOutMapOne(
-  oc: Awaited<ReturnType<typeof createOpencode>>,
-  baseId: string,
-  system: string,
-  spec: ForkedFanOutSpec,
-  task: FanOutTask,
-): Promise<FanOutMapResult> {
-  const forkTimeoutMs = spec.map.forkTimeoutMs ?? 45_000;
-  const started = Date.now();
-  try {
-    const fk = unwrap<any>(
-      await oc.client.session.fork({ path: { id: baseId } } as any),
-    );
-    const forkId = fk.id ?? fk.sessionID;
-    if (!forkId) throw new Error("session.fork returned no id");
-    const info = await driveToCompletion(
-      oc.client,
-      forkId,
-      {
-        model: { providerID: spec.provider, modelID: spec.map.model },
-        system,
-        parts: [{ type: "text", text: task.prompt }],
-        format: { type: "json_schema", schema: spec.map.schema },
-      },
-      forkTimeoutMs,
-    );
-    const structured = info?.structured ?? info?.structured_output;
-    if (structured == null) throw new Error("no structured output");
-    return {
-      id: task.id,
-      data: structured,
-      modelReported:
-        info?.modelID ?? info?.model?.modelID ?? info?.providerModel,
-      cost: extractCost(info),
-      cache: cacheTokens(info),
-      ms: Date.now() - started,
-    };
-  } catch (e) {
-    return {
-      id: task.id,
-      data: null,
-      error: String((e as Error)?.message ?? e).slice(0, 160),
-      cache: {},
-      ms: Date.now() - started,
-    };
-  }
-}
-
-export async function forkedFanOut(
-  spec: ForkedFanOutSpec,
-): Promise<ForkedFanOutResult> {
-  const concurrency = Math.max(1, spec.concurrency ?? 5);
-  const timeoutMs = spec.timeoutMs ?? JUDGMENT_TIMEOUT_MS;
-  // The shared prefix MUST be byte-identical across the base warm-up and every fork prompt — that
-  // identity is what earns the cacheRead. The big context rides in `system` (verified path).
-  const system = spec.base.context
-    ? `${spec.base.system}\n\n=== SHARED CONTEXT (read-only) ===\n${spec.base.context}\n=== END SHARED CONTEXT ===`
-    : spec.base.system;
-
-  // Start the shared server with a bounded timeout — `createOpencode` spawns an opencode subprocess
-  // and waits for it to be ready; if the subprocess hangs at startup (observed: 15-min stall when
-  // called right after a large parallel fan-out exhausted Copilot connections), this blocks forever.
-  // 30s is generous — normal startup is 1-2s.
-  const startServer = () =>
-    Promise.race([
-      startOpencodeOnFreePort({
-        permission: JUDGMENT_PERMISSION,
-        tools: { task: false },
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("opencode server startup timed out")),
-          30_000,
-        ),
-      ),
-    ]);
-  const oc = await startServer();
-  let timedOut = false;
-  const deadline = setTimeout(() => {
-    timedOut = true;
-    void oc.server?.close?.();
-  }, timeoutMs);
-  try {
-    // 1. Warm the base under the MAP model (the model the forks read the cache with). Serial — the
-    //    cacheWrite must land before the forks fan out, or a fork storm races it and misses. Single
-    //    attempt: the base is load-bearing, so a failure here aborts the fan-out (fails fast, journaled)
-    //    — the old server-replacement retry existed to recover from a hung blocking session.prompt,
-    //    which the async transport no longer produces.
-    const baseStart = Date.now();
-    const base = unwrap<any>(
-      await oc.client.session.create({ body: { title: "fanout-base" } }),
-    );
-    const baseId = base.id ?? base.sessionID;
-    if (!baseId) throw new Error("opencode: session.create returned no id");
-    const warm = await driveToCompletion(
-      oc.client,
-      baseId,
-      {
-        model: { providerID: spec.provider, modelID: spec.map.model },
-        system,
-        parts: [
-          {
-            type: "text",
-            text: "Acknowledge the shared context above with the single word READY.",
-          },
-        ],
-      },
-      90_000,
-    );
-    const baseCache: FanOutCache = cacheTokens(warm);
-    const baseMs = Date.now() - baseStart;
-    console.log(
-      `[forkedFanOut] base warm-up: ${baseMs}ms, cache=${JSON.stringify(baseCache)}`,
-    );
-
-    // 2. Map — task[0] runs as a serial "prime" fork, then the rest fan out in parallel. The prime
-    //    serves a dual purpose: it does useful work (verifies its cluster) AND gives the prompt cache
-    //    ~5-6s to propagate after the base warm-up. Without this delay, ~50% of concurrent forks miss
-    //    the cache (measured 2026-07-16: skip-prime run had 2/4 forks at read=0). With the prime,
-    //    all parallel forks consistently get cacheRead. The prime itself always misses (read=0) —
-    //    its value is the propagation window it creates, not its own cache hit.
-    const tasks = spec.map.tasks;
-    const results: FanOutMapResult[] = new Array(tasks.length);
-    const mapStart = Date.now();
-    // Pick the shortest prompt as the prime — it completes fastest, giving the cache the same
-    // propagation window with minimal serial wait.
-    const primeIdx = tasks.reduce(
-      (best, t, i) => (t.prompt.length < tasks[best].prompt.length ? i : best),
-      0,
-    );
-    if (tasks.length > 0) {
-      results[primeIdx] = await fanOutMapOne(
-        oc,
-        baseId,
-        system,
-        spec,
-        tasks[primeIdx],
-      );
-      console.log(
-        `[forkedFanOut] prime fork ${tasks[primeIdx].id}: ${results[primeIdx].ms}ms, cache=${JSON.stringify(results[primeIdx].cache)}${results[primeIdx].error ? `, ERR: ${results[primeIdx].error}` : ""}`,
-      );
-    }
-    let cursor = 0;
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        const i = cursor++;
-        if (i >= tasks.length) return;
-        if (i === primeIdx) continue;
-        results[i] = await fanOutMapOne(oc, baseId, system, spec, tasks[i]);
-        console.log(
-          `[forkedFanOut] map fork ${tasks[i].id}: ${results[i].ms}ms, cache=${JSON.stringify(results[i].cache)}${results[i].error ? `, ERR: ${results[i].error}` : ""}`,
-        );
-      }
-    };
-    if (tasks.length > 1)
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, tasks.length - 1) }, worker),
-      );
-    console.log(
-      `[forkedFanOut] map phase: ${Date.now() - mapStart}ms (${tasks.length} forks, 1 prime + ${tasks.length - 1} parallel)`,
-    );
-
-    // 3. Reduce — one fork off the warm base over the map outputs.
-    //    Degrade-and-flag on failure (same pattern as map forks): a failed reduce returns
-    //    reduce=undefined so the consumer can fall back to flattening map results. Without
-    //    this, a transient Copilot failure after a successful map phase kills the entire run.
-    let reduce: ForkedFanOutResult["reduce"];
-    if (spec.reduce) {
-      const reduceStart = Date.now();
-      try {
-        const rfk = unwrap<any>(
-          await oc.client.session.fork({ path: { id: baseId } } as any),
-        );
-        const rid = rfk.id ?? rfk.sessionID;
-        if (!rid) throw new Error("reduce fork returned no id");
-        const rinfo = await driveToCompletion(
-          oc.client,
-          rid,
-          {
-            model: { providerID: spec.provider, modelID: spec.reduce.model },
-            system,
-            parts: [{ type: "text", text: spec.reduce.prompt(results) }],
-            format: { type: "json_schema", schema: spec.reduce.schema },
-          },
-          spec.reduce.timeoutMs ?? 90_000,
-        );
-        reduce = {
-          data: rinfo?.structured ?? rinfo?.structured_output,
-          cost: extractCost(rinfo),
-          cache: cacheTokens(rinfo),
-        };
-      } catch (e) {
-        // Degrade-and-flag: a failed reduce leaves reduce=undefined so the consumer flattens the map
-        // results, rather than a late Copilot failure killing an otherwise-successful run.
-        console.log(
-          `[forkedFanOut] reduce failed, degrading: ${(e as Error).message?.slice(0, 80)}`,
-        );
-      }
-      if (reduce) {
-        console.log(
-          `[forkedFanOut] reduce: ${Date.now() - reduceStart}ms, cache=${JSON.stringify(reduce.cache)}`,
-        );
-      } else {
-        console.log(
-          `[forkedFanOut] reduce DEGRADED after ${Date.now() - reduceStart}ms — consumer will flatten map results`,
-        );
-      }
-    }
-    console.log(`[forkedFanOut] total: ${Date.now() - baseStart}ms`);
-    return { map: results, reduce, baseCache, baseMs };
-  } catch (e) {
-    if (timedOut)
-      throw new Error(
-        `forkedFanOut timed out after ${timeoutMs}ms (embedded server killed)`,
-      );
-    throw e;
-  } finally {
-    clearTimeout(deadline);
-    await oc.server?.close?.();
-  }
 }

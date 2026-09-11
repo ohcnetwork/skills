@@ -17,13 +17,21 @@ import { fileURLToPath } from "node:url";
 import { runCiRounds, type CiRoundsOptions, type CiFixFn } from "../src/ci-round.ts";
 import { Journal } from "../src/journal.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
+import { useRealStore } from "./_store.ts";
 import type { CiConclusion } from "../src/github.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GOLDEN_DIR = join(HERE, "__golden__");
 const UPDATE = process.env.CARE_GOLDEN_UPDATE === "1";
 
-const rd = () => mkdtempSync(join(tmpdir(), "careloopd-golden-"));
+// The DB is authoritative since the §10 cutover: `Journal.read()` queries it and `append()` sources
+// seq/prev/deltaMs from it, so a run without a real store installed reads back empty forever — the
+// seed never lands and `projectAndWrite` throws on an empty journal. A fresh :memory: store per run
+// dir also keeps the scenarios isolated from each other.
+const rd = () => {
+  useRealStore();
+  return mkdtempSync(join(tmpdir(), "careloopd-golden-"));
+};
 const BOTS = [{ name: "a", aliases: ["a[bot]"] }];
 
 const gh = (ci: CiConclusion = "pass", extra: Record<string, unknown> = {}) =>
@@ -56,7 +64,11 @@ function opts(over: Partial<CiRoundsOptions> = {}): CiRoundsOptions {
 
 /** The stable shape of one journal line: everything the driver controls, nothing timing-dependent. */
 function trace(runDir: string): string {
-  const { events } = new Journal(join(runDir, "journal.jsonl"), "x").read();
+  // readReplica(), not read(): since the §10 cutover `read()` queries the DB BY run_id, and
+  // `runCiRounds` mints its own real ULID via `openRun` — the literal "x" here matches nothing, so a
+  // DB read comes back empty and every golden silently compares against an empty stream. The
+  // file replica is the same events, addressed by path rather than by id.
+  const { events } = new Journal(join(runDir, "journal.jsonl"), "x").readReplica();
   return events
     .map((e) => {
       const d = (e.data ?? {}) as Record<string, unknown>;

@@ -10,8 +10,11 @@ import {
   type SpawnResult,
 } from "../src/pipeline.ts";
 import { Journal } from "../src/journal.ts";
+import { openRun } from "../src/run-context.ts";
+import { useRealStore } from "./_store.ts";
 
 function runDir(): string {
+  useRealStore();
   return mkdtempSync(join(tmpdir(), "careloopd-pipe-"));
 }
 
@@ -52,11 +55,12 @@ test("happy path drives 2→3→4a→5 and completes", async () => {
   assert.equal(res.outcome, "complete");
   assert.equal(res.state.step, "5");
 
-  // journal is intact and state.json + loop.log were rendered
+  // journal is intact and state.json + loop.log were rendered — readReplica() inspects the file
+  // directly (§10: read() is DB-backed now and needs the real run_id `openRun` minted internally).
   const { events, truncatedTail } = new Journal(
     join(dir, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.equal(truncatedTail, false);
   assert.ok(events.length > 0);
   assert.ok(existsSync(join(dir, "state.json")));
@@ -67,11 +71,10 @@ test("happy path drives 2→3→4a→5 and completes", async () => {
 
 test("resumeFrom re-enters the build at the interrupted step (no setup/implement re-run), completing 4a→5", async () => {
   const dir = runDir();
-  // Seed a journal as if plan + steps 2/3 already ran and the run crashed entering 4a.
-  const seedJ = new Journal(
-    join(dir, "journal.jsonl"),
-    "ohcnetwork-care_fe-scratch/phase3",
-  );
+  // Seed a journal as if plan + steps 2/3 already ran and the run crashed entering 4a. openRun (not a
+  // raw `new Journal`) so the run_id it mints/caches is the SAME one runHalfPipe's own openRun call
+  // will read back via the `.run_id` cache file (§5).
+  const { journal: seedJ, runId } = openRun(dir);
   seedJ.append({
     event: "run.start",
     step: "1",
@@ -88,6 +91,10 @@ test("resumeFrom re-enters the build at the interrupted step (no setup/implement
         step: "1",
         head_sha: "scratch",
         last_reviewed_sha: "",
+        run_id: runId,
+        requested_by: null,
+        ticket: null,
+        summary: null,
         updated_at: new Date().toISOString(),
       },
     },
@@ -131,13 +138,14 @@ test("resumeFrom re-enters the build at the interrupted step (no setup/implement
   assert.equal(implementCalls, 0);
   assert.ok(!visitedSetup.includes("setup-worktree"));
   // A run.resume event marks the re-entry.
-  const { events } = new Journal(join(dir, "journal.jsonl"), "x").read();
+  const { events } = new Journal(join(dir, "journal.jsonl"), "x").readReplica();
   assert.ok(events.some((e) => e.event === "run.resume"));
 });
 
 test("resumeFrom rejects a non-build step", async () => {
   const dir = runDir();
-  new Journal(join(dir, "journal.jsonl"), "x").append({
+  const { journal: seed, runId } = openRun(dir);
+  seed.append({
     event: "run.start",
     step: "1",
     round: 1,
@@ -153,6 +161,10 @@ test("resumeFrom rejects a non-build step", async () => {
         step: "1",
         head_sha: "scratch",
         last_reviewed_sha: "",
+        run_id: runId,
+        requested_by: null,
+        ticket: null,
+        summary: null,
         updated_at: new Date().toISOString(),
       },
     },
@@ -386,9 +398,9 @@ test("a gate failure is fed back to the re-implement as context", async () => {
 
 test("seeds run.start only when the journal is empty (plan → start continuity)", async () => {
   const dir = runDir();
-  // Simulate the `plan` stage having already seeded this shared journal at step 1.
-  const runId = "ohcnetwork-care_fe-scratch/phase3";
-  const pre = new Journal(join(dir, "journal.jsonl"), runId);
+  // Simulate the `plan` stage having already seeded this shared journal at step 1 — via openRun, so
+  // the run_id it mints/caches is the SAME one runHalfPipe's own openRun call reads back.
+  const { journal: pre, runId } = openRun(dir);
   pre.append({
     event: "run.start",
     step: "1",
@@ -405,6 +417,10 @@ test("seeds run.start only when the journal is empty (plan → start continuity)
         step: "1",
         head_sha: "scratch",
         last_reviewed_sha: "",
+        run_id: runId,
+        requested_by: null,
+        ticket: null,
+        summary: null,
         updated_at: new Date().toISOString(),
       },
     },
@@ -427,7 +443,7 @@ test("seeds run.start only when the journal is empty (plan → start continuity)
   });
   assert.equal(res.outcome, "complete");
 
-  const { events } = new Journal(join(dir, "journal.jsonl"), runId).read();
+  const { events } = new Journal(join(dir, "journal.jsonl"), runId).readReplica();
   // exactly ONE run.start (plan's) — the pipeline did NOT re-seed and fork the projection
   assert.equal(events.filter((e) => e.event === "run.start").length, 1);
   // the pre-existing approval survived, and the pipeline continued the same chain into step 2

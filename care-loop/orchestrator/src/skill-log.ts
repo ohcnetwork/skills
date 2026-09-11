@@ -1,39 +1,33 @@
-// skill-log.ts — Phase-2 observability: the ONE way a skill invocation gets recorded.
+// The one way a skill invocation gets recorded, as a DECORATOR rather than a logger sprinkled through
+// skill bodies: wrap a skill once and every driver path captures it identically.
 //
-// Goal (per the two reasons logs exist): DEBUGGING and SKILL SELF-IMPROVEMENT. Both want the same
-// thing — structured, uniform, per-skill records, not scattered freeform prose. So logging is a
-// DECORATOR around a skill, not a logger sprinkled through skill bodies: wrap a skill once and every
-// invocation on every driver path (roleSpawn, reduceTriage, 6b apply) is captured identically.
-//
-// What it records per call:
-//   • a bounded `skill.invoke` journal event + the INPUT as a content-addressed sidecar (so the doctor
-//     can replay exactly what the skill saw), written BEFORE the call so a crash mid-skill is on record;
-//   • a bounded `skill.result` event (verdict, reason_code, model, duration, counts, artifact refs) +
-//     the full SkillResult envelope as a sidecar — the durable, SDK-independent record the doctor reads.
-// Heavy content lives in the sidecars; the journal only carries bounded fields + {path,sha256} refs, so
-// the hash-chained spine stays lean and one source of truth (see PLAN §5 / the observability contract).
+// Per call it writes a bounded `skill.invoke` event plus the input as a sidecar BEFORE the call, so a
+// crash mid-skill is on record, then a bounded `skill.result` event plus the full envelope. Heavy
+// content lives in the sidecars and in run_artifacts; the journal carries only bounded fields and
+// {path,sha256} refs, so the hash-chained spine stays lean.
 
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Journal, type EventType } from "./journal.js";
+import { getActiveRunStore } from "./run-store.js";
 import type { SkillArtifact, SkillResult } from "./skill-result.js";
 
 const sha256 = (s: string): string =>
   "sha256:" + createHash("sha256").update(s, "utf8").digest("hex");
 
-/** A run-scoped structured logger. `event` appends a bounded journal line; `artifact` writes a
- *  content-addressed sidecar under <run-dir>/skills/ and returns its {name,path,sha256} ref. Kept as
- *  an object (not just the decorator) so the day a genuine second call site appears — e.g. a transport
- *  `skill.retry` breadcrumb — it can emit a STRUCTURED event through the same mechanism, not a freeform
- *  channel. No such consumer exists yet; the decorator is the only user today. */
+/** `event` appends a bounded journal line; `artifact` writes a sidecar under <run-dir>/skills/ and
+ *  returns its ref. An object rather than just the decorator, so a future second call site emits a
+ *  structured event through the same mechanism instead of a freeform channel. */
 export interface SkillLogger {
   event(
     type: EventType,
     data: Record<string, unknown>,
     opts?: { step?: string; round?: number; costUsd?: number },
   ): void;
-  artifact(relName: string, content: string): SkillArtifact;
+  /** Takes a VALUE, not a pre-serialized string, so the sidecar text and the db's jsonb encoding
+   *  cannot disagree and "every artifact is valid JSON" is structural rather than a convention. */
+  artifact(relName: string, value: unknown): SkillArtifact;
 }
 
 export function makeSkillLogger(opts: {
@@ -44,11 +38,8 @@ export function makeSkillLogger(opts: {
   const skillsDir = join(opts.runDir, "skills");
   return {
     event(type, data, o) {
-      // Stamp cumulative cost when a call reports usd (IMP-14 → rubric dim 3): scan backwards
-      // through the journal for the last event that actually carries cost_cum (not just head(),
-      // which may be a step.enter or similar that has no cost field) and add this call's spend.
-      // Scanning the tail keeps the total correct even across the two loggers one run creates
-      // (plan stage + build stage), each with its own closure.
+      // Scans back for the last event actually carrying cost_cum — head() may be a step.enter with
+      // no cost field — which also keeps the total right across the two loggers a run creates.
       let cost_cum: { usd_est: number } | undefined;
       if (typeof o?.costUsd === "number") {
         const { events } = journal.read();
@@ -64,14 +55,21 @@ export function makeSkillLogger(opts: {
         cost_cum,
       });
     },
-    artifact(relName, content) {
+    artifact(relName, value) {
+      // One serialization for all three of the sidecar file, the hash, and the db encoding.
+      const content = JSON.stringify(value, null, 2);
       mkdirSync(skillsDir, { recursive: true });
       writeFileSync(join(skillsDir, relName), content);
-      return {
+      const ref = {
         name: relName.replace(/\.[^.]+$/, ""),
         path: `skills/${relName}`,
         sha256: sha256(content),
       };
+      // The service reads the database and nothing else, so the body has to be reachable there too.
+      // Fatal on failure, like the event append beside it: a silently-missing artifact would be
+      // repaired invisibly by the next reindex, masking a real db fault.
+      getActiveRunStore().putArtifact(opts.runId, { ...ref, content });
+      return ref;
     },
   };
 }
@@ -91,11 +89,8 @@ function deriveCounts(res: SkillResult): Record<string, number> | undefined {
   return undefined;
 }
 
-/**
- * Wrap a skill so every invocation is logged (input+output+timing) with zero per-skill code. Returns
- * a function of the SAME type, so it's a drop-in in default-wiring. Errors are recorded as a
- * `skill.result{terminal_state:"failed"}` then re-thrown (a crashed skill stays on the record).
- */
+/** Returns a function of the SAME type, so it is a drop-in in default-wiring. A thrown error is
+ *  recorded as `skill.result{terminal_state:"failed"}` and re-thrown, so a crash stays on record. */
 export function withSkillLog<
   I extends { runDir: string; round: number; step?: string },
   P,
@@ -107,10 +102,7 @@ export function withSkillLog<
   return async (input) => {
     const round = input.round;
     const step = input.step;
-    const inputRef = logger.artifact(
-      `${name}-r${round}.input.json`,
-      JSON.stringify(input, null, 2),
-    );
+    const inputRef = logger.artifact(`${name}-r${round}.input.json`, input);
     logger.event(
       "skill.invoke",
       { skill: name, input: inputRef },
@@ -123,10 +115,7 @@ export function withSkillLog<
       const durationMs = Date.now() - t0;
       const artifacts: SkillArtifact[] = [
         inputRef,
-        logger.artifact(
-          `${name}-r${round}.result.json`,
-          JSON.stringify({ ...res, durationMs }, null, 2),
-        ),
+        logger.artifact(`${name}-r${round}.result.json`, { ...res, durationMs }),
       ];
       logger.event(
         "skill.result",

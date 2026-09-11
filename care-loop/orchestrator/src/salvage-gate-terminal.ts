@@ -15,6 +15,7 @@
 // readline wrapper (`terminalGateIo`) is the thin transport, mirroring gate-terminal.ts.
 
 import { createInterface } from "node:readline/promises";
+import { askOrFail } from "./gate-terminal.js";
 import { stdin as processStdin, stdout as processStdout } from "node:process";
 import type { Readable, Writable } from "node:stream";
 import type { SalvageApproval, SalvageGate, SalvageGateInput } from "./adopt.js";
@@ -33,7 +34,9 @@ export function terminalGateIo(
   const output = io.output ?? processStdout;
   const rl = createInterface({ input, output, terminal: false });
   return {
-    ask: (prompt: string) => rl.question(prompt),
+    // Fails rather than hangs when stdin is closed — see askOrFail. A salvage run spawned without a
+    // TTY would otherwise print the approval prompt and stop there forever.
+    ask: askOrFail(rl),
     write: (s: string) => void output.write(s),
     close: () => rl.close(),
   };

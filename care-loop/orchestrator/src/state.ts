@@ -5,8 +5,10 @@
 // tooling read the emitted state.json, whose shape is unchanged.
 
 import { renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { JournalEvent } from "./journal.js";
+import { backfillRunId, isValidRunId } from "./run-id.js";
+import { getActiveRunStore, rollupsFromEvents } from "./run-store.js";
 
 // Canonical step vocabulary — single-sourced here (this module is the sole state writer).
 export const STEP_VOCAB = [
@@ -32,6 +34,19 @@ export const STEP_VOCAB = [
 ] as const;
 export type Step = (typeof STEP_VOCAB)[number];
 
+/** `satisfies` is the point: renaming a step in STEP_VOCAB stops this compiling rather than silently
+ *  leaving a set of strings that match nothing. Single-sourced because the fleet query, the API, and
+ *  the frontend all ask "is this run finished?". */
+export const TERMINAL_STEPS = [
+  "7",
+  "merged",
+  "aborted",
+] as const satisfies readonly Step[];
+
+export function isTerminalStep(step: string): boolean {
+  return (TERMINAL_STEPS as readonly string[]).includes(step);
+}
+
 export const TIERS = ["trivial", "standard", "complex"] as const;
 export type Tier = (typeof TIERS)[number];
 
@@ -48,6 +63,11 @@ export const KEY_ORDER = [
   "head_sha",
   "last_reviewed_sha",
   "updated_at",
+  "run_id",
+  "requested_by",
+  "ticket",
+  "summary",
+  "started_at",
 ] as const;
 
 export interface CareState {
@@ -62,6 +82,11 @@ export interface CareState {
   head_sha: string;
   last_reviewed_sha: string;
   updated_at: string;
+  run_id: string; // ULID, minted once at run.start (run-id.ts); stable PK for the run-store projection
+  requested_by: string | null; // GitHub login; null for a local CLI run
+  ticket: string | null; // ENG-### — promoted here so it projects into the row (was event-only)
+  summary: string | null; // PR-title summary — ditto
+  started_at: string; // ISO — events[0].ts, set by projectState
 }
 
 export class StateValidationError extends Error {}
@@ -83,11 +108,25 @@ export function validateState(s: Partial<CareState>): CareState {
     fail(`pr must be an integer or null, got ${s.pr}`);
   if (s.round !== undefined && !Number.isInteger(s.round))
     fail(`round must be an integer, got ${s.round}`);
+  if (
+    s.requested_by !== undefined &&
+    s.requested_by !== null &&
+    typeof s.requested_by !== "string"
+  )
+    fail(`requested_by must be a string or null, got ${s.requested_by}`);
+  if (s.run_id !== undefined && !isValidRunId(s.run_id))
+    fail(`run_id '${s.run_id}' is not a valid run id`);
+
+  const branch = s.branch ?? "unknown";
+  const startedAt = s.started_at ?? s.updated_at ?? new Date().toISOString();
+  // A journal predating run_id folds no `run_id` patch, so this derives the same id every time it
+  // is projected — live resume and `reindex` land on it identically, with no special-casing.
+  const runId = s.run_id ?? backfillRunId(startedAt, `${s.repo}-${branch}`);
 
   const full: CareState = {
     task: s.task!,
     repo: s.repo!,
-    branch: s.branch ?? "unknown",
+    branch,
     worktree: s.worktree ?? "unknown",
     tier: s.tier ?? "standard",
     pr: s.pr ?? null,
@@ -96,6 +135,11 @@ export function validateState(s: Partial<CareState>): CareState {
     head_sha: s.head_sha ?? "unknown",
     last_reviewed_sha: s.last_reviewed_sha ?? "",
     updated_at: s.updated_at ?? new Date().toISOString(),
+    run_id: runId,
+    requested_by: s.requested_by ?? null,
+    ticket: s.ticket ?? null,
+    summary: s.summary ?? null,
+    started_at: startedAt,
   };
   // Reject ad-hoc keys (schema drift — IMP-3).
   const extra = Object.keys(s).filter(
@@ -127,7 +171,7 @@ export function projectState(events: JournalEvent[]): CareState {
     throw new StateValidationError(
       "cannot project state from an empty journal",
     );
-  let acc: StatePatch = {};
+  let acc: StatePatch = { started_at: events[0].ts };
   for (const ev of events) {
     const patch = patchOf(ev);
     if (patch) acc = { ...acc, ...patch };
@@ -137,6 +181,10 @@ export function projectState(events: JournalEvent[]): CareState {
     }
     acc.updated_at = ev.ts;
   }
+  // Re-asserted AFTER the fold, not merely seeded before it: `run.start` carries a CareState built a
+  // moment before `append()` stamps the event's `ts`, so the fold's first patch would otherwise
+  // overwrite this with an earlier value. Asserting it here makes the invariant hold unconditionally.
+  acc.started_at = events[0].ts;
   return validateState(acc);
 }
 
@@ -151,12 +199,15 @@ export function writeStateFile(runDir: string, state: CareState): string {
   return path;
 }
 
-/** Project the journal head and write state.json in one call (the orchestrator's usual entry). */
+/** Projects the journal head, writes state.json, and mirrors the full rollup recompute into the run
+ *  store — the reconciling write correcting any drift `Journal.append`'s incremental path left. Fatal
+ *  on failure: a failed reconcile must halt the run rather than let the db silently diverge. */
 export function projectAndWrite(
   runDir: string,
   events: JournalEvent[],
 ): CareState {
   const state = projectState(events);
   writeStateFile(runDir, state);
+  getActiveRunStore().upsertRun(basename(runDir), state, rollupsFromEvents(events));
   return state;
 }

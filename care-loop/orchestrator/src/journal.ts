@@ -1,13 +1,15 @@
-// journal.ts — the single source of truth (PLAN-orchestrator-architecture §5).
+// The database is the source of truth: `read()` queries the active `RunStore`, and `append()` writes
+// the db BEFORE the jsonl line, so a crash between the two leaves the db correct and the log merely
+// lagging. Both writes are fatal.
 //
-// Append-only, one JSON object per line, fsync after every append, hash-chained: each entry's
-// `prev` is the sha256 of the PREVIOUS raw line as written to disk. Hashing the raw bytes (not a
-// re-serialization) makes verification independent of any stringify ambiguity.
+// `journal.jsonl` is the human- and doctor-readable log — still fsync'd and hash-chained, still what
+// `reindex` rebuilds from — but nothing on the live control-flow path depends on it. It is
+// deliberately not diffed against the db: that guarded a single-writer local SQLite file and bought
+// nothing `VACUUM INTO` backups do not.
 //
-// Crash-only property (Bernstein): the process may die mid-append. On read, a torn FINAL line
-// (unparseable) is truncated off and the head degrades to the previous intact entry. A break in
-// the MIDDLE (parse error or hash mismatch on a non-final line) is corruption and throws — that is
-// tamper/truncation *detection*, no HMAC/signing.
+// `readReplica()` keeps the crash-only recovery semantics: a torn FINAL line is dropped, while a
+// break MID-chain is corruption and throws. `read()` has no such concept, DB transactions being
+// atomic, so its `truncatedTail` is always false.
 
 import { createHash } from "node:crypto";
 import {
@@ -20,6 +22,9 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { basename, dirname } from "node:path";
+import { getActiveRunStore } from "./run-store.js";
+import { validateState, type CareState } from "./state.js";
 
 export type EventType =
   | "run.start"
@@ -29,6 +34,9 @@ export type EventType =
   | "step.exit"
   | "gate.asked"
   | "gate.answered"
+  // A pause, not a terminus: the process exited at an unanswered gate to free its slot. No
+  // `run.end` follows, and the next event is written by the run resuming.
+  | "gate.suspended"
   | "plan.approved"
   | "spawn.start"
   | "spawn.result"
@@ -118,11 +126,14 @@ export class Journal {
     return lines;
   }
 
-  /**
-   * Read + verify the chain. Drops a torn final line; throws on mid-chain corruption.
-   * This is the crash-only recovery path — startup reads the head from here.
-   */
+  /** The authoritative read. `truncatedTail` is always false — see the header. */
   read(): ReadResult {
+    return { events: getActiveRunStore().getEvents(this.runId), truncatedTail: false };
+  }
+
+  /** Reads and verifies the log's own hash chain off disk, bypassing the db. Used by `reindex` and
+   *  by `run-context`'s pre-`run_id` peek — never on a live control-flow path. */
+  readReplica(): ReadResult {
     const raw = this.rawLines();
     if (raw.length === 0) return { events: [], truncatedTail: false };
 
@@ -168,11 +179,8 @@ export class Journal {
     return events.length ? events[events.length - 1] : null;
   }
 
-  /**
-   * Return the intact raw lines, atomically truncating a torn FINAL line off disk if present
-   * (the durable form of §6 crash-only recovery — a half-written final line is never-committed
-   * data). Only the last line can be torn in practice, so we check just that.
-   */
+  /** Truncates a torn final line off disk: a half-written last line is never-committed data. Only
+   *  the last line can be torn in practice. */
   private truncateTornTail(): string[] {
     const raw = this.rawLines();
     if (raw.length === 0) return raw;
@@ -188,27 +196,32 @@ export class Journal {
     }
   }
 
-  /**
-   * Append one event: fills seq/ts/prev from the current head, serializes, writes + fsync.
-   * Returns the fully-formed entry. Not concurrency-safe by itself — the orchestrator holds the
-   * per-run lockfile (§1) so there is exactly one writer. A torn final line from a prior crash is
-   * recovered (truncated) before the append, so the chain stays contiguous.
-   */
+  /** Not concurrency-safe by itself: the orchestrator holds the per-run lockfile, so there is
+   *  exactly one writer. */
   append(ev: NewEvent): JournalEvent {
+    const store = getActiveRunStore();
+    const runId = ev.run_id ?? this.runId;
+
+    // Must precede the `prev` below, which has to hash a well-formed file.
     const raw = this.truncateTornTail();
-    let prevHash = GENESIS;
-    let nextSeq = 0;
-    if (raw.length > 0) {
-      const lastRaw = raw[raw.length - 1];
-      const lastEv = JSON.parse(lastRaw) as JournalEvent; // guaranteed parseable after recovery
-      prevHash = sha256(lastRaw);
-      nextSeq = lastEv.seq + 1;
-    }
+
+    const last = store.getLastEvent(runId);
+    const nextSeq = last ? last.seq + 1 : 0;
+    // `prev` comes from the FILE, not the db: it checksums the bytes on disk rather than stating an
+    // ordering fact. Sourcing it from the db broke every reindexed legacy run — those events carry a
+    // pre-ULID `run_id` in the file while reindex backfills a ULID into the db, so re-serializing the
+    // db row reproduces a line the file never contained, and the chain broke on the first append.
+    const prevHash = raw.length > 0 ? sha256(raw[raw.length - 1]) : GENESIS;
+    const ts = ev.ts ?? new Date().toISOString();
+    const deltaMs =
+      last && ev.event !== "run.resume"
+        ? new Date(ts).getTime() - new Date(last.ts).getTime()
+        : 0;
 
     const full: JournalEvent = {
       seq: nextSeq,
-      ts: ev.ts ?? new Date().toISOString(),
-      run_id: ev.run_id ?? this.runId,
+      ts,
+      run_id: runId,
       event: ev.event,
       ...(ev.step !== undefined ? { step: ev.step } : {}),
       ...(ev.round !== undefined ? { round: ev.round } : {}),
@@ -217,6 +230,19 @@ export class Journal {
       prev: prevHash,
     };
 
+    // DB first: fatal, and authoritative for ordering.
+    if (full.event === "run.start" && full.data?.state) {
+      // Before the event row below, so the run_events FK never dangles on this first event.
+      const seeded = validateState(full.data.state as Partial<CareState>);
+      store.seedRun(basename(dirname(this.path)), seeded);
+    }
+    const costUsd =
+      full.event === "skill.result"
+        ? ((full.data?.cost_usd as number | undefined) ?? 0)
+        : 0;
+    store.appendEvent(full.run_id, full, { deltaMs, costUsd });
+
+    // Log second, also fatal. Its torn tail was repaired at the top of this method.
     const line = serializeEvent(full) + "\n";
     const fd = openSync(this.path, "a");
     try {
@@ -225,6 +251,7 @@ export class Journal {
     } finally {
       closeSync(fd);
     }
+
     return full;
   }
 }

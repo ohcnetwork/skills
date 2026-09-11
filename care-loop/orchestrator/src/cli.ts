@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-import { Journal } from "./journal.js";
+import { Journal, type JournalEvent } from "./journal.js";
 import { projectAndWrite, projectState } from "./state.js";
 import { renderEvent } from "./render.js";
 import { withLock } from "./lock.js";
@@ -33,13 +33,30 @@ import {
 } from "./ticket-fetch.js";
 import { defaultSeams, defaultPlanSeams } from "./default-wiring.js";
 import { runEndOfRunDoctor } from "./auto-doctor-wiring.js";
-import { startDashboard } from "./dashboard.js";
 import { OctokitGitHub } from "./github.js";
 import { loadModels } from "./models-config.js";
 import { symlinkProvisioner } from "./provision.js";
 import { adoptPr } from "./adopt.js";
 import { salvageGate } from "./salvage-gate-terminal.js";
 import { opencodeIntentReconstructor } from "./skills-opencode.js";
+import { openRunStore, setActiveRunStore, SqliteRunStore } from "./run-store.js";
+import { reindexRuns } from "./reindex.js";
+import { resolveRunId } from "./run-context.js";
+import { startService } from "./service/serve.js";
+import { GateStore } from "./service/gate-store.js";
+import { servicePlanGate } from "./service-gate.js";
+import { EXIT_GATE_SUSPENDED } from "./service/supervisor.js";
+import type {
+  ApprovalDecision,
+  ConsolidatedAsk,
+  PlanAnswer,
+  PlanGate,
+  PlanQuestion,
+  PlanRestore,
+} from "./plan-gate.js";
+
+const RUNS_ROOT = join(__dirname, "../../runs");
+const DB_PATH = join(RUNS_ROOT, "loops.db");
 
 function usage(): never {
   console.error(`care-loopd — headless care-loop orchestrator
@@ -53,6 +70,7 @@ Usage:
        flags: --repo owner/name (ohcnetwork/care_fe) · --main <care_fe path> · --worktree <path>
               --run-dir <path> · --base <develop> · --body <pr body> · --models <file>
               --build-less · --max-rounds <n> · --poll-timeout-ms <ms> · --no-doctor
+              --requested-by <github-login> (or CARE_REQUESTED_BY; attribution only, never authz)
        (end-of-run self-improvement runs by default; --no-doctor or CARE_DOCTOR=0 to skip)
 
   care-loopd --pr <n> [flags]    SALVAGE an existing PR instead of planning a new change: reconstruct
@@ -61,8 +79,24 @@ Usage:
        CI-round loop (address bot reviews → push → wait → repeat). Re-invoke after CI re-reviews.
        flags: --repo · --main · --worktree · --run-dir · --models · --max-rounds <n> (1 = one-shot)
 
-  care-loopd dashboard [flags]   Web dashboard — fleet view of all runs + drill-down timelines.
-       flags: --port <n> (default 3141) · --runs-dir <path> (default ../runs)
+  care-loopd serve [flags]       HTTP API + web app over loops.db (PLAN-loop-service §6). DB-only: no
+       route touches a run dir. Serves ../web/dist when built, so the app and the API share one origin.
+       Writes only service-owned tables (users/sessions); run rows stay the owning child's. Binds
+       loopback unless --host says otherwise — there is no authentication, the login is a claim, and
+       the trust boundary is the network.
+       Add --supervise to CLAIM queued runs and spawn a care-loopd child per run (concurrency cap,
+       crash reconciliation at boot, cancel via SIGTERM). Without it the API is read+enqueue only —
+       and POST /api/runs refuses, rather than banking work nothing will ever execute.
+       flags: --port <n> (default 3142) · --db <path> (default ../runs/loops.db) · --host <addr>
+              --secure-cookies (set once TLS terminates in front) · --static <dir> · --repos a/b,c/d
+              --backup-dir <path> · --backup-keep <n>
+              --supervise · --concurrency <n> (default 2) · --runs-dir <path> · --main <care_fe path>
+
+  care-loopd reindex [flags]     Rebuild runs/loops.db from every run dir's journal.jsonl — the SQLite
+       fleet projection that serve and status read (PLAN-sqlite-run-store.md). It clears and rebuilds
+       ONLY from the journals. REFUSES while any run looks live, because the rebuild deletes run_events
+       out from under a running child and kills it — wait, or --force if you are sure.
+       flags: --runs-dir <path> (default ../runs) · --force
 
   care-loopd status <run-dir>    Projected state + recent journal events (read-only).
   care-loopd resume <run-dir>    Resume a crashed run. If a PR is open, reconcile it (probePr: head ·
@@ -104,7 +138,9 @@ function parseFlags(argv: string[]): Record<string, string | true> {
 }
 
 function journalOf(runDir: string): Journal {
-  return new Journal(join(runDir, "journal.jsonl"), "cli");
+  // resolveRunId (not a placeholder string): read() is DB-backed now (§10) and queries by run_id,
+  // so the CLI needs the run's actual ULID, not an arbitrary label.
+  return new Journal(join(runDir, "journal.jsonl"), resolveRunId(runDir));
 }
 
 function cmdStatus(runDir: string): void {
@@ -657,6 +693,48 @@ async function cmdSalvage(
   await cmdResume(runDir, flags);
 }
 
+/**
+ * The gate the loop-service spawns its children with (`--gate service`), plus whatever a previous
+ * attempt left to resume ([[PLAN-loop-service]] §7).
+ *
+ * The child polls SQLite, not the API: it already opens this database to write every run event, so
+ * the gate needs no HTTP client, no service URL, and no credentials here — and a gate survives the
+ * service being restarted or redeployed, because neither side holds state the other needs.
+ */
+function serviceGateFor(
+  runDir: string,
+  events: JournalEvent[],
+): { gate: PlanGate; restore: PlanRestore | null } {
+  const runId = resolveRunId(runDir);
+  const store = new GateStore(new SqliteRunStore(DB_PATH).raw());
+  const gate = servicePlanGate({ runId, store });
+
+  // Resume only from a SUSPENSION, and only if it is still the journal's last word: a `gate.asked`
+  // after it means the run already moved on.
+  const last = [...events].reverse().find((e) => e.event === "gate.suspended");
+  const movedOn = last
+    ? events.indexOf(last) < events.map((e) => e.event).lastIndexOf("plan.approved")
+    : true;
+  if (!last || movedOn) return { gate, restore: null };
+
+  const askId = String((last.data as { ask_id?: unknown })?.ask_id ?? "");
+  const ask = askId ? store.get(runId, askId) : null;
+  if (!ask) return { gate, restore: null };
+
+  const interview = store.latestOfKind(runId, "interview");
+  return {
+    gate,
+    restore: {
+      kind: ask.kind,
+      askId: ask.askId,
+      questions: (interview?.payload ?? []) as PlanQuestion[],
+      answers: (interview?.answer ?? []) as PlanAnswer[],
+      ask: ask.kind === "approve" ? (ask.payload as ConsolidatedAsk) : undefined,
+      answer: (ask.answer ?? undefined) as ApprovalDecision | undefined,
+    },
+  };
+}
+
 async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   // `--pr <n>` salvages an existing PR instead of planning a new change.
   if (flags.pr !== undefined && flags.pr !== true) {
@@ -668,7 +746,7 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
     await cmdSalvage(pr, flags);
     return;
   }
-  const { input: seed, gate } = await terminalFront(flags).resolve();
+  const { input: seed, gate: terminalPlanGate } = await terminalFront(flags).resolve();
   const input = await enrichPlanInput(seed, ticketFetcherFromEnv(flags));
   const modelsFile =
     typeof flags.models === "string" ? flags.models : undefined;
@@ -683,7 +761,24 @@ async function cmdRun(flags: Record<string, string | true>): Promise<void> {
   );
   console.log(`  run dir: ${input.runDir}\n`);
 
-  const plan = await runPlan({ input, planner, gate });
+  // `--gate service` swaps the readline dialog for the row-backed one. Everything else about the
+  // child is identical to a run typed at a terminal — that is the property §4 protects.
+  const useService = flags.gate === "service";
+  const prior = existsSync(join(input.runDir, "journal.jsonl"))
+    ? journalOf(input.runDir).read().events
+    : [];
+  const { gate, restore } = useService
+    ? serviceGateFor(input.runDir, prior)
+    : { gate: terminalPlanGate, restore: null };
+  if (restore) console.log(`  resuming at the ${restore.kind} gate (${restore.askId})\n`);
+
+  const plan = await runPlan({ input, planner, gate, restore });
+  if (plan.outcome === "suspended") {
+    // Not a failure: the plan is drafted, the artifacts are written, and the ask is open. Exiting is
+    // how the run stops holding a concurrency slot while it waits on a person.
+    console.log(`\nplan: waiting on a human at the gate — suspending (resumes when answered)`);
+    process.exit(EXIT_GATE_SUSPENDED);
+  }
   console.log(
     `\nplan: ${plan.outcome}  (${plan.reasonCode})${plan.classification ? `  tier=${plan.classification}` : ""}`,
   );
@@ -752,6 +847,16 @@ async function cmdDoctor(
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  // The DB is the source of truth now (PLAN-sqlite-run-store.md §2/§10) — every command opens it
+  // unconditionally; `openRunStore` is fatal if `DB_PATH` can't be reached (no `--no-db` opt-out any
+  // more, §10 item 5: a run that can't reach the DB can no longer resume or project state).
+  setActiveRunStore(openRunStore(DB_PATH));
+  // `--requested-by <login>` is sugar over CARE_REQUESTED_BY, which is the single channel the four
+  // seed sites read (run-context.ts#resolveRequestedBy). The loop-service supervisor sets the env var
+  // per child instead; the flag exists so a local run can attribute itself without exporting anything.
+  // Parsed off the RAW argv so it works before the subcommand switch, on every command alike.
+  const rb = parseFlags(argv)["requested-by"]; // parseFlags already skips non-flag tokens
+  if (typeof rb === "string" && rb.trim()) process.env.CARE_REQUESTED_BY = rb.trim();
   const [cmd, ...rest] = argv;
   // Bare `care-loopd` (or `care-loopd --task … --ticket …`) is the primary path: the combined
   // questionnaire → plan → gate → autonomous loop. A leading flag means "run with these overrides".
@@ -760,16 +865,6 @@ async function main(): Promise<void> {
     return;
   }
   switch (cmd) {
-    case "dashboard": {
-      const df = parseFlags(rest);
-      const port = typeof df.port === "string" ? Number(df.port) : 3141;
-      const runsDir =
-        typeof df["runs-dir"] === "string"
-          ? df["runs-dir"]
-          : join(__dirname, "../../runs");
-      startDashboard(runsDir, port);
-      return;
-    }
     case "status":
       if (!rest[0]) usage();
       cmdStatus(resolve(rest[0]));
@@ -791,6 +886,51 @@ async function main(): Promise<void> {
       if (!rest[0]) usage();
       await cmdDoctor(resolve(rest[0]), parseFlags(rest.slice(1)));
       break;
+    case "serve": {
+      const sf = parseFlags(rest);
+      const port = typeof sf.port === "string" ? Number.parseInt(sf.port, 10) : 3142;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        console.error(`serve: --port must be 1-65535, got '${String(sf.port)}'`);
+        process.exit(2);
+      }
+      startService({
+        dbPath: typeof sf.db === "string" ? resolve(sf.db) : DB_PATH,
+        port,
+        host: typeof sf.host === "string" ? sf.host : undefined,
+        // Reachable configuration: these existed on ServeOptions but nothing could set them, which
+        // would have been discovered at deploy — `--secure-cookies` in particular is what
+        // PLAN-loop-service §6 tells you to turn on once TLS terminates in front.
+        secureCookies: sf["secure-cookies"] === true,
+        staticDir: typeof sf.static === "string" ? resolve(sf.static) : undefined,
+        backupDir: typeof sf["backup-dir"] === "string" ? resolve(sf["backup-dir"]) : undefined,
+        backupKeep:
+          typeof sf["backup-keep"] === "string" ? Number.parseInt(sf["backup-keep"], 10) : undefined,
+        allowedRepos:
+          typeof sf.repos === "string" ? sf.repos.split(",").map((r) => r.trim()).filter(Boolean) : undefined,
+        supervise: sf.supervise === true,
+        concurrency:
+          typeof sf.concurrency === "string" ? Number.parseInt(sf.concurrency, 10) : undefined,
+        runsDir: typeof sf["runs-dir"] === "string" ? resolve(sf["runs-dir"]) : RUNS_ROOT,
+        mainRepoPath: typeof sf.main === "string" ? resolve(sf.main) : undefined,
+      });
+      break;
+    }
+    case "reindex": {
+      const df = parseFlags(rest);
+      const runsDir =
+        typeof df["runs-dir"] === "string" ? resolve(df["runs-dir"]) : RUNS_ROOT;
+      const dbPath = join(runsDir, "loops.db");
+      const store = new SqliteRunStore(dbPath);
+      const result = reindexRuns(store, runsDir, { force: df.force === true });
+      store.close();
+      console.log(
+        `reindex: ${result.runsIndexed} run(s), ${result.artifactsIndexed} artifact(s) indexed` +
+          (result.runsSkipped.length ? `, ${result.runsSkipped.length} skipped` : ""),
+      );
+      for (const s of result.runsSkipped)
+        console.log(`  skipped ${s.slug}: ${s.error}`);
+      break;
+    }
     default:
       usage();
   }

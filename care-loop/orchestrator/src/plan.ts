@@ -12,8 +12,9 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Journal, type JournalEvent } from "./journal.js";
+import { type JournalEvent } from "./journal.js";
 import { withLock } from "./lock.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Tier } from "./state.js";
 import type {
   PlanAnswer,
@@ -23,16 +24,28 @@ import type {
   PlannerPayload,
   PlanQuestion,
 } from "./ports.js";
+import {
+  GateCancelledError,
+  GateExpiredError,
+  GateSuspendedError,
+  type ApprovalDecision,
+  type PlanRestore,
+} from "./plan-gate.js";
 
 export interface RunPlanOptions {
   input: PlanInput;
   planner: Planner; // typically withSkillLog-wrapped (default-wiring)
   gate: PlanGate; // supplied by the front (terminal / jira / pr)
   lockOpts?: { pid?: number; isAlive?: (pid: number) => boolean };
+  /** Resumes a stage that suspended at its gate instead of re-running it. Plain data, so this costs
+   *  the loop no dependency on whatever persisted it. */
+  restore?: PlanRestore | null;
 }
 
 export interface PlanResult {
-  outcome: "approved" | "rejected" | "aborted";
+  /** `suspended` is not a failure — the plan is drafted and waiting on a human. The caller should
+   *  exit so the run stops holding a slot; it resumes when the gate is answered. */
+  outcome: "approved" | "rejected" | "aborted" | "suspended";
   reasonCode: string;
   classification?: Tier;
   runDir: string;
@@ -45,16 +58,15 @@ export function hasApprovedPlan(events: JournalEvent[]): boolean {
 
 export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
   const { input } = o;
-  const runId = `${input.repo.replace("/", "-")}-${input.branch}`;
   mkdirSync(input.runDir, { recursive: true });
 
   return withLock(
     input.runDir,
     async (): Promise<PlanResult> => {
-      const j = new Journal(join(input.runDir, "journal.jsonl"), runId);
+      const { journal: j, runId, isNew } = openRun(input.runDir);
 
       // Seed the shared journal at step 1 ONLY when empty — `start` continues this same journal.
-      if (j.read().events.length === 0) {
+      if (isNew) {
         const seed: CareState = {
           task: input.task,
           repo: input.repo,
@@ -67,6 +79,12 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
           head_sha: "scratch",
           last_reviewed_sha: "",
           updated_at: new Date().toISOString(),
+          run_id: runId,
+          requested_by: resolveRequestedBy(),
+          // Known at the plan stage, so they are projected into the row rather than event-only.
+          ticket: input.ticket,
+          summary: input.summary,
+          started_at: new Date().toISOString(),
         };
         j.append({
           event: "run.start",
@@ -79,33 +97,123 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
 
       let spawn = 1; // monotonic spawn counter → distinct logging sidecars (interview=1, drafts=2..)
 
+      /** Shared with the resume path, which reaches here having called no planner at all —
+       *  `plannedBy` and `classification` are its only inputs, and both are in the ask. */
+      const finishApproved = (plannedBy: string | undefined, classification: string): PlanResult => {
+        const tier = (classification ?? "standard") as Tier;
+        j.append({
+          event: "plan.approved",
+          step: "1",
+          round: 1,
+          data: {
+            planned_by: plannedBy,
+            classification: tier,
+            push_authorized: true,
+            // ticket/summary are persisted here so a build-stage RESUME (a crash after approval but
+            // before the PR is opened) can reopen the PR from the journal alone — no re-supplied flags.
+            ticket: input.ticket,
+            summary: input.summary,
+            state: { tier },
+          },
+        });
+        j.append({ event: "step.exit", step: "1", round: 1, data: { reason_code: "plan_ready" } });
+        j.append({
+          event: "decision",
+          step: "1",
+          round: 1,
+          data: { from: "1", to: "2", signal: "advance" },
+        });
+        projectAndWrite(input.runDir, j.read().events);
+        return { outcome: "approved", reasonCode: "plan_ready", classification: tier, runDir: input.runDir };
+      };
+
+      /** Null for anything that is not a gate outcome, so a real error still propagates. */
+      const endAtGate = (err: unknown): PlanResult | null => {
+        if (err instanceof GateSuspendedError) {
+          // Not a failure: the plan is drafted and the ask is open — the run is simply not worth a
+          // slot while it waits on a person.
+          j.append({ event: "gate.suspended", step: "1", round: 1, data: { ask_id: err.askId } });
+          projectAndWrite(input.runDir, j.read().events);
+          return { outcome: "suspended", reasonCode: "gate_unanswered", runDir: input.runDir };
+        }
+        const reason =
+          err instanceof GateCancelledError
+            ? "cancelled"
+            : err instanceof GateExpiredError
+              ? "gate_timeout"
+              : null;
+        if (reason === null) return null;
+        // Reached by unwinding rather than by a signal, so the lock is released and the journal gets
+        // its terminal event — a SIGTERM would have left both hanging.
+        j.append({
+          event: "run.end",
+          step: "1",
+          data: { outcome: "aborted", reason_code: reason, state: { step: "aborted" } },
+        });
+        projectAndWrite(input.runDir, j.read().events);
+        return { outcome: "aborted", reasonCode: reason, runDir: input.runDir };
+      };
+
+      // ── Resume a stage that suspended at its approval gate ─────────────────────────────────────
+      // Everything the approval path needs was already durable, so approve and reject resume having
+      // called NO model. Only amend re-invokes the planner, which is the work just asked for.
+      const restored = o.restore ?? null;
+      if (restored?.kind === "approve" && restored.answer && restored.ask) {
+        const d = restored.answer;
+        if (d.decision === "approve")
+          return finishApproved(restored.ask.plannedBy, restored.ask.classification);
+        if (d.decision === "reject") {
+          j.append({
+            event: "run.end",
+            step: "1",
+            data: { outcome: "aborted", reason_code: "plan_rejected", state: { step: "aborted" } },
+          });
+          projectAndWrite(input.runDir, j.read().events);
+          return { outcome: "rejected", reasonCode: "plan_rejected", runDir: input.runDir };
+        }
+      }
+
       // ── Phase 1+2 — recon + interview ──────────────────────────────────────────────────────────
-      const iv = await o.planner({
-        task: input.task,
-        ticket: input.ticket,
-        mainRepoPath: input.mainRepoPath,
-        runDir: input.runDir,
-        phase: "interview",
-        attachments: input.attachments,
-        round: spawn++,
-        step: "1",
-      });
-      const questions: PlanQuestion[] = iv.payload.questions ?? [];
+      // A restore has both already: re-running recon to rediscover questions a human has answered is
+      // the most expensive way to learn nothing.
+      let questions: PlanQuestion[];
       let answers: PlanAnswer[] = [];
-      if (questions.length > 0) {
-        j.append({
-          event: "gate.asked",
+      if (restored) {
+        questions = restored.questions;
+        answers = restored.answers;
+      } else {
+        const iv = await o.planner({
+          task: input.task,
+          ticket: input.ticket,
+          mainRepoPath: input.mainRepoPath,
+          runDir: input.runDir,
+          phase: "interview",
+          attachments: input.attachments,
+          round: spawn++,
           step: "1",
-          round: 1,
-          data: { count: questions.length },
         });
-        answers = await o.gate.interview(questions);
-        j.append({
-          event: "gate.answered",
-          step: "1",
-          round: 1,
-          data: { count: answers.length },
-        });
+        questions = iv.payload.questions ?? [];
+        if (questions.length > 0) {
+          j.append({
+            event: "gate.asked",
+            step: "1",
+            round: 1,
+            data: { count: questions.length },
+          });
+          try {
+            answers = await o.gate.interview(questions);
+          } catch (err) {
+            const end = endAtGate(err);
+            if (end) return end;
+            throw err;
+          }
+          j.append({
+            event: "gate.answered",
+            step: "1",
+            round: 1,
+            data: { count: answers.length },
+          });
+        }
       }
 
       // ── Phase 3+4 — draft, then the consolidated gate; amend re-drafts UNBOUNDED ───────────────
@@ -152,9 +260,14 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
 
         writeArtifacts(input, draft.payload, questions, answers);
 
-        const decision = await o.gate.approve(
-          consolidatedAsk(input, draft.payload),
-        );
+        let decision: ApprovalDecision;
+        try {
+          decision = await o.gate.approve(consolidatedAsk(input, draft.payload));
+        } catch (err) {
+          const end = endAtGate(err);
+          if (end) return end;
+          throw err;
+        }
         if (decision.decision === "approve") break;
         if (decision.decision === "reject") {
           j.append({
@@ -197,41 +310,10 @@ export async function runPlan(o: RunPlanOptions): Promise<PlanResult> {
       }
 
       // ── Approved — record it + authorize push, advance the shared journal to step 2 ────────────
-      const tier = (draft.payload.classification ?? "standard") as Tier;
-      j.append({
-        event: "plan.approved",
-        step: "1",
-        round: 1,
-        data: {
-          planned_by: draft.payload.plannedBy,
-          classification: tier,
-          push_authorized: true,
-          // ticket/summary are persisted here so a build-stage RESUME (a crash after approval but
-          // before the PR is opened) can reopen the PR from the journal alone — no re-supplied flags.
-          ticket: input.ticket,
-          summary: input.summary,
-          state: { tier },
-        },
-      });
-      j.append({
-        event: "step.exit",
-        step: "1",
-        round: 1,
-        data: { reason_code: "plan_ready" },
-      });
-      j.append({
-        event: "decision",
-        step: "1",
-        round: 1,
-        data: { from: "1", to: "2", signal: "advance" },
-      });
-      projectAndWrite(input.runDir, j.read().events);
-      return {
-        outcome: "approved",
-        reasonCode: "plan_ready",
-        classification: tier,
-        runDir: input.runDir,
-      };
+      return finishApproved(
+        draft.payload.plannedBy,
+        draft.payload.classification ?? "standard",
+      );
     },
     o.lockOpts,
   );

@@ -13,8 +13,12 @@ import { Journal } from "../src/journal.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
 import type { CiConclusion } from "../src/github.ts";
 import { renderFeedback } from "../src/feedback.ts";
+import { useRealStore } from "./_store.ts";
 
-const rd = () => mkdtempSync(join(tmpdir(), "careloopd-ci-"));
+const rd = () => {
+  useRealStore();
+  return mkdtempSync(join(tmpdir(), "careloopd-ci-"));
+};
 const BOTS = [{ name: "a", aliases: ["a[bot]"] }];
 
 // A GitHub fake whose single bot has reviewed at head and CI is terminal → pollPr converges at once.
@@ -76,7 +80,7 @@ test("converges in round 1 when CI is green and triage finds nothing to address 
   const { events, truncatedTail } = new Journal(
     join(o.runDir, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.equal(truncatedTail, false);
   assert.ok(existsSync(join(o.runDir, "loop.log")));
   assert.match(readFileSync(join(o.runDir, "loop.log"), "utf8"), /ci\.done/);
@@ -184,7 +188,7 @@ test("Step 7: converged exit invokes the reply seam with the final round's items
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.ok(
     events.some(
       (e) =>
@@ -481,7 +485,7 @@ test("§3 guard: ci-fixer edits a spec + 4b flags it wrong → deferred ci_fix_s
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   const checkpoint = events.find((e) => e.event === "checkpoint.written");
   assert.equal((checkpoint!.data as any)?.reason_code, "ci_fix_spec_wrong");
 });
@@ -614,7 +618,7 @@ test("CI-fix handoff (no ciFix injected) + bots clean → deferred ci_red_human 
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   const checkpoint = events.find((e) => e.event === "checkpoint.written");
   assert.ok(checkpoint, "checkpoint.written event present");
   assert.equal((checkpoint!.data as any)?.reason_code, "ci_red_human");
@@ -699,7 +703,7 @@ test("apply exhausted (genuine failures) → capped, NOT step 7", async () => {
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.ok(
     events.some(
       (e) =>
@@ -723,7 +727,7 @@ test("ci-fixer handoff with bots clean → deferred ci_red_human (not step 7 / n
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.ok(
     events.some(
       (e) =>
@@ -756,7 +760,7 @@ test("noop apply + CI red → deferred ci_red_human, not capped", async () => {
   const { events } = new Journal(
     join(res.state.worktree, "journal.jsonl"),
     "x",
-  ).read();
+  ).readReplica();
   assert.ok(
     events.some(
       (e) =>
@@ -1010,7 +1014,7 @@ test("standalone ci-fix: shard-only infra red (no real failing spec) → deferre
   const res = await runCiRounds(o);
   assert.equal(res.outcome, "deferred");
   assert.equal(ciFixCall, 0, "no genuine failing spec → the fixer is never spawned");
-  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").readReplica();
   assert.ok(
     events.some((e) => (e.data as any)?.reason_code === "ci_shard_infra"),
     "the run defers with the ci_shard_infra reason code",
@@ -1064,7 +1068,7 @@ test("salvage is narrow: a timed-out fixer that touched a SOURCE file stays a ha
   const res = await runCiRounds(o);
   assert.equal(res.outcome, "deferred");
   assert.equal(pushCall.n, 0, "a source-file timeout is never auto-pushed");
-  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").readReplica();
   assert.ok(
     events.some((e) => (e.data as any)?.reason_code === "ci_red_human"),
     "a non-spec timeout defers to a human as before",
@@ -1089,7 +1093,7 @@ test("salvage is narrow: a genuine handoff (not a timeout) with a dirty spec tre
   const res = await runCiRounds(o);
   assert.equal(res.outcome, "deferred");
   assert.equal(pushCall.n, 0, "a deliberate handoff is not salvaged");
-  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").read();
+  const { events } = new Journal(join(o.runDir, "journal.jsonl"), "x").readReplica();
   assert.ok(
     events.some((e) => (e.data as any)?.reason_code === "ci_red_human"),
     "a non-timeout handoff defers to a human",

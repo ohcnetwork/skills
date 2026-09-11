@@ -10,6 +10,7 @@
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Journal } from "./journal.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Step } from "./state.js";
 import { transition, type FsmConfig } from "./fsm.js";
 import { renderLoopLog } from "./render.js";
@@ -713,8 +714,8 @@ const STEPS: Record<string, StepFn> = {
   "5": stepGateAndPush,
 };
 
-function seedJournal(c: Ctx): void {
-  if (c.j.read().events.length > 0) return;
+function seedJournal(c: Ctx, isNew: boolean, runId: string): void {
+  if (!isNew) return;
   c.j.append({
     event: "run.start",
     step: "5-await",
@@ -732,6 +733,15 @@ function seedJournal(c: Ctx): void {
         head_sha: c.headSha,
         last_reviewed_sha: "",
         updated_at: new Date().toISOString(),
+        // Promoted into CareState by the SQLite cutover: `runs` projects these columns, and a seed
+        // without them leaves the row unattributed and unsortable. A salvage/CI-only run has no
+        // ticket or summary — it was adopted from a PR, not planned — so they are explicitly null
+        // rather than absent.
+        run_id: runId,
+        requested_by: resolveRequestedBy(),
+        ticket: null,
+        summary: null,
+        started_at: new Date().toISOString(),
       },
     },
   });
@@ -745,11 +755,15 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
     ciGraceMs: 120_000,
     ...o.cfg,
   };
-  const runId = `${o.repo.replace("/", "-")}-${o.branch}`;
+  // `openRun` rather than a slug-derived id and a bare Journal: since the SQLite cutover the journal
+  // is DB-backed and keyed by a real ULID, so `${repo}-${branch}` is a display label, not an
+  // identity. It also reports whether the run dir is NEW, which is the honest seed condition — an
+  // empty event list is a proxy for it that a DB-backed read does not answer the same way.
+  const { journal, runId, isNew } = openRun(o.runDir);
   const c: Ctx = {
     o,
     cfg,
-    j: new Journal(join(o.runDir, "journal.jsonl"), runId),
+    j: journal,
     round: o.startRound ?? 1,
     headSha: o.headSha,
     sinceIso: o.sinceIso,
@@ -760,7 +774,7 @@ export async function runCiRounds(o: CiRoundsOptions): Promise<CiRoundsResult> {
     batchedRound: false,
     pendingBotFix: false,
   };
-  seedJournal(c);
+  seedJournal(c, isNew, runId);
 
   let step: Step = "5-await";
   let outcome: CiOutcome = "capped";

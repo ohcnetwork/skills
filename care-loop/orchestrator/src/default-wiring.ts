@@ -22,6 +22,7 @@ import {
 import { loadModels } from "./models-config.js";
 import { makeSkillLogger, withSkillLog } from "./skill-log.js";
 import { roleSpawn, type StartOptions } from "./orchestrate.js";
+import { resolveRunId } from "./run-context.js";
 import { symlinkProvisioner } from "./provision.js";
 import { replyAndResolve, type Verdict } from "./reply.js";
 import type { ApplyFn, GateFn, PushFn, ReplyFn } from "./ci-round.js";
@@ -101,7 +102,9 @@ export function defaultSeams(cfg: WiringConfig): Seams {
   const models = loadModels(cfg.modelsFile);
   // Wrap each skill once with the logging decorator — every invocation on every driver path
   // (roleSpawn, reduceTriage, 6b apply) is then captured identically (skill.invoke/result + sidecars).
-  const runId = `${cfg.repo.replace("/", "-")}-${cfg.branch}`;
+  // resolveRunId shares the SAME cache (.run_id) `openRun` reads/writes elsewhere in this run dir, so
+  // whichever site touches it first (this logger or the build half-pipe) settles the id for both.
+  const runId = resolveRunId(cfg.runDir);
   const logger = makeSkillLogger({ runDir: cfg.runDir, runId });
   const reviewer = withSkillLog(
     "care-reviewer",
@@ -433,7 +436,7 @@ export function defaultPlanSeams(cfg: {
   runDir: string;
   modelsFile?: string;
 }): { planner: Planner } {
-  const runId = `${cfg.repo.replace("/", "-")}-${cfg.branch}`;
+  const runId = resolveRunId(cfg.runDir);
   const logger = makeSkillLogger({ runDir: cfg.runDir, runId });
   const models = loadModels(cfg.modelsFile);
   const planner = withSkillLog("care-planner", opencodePlanner(models), logger);

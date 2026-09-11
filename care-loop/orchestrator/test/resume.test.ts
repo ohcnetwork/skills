@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probePr, planResume } from "../src/resume.ts";
 import { Journal } from "../src/journal.ts";
+import { SqliteRunStore, setActiveRunStore } from "../src/run-store.ts";
+import { mintRunId } from "../src/run-id.ts";
 import type { PrReview } from "../src/github.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
 
@@ -85,13 +87,15 @@ const BASE_STATE = {
 };
 
 function journalWith(events: (j: Journal) => void): Journal {
+  setActiveRunStore(new SqliteRunStore(":memory:"));
   const dir = mkdtempSync(join(tmpdir(), "careloopd-resume-"));
-  const j = new Journal(join(dir, "journal.jsonl"), "run-747");
+  const runId = mintRunId();
+  const j = new Journal(join(dir, "journal.jsonl"), runId);
   j.append({
     event: "run.start",
     step: "1",
     round: 1,
-    data: { state: BASE_STATE },
+    data: { state: { ...BASE_STATE, run_id: runId } },
   });
   events(j);
   return j;

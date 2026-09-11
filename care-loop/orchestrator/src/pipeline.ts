@@ -7,7 +7,7 @@
 
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
-import { Journal } from "./journal.js";
+import { openRun, resolveRequestedBy } from "./run-context.js";
 import { projectAndWrite, type CareState, type Step } from "./state.js";
 import { transition, type FsmConfig } from "./fsm.js";
 import {
@@ -91,8 +91,7 @@ export async function runHalfPipe(o: HalfPipeOptions): Promise<HalfPipeResult> {
   const cfg = o.cfg ?? { reviewSteps: ["4a"], maxImplementRetries: 2 };
   const maxTimeouts = cfg.maxImplementTimeouts ?? 2;
   const stopAfter = o.stopAfter ?? "5";
-  const runId = `${o.repo.replace("/", "-")}-${o.branch}`;
-  const j = new Journal(join(o.runDir, "journal.jsonl"), runId);
+  const { journal: j, runId, isNew } = openRun(o.runDir);
 
   const seed: CareState = {
     task: o.task,
@@ -106,11 +105,16 @@ export async function runHalfPipe(o: HalfPipeOptions): Promise<HalfPipeResult> {
     head_sha: "scratch",
     last_reviewed_sha: "",
     updated_at: new Date().toISOString(), // projection refreshes this from each event ts
+    run_id: runId,
+    requested_by: resolveRequestedBy(),
+    ticket: null,
+    summary: null,
+    started_at: new Date().toISOString(),
   };
   // Seed run.start ONLY when the journal is empty. When `plan` (plan.ts) already ran, it seeded
   // run.start@step1 + plan.approved into this same journal; re-seeding would fork the projection.
   // A standalone/`--skip-plan` run has an empty journal here and seeds as before.
-  if (j.read().events.length === 0) {
+  if (isNew) {
     j.append({
       event: "run.start",
       step: "2",

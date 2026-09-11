@@ -1,6 +1,6 @@
-// ab-triager.ts — fan-out timing harness for the triager.
+// ab-triager.ts — timing harness for the triager.
 //
-// Runs opencodeTriager with worktree (triggers fan-out for ≥2 clusters) and reports
+// Runs opencodeTriager with a worktree (the pre-read path) and reports
 // per-step timing + verdict breakdown. Used to measure optimization impact.
 //
 // Run:  npx tsx src/ab-triager.ts
@@ -34,7 +34,7 @@ const WORKTREE = required("WORKTREE");
 const BASE = process.env.BASE || "develop";
 
 async function main() {
-  console.log("═══ Triager fan-out timing ═══");
+  console.log("═══ Triager timing ═══");
   console.log(`Feedback: ${FEEDBACK_PATH}`);
   console.log(`Worktree: ${WORKTREE}`);
   console.log(`Base: ${BASE}\n`);

@@ -19,8 +19,12 @@ import type {
   UxValidator,
 } from "../src/ports.ts";
 import { makeFakeGitHub } from "./fake-github.ts";
+import { useRealStore } from "./_store.ts";
 
-const rd = () => mkdtempSync(join(tmpdir(), "careloopd-orch-"));
+const rd = () => {
+  useRealStore();
+  return mkdtempSync(join(tmpdir(), "careloopd-orch-"));
+};
 const BOTS = [{ name: "a", aliases: ["a[bot]"] }];
 
 const convergingGh = (ci: CiConclusion = "pass", prNumber = 100) =>

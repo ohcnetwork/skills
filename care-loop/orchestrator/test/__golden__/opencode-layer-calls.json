@@ -3100,7 +3100,7 @@
               "parts": [
                 {
                   "type": "text",
-                  "text": "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings (the full diff is in your shared context); for any item flagged needs_cross_file, resolve it now using the full diff; fold in the bot summary comments below. Return ONE item per distinct finding with its missed_by attribution. UNION the threads[] ids of every bot comment you merge into a single item — none may be dropped (each thread gets a reply). CITATION DECLINES: any finding that contradicts the APPROVED PLAN (injected in the base system context) must be `decline`d with reason citing the specific plan criterion or decision — even if the bot marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n## src/Foo.tsx (VERIFY FAILED: no structured output)\nnull\n\n## src/Bar.tsx (VERIFY FAILED: no structured output)\nnull\n\n=== BOT SUMMARY COMMENTS ===\n- **coderabbitai[bot]** (comment 303)\n    Walkthrough: Foo gains an `n` prop."
+                  "text": "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings (the full diff is in your shared context); for any item flagged needs_cross_file, resolve it now using the full diff; fold in the bot summary comments below. Return ONE item per distinct finding with its missed_by attribution. UNION the threads[] ids of every bot comment you merge into a single item — none may be dropped (each thread gets a reply). CITATION DECLINES: any finding that contradicts the APPROVED PLAN (injected in the base system context) must be `decline`d with reason citing the specific plan criterion or decision — even if the bot marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n## src/Foo.tsx (VERIFY FAILED: no structured output) — unverified; verdict these raw findings yourself against the full diff:\n- `src/Foo.tsx:1`\n  - **coderabbitai[bot]** (thread 101)\n      🟠 Major: `n` may be undefined here — `n!.toFixed()` throws.\n\n## src/Bar.tsx (VERIFY FAILED: no structured output) — unverified; verdict these raw findings yourself against the full diff:\n- `src/Bar.tsx:1`\n  - **greptile-apps[bot]** (thread 202)\n      Consider memoizing Bar.\n\n=== BOT SUMMARY COMMENTS ===\n- **coderabbitai[bot]** (comment 303)\n    Walkthrough: Foo gains an `n` prop."
                 }
               ],
               "format": {
@@ -3486,7 +3486,143 @@
               "parts": [
                 {
                   "type": "text",
-                  "text": "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings (the full diff is in your shared context); for any item flagged needs_cross_file, resolve it now using the full diff; fold in the bot summary comments below. Return ONE item per distinct finding with its missed_by attribution. UNION the threads[] ids of every bot comment you merge into a single item — none may be dropped (each thread gets a reply). CITATION DECLINES: any finding that contradicts the APPROVED PLAN (injected in the base system context) must be `decline`d with reason citing the specific plan criterion or decision — even if the bot marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n## src/Foo.tsx (VERIFY FAILED: no structured output)\nnull\n\n## src/Bar.tsx (VERIFY FAILED: no structured output)\nnull\n\n=== BOT SUMMARY COMMENTS ===\n- **coderabbitai[bot]** (comment 303)\n    Walkthrough: Foo gains an `n` prop."
+                  "text": "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings (the full diff is in your shared context); for any item flagged needs_cross_file, resolve it now using the full diff; fold in the bot summary comments below. Return ONE item per distinct finding with its missed_by attribution. UNION the threads[] ids of every bot comment you merge into a single item — none may be dropped (each thread gets a reply). CITATION DECLINES: any finding that contradicts the APPROVED PLAN (injected in the base system context) must be `decline`d with reason citing the specific plan criterion or decision — even if the bot marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n## src/Foo.tsx (VERIFY FAILED: no structured output) — unverified; verdict these raw findings yourself against the full diff:\n- `src/Foo.tsx:1`\n  - **coderabbitai[bot]** (thread 101)\n      🟠 Major: `n` may be undefined here — `n!.toFixed()` throws.\n\n## src/Bar.tsx (VERIFY FAILED: no structured output) — unverified; verdict these raw findings yourself against the full diff:\n- `src/Bar.tsx:1`\n  - **greptile-apps[bot]** (thread 202)\n      Consider memoizing Bar.\n\n=== BOT SUMMARY COMMENTS ===\n- **coderabbitai[bot]** (comment 303)\n    Walkthrough: Foo gains an `n` prop."
+                }
+              ],
+              "format": {
+                "type": "json_schema",
+                "schema": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "items"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "description": "one entry per distinct feedback item",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "class",
+                          "verdict",
+                          "missed_by",
+                          "reason"
+                        ],
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "description": "bot / reviewer name or comment ref"
+                          },
+                          "class": {
+                            "type": "string",
+                            "description": "correctness | legibility | overengineering | ux | test | other"
+                          },
+                          "verdict": {
+                            "enum": [
+                              "address",
+                              "decline"
+                            ],
+                            "description": "address = auto-fix now; decline = won't (give reason) — false positive, outdated, not worth it, OR out of scope. The loop handles everything; nothing is deferred to a human."
+                          },
+                          "missed_by": {
+                            "type": "string",
+                            "description": "which of OUR steps should have caught it first: care-reviewer | care-technical-review | care-ux-review | care-test-grade | novel (un-catchable pre-merge) | none (not an escape)"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "high",
+                              "medium",
+                              "low",
+                              "none"
+                            ],
+                            "description": "bot-declared severity, normalized. CodeRabbit tags appear inline in the digest: 🔴Critical/🟠Major→high, 🟡Minor→medium, 🧹Nitpick→low. Copilot severity is a GitHub-UI-only field (never in the comment body) → always none. Greptile carries no structured severity → none. Omit or set none when no tag is present."
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "threads": {
+                            "type": "array",
+                            "items": {
+                              "type": "number"
+                            },
+                            "description": "the GitHub thread id(s) this verdict covers — the numbers from the feedback digest's `(thread NNN)` refs. When you dedup several bot comments into one item, union ALL their thread ids. Empty for items derived only from summary comments."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "op": "server.close"
+          }
+        ]
+      },
+      {
+        "config": {
+          "permission": {
+            "edit": "deny",
+            "bash": "deny",
+            "webfetch": "deny",
+            "external_directory": "allow"
+          },
+          "tools": {
+            "task": false
+          }
+        },
+        "closed": true,
+        "calls": [
+          {
+            "op": "session.create",
+            "id": "s5",
+            "title": "care-triager r1"
+          },
+          {
+            "op": "drive",
+            "session": "s5",
+            "timeoutMs": 360000
+          },
+          {
+            "op": "promptAsync",
+            "session": "s5",
+            "body": {
+              "model": {
+                "providerID": "github-copilot",
+                "modelID": "claude-opus-4.8"
+              },
+              "system": "You are the care-loop triager (judgment tier). Given the pre-digested bot feedback, apply the triage methodology below and return ONE item per distinct piece of feedback. For each: decide a verdict (address = auto-fix, or decline = won't, incl. out-of-scope, with a reason — the loop handles everything, nothing is deferred to a human), classify it, and attribute missed_by = which of OUR pipeline steps should have caught it first (care-reviewer | care-technical-review | care-ux-review | care-test-grade), or 'novel' if it was genuinely un-catchable before merge, or 'none' if it isn't an escape (praise, or our own already-known finding). Copy each item's `(thread NNN)` id(s) from the feedback into its threads[] (union them when you dedup several comments).\n\nIMPORTANT — `[addressed round N]` tags in the feedback mean the implementer already applied a fix for this thread in round N; the bot thread is still open only because GitHub resolution happens at the end of the loop. Read the file to verify the fix is present (you have repo access via the worktree path); if it is, verdict it `decline` with reason `fix already applied in round N`. Only verdict it `address` if you can show the fix is absent or was regressed (cite the specific line).\n\n=== APPROVED PLAN (authoritative — citation-decline any finding that contradicts this) ===\n## Acceptance criteria (authoritative spec)\n# Acceptance criteria — ENG-1\n\n- renders Foo\n\n## Decisions + non-goals from the plan interview\n# Decisions — ENG-1\n\n## Non-goals\n\n- no backend change\n=== END APPROVED PLAN ===\n\n=== TRIAGE METHODOLOGY ===\n<<skill:triager>>\n=== END METHODOLOGY ===\n\nVerify each finding against the cited code first, then END your turn with your triage as a plain-prose list (one line per item: verdict, class, missed_by, thread id(s), reason) — do NOT emit JSON yet; a follow-up turn will ask you to format it.",
+              "parts": [
+                {
+                  "type": "text",
+                  "text": "Repo under review (read-only, absolute paths): <TMP>/wt\nThe feedback's `path:line` references are RELATIVE to this repo root — resolve and read them there (and their adjacent files) to verify each finding before you verdict it.\n\n# PR #1 — pre-digested bot feedback   (2026-09-11T00:00:00Z)\n\n## Inline comments\n- `src/Foo.tsx:1`\n  - **coderabbitai[bot]** (thread 101)\n      🟠 Major: `n` may be undefined here — `n!.toFixed()` throws.\n\n- `src/Bar.tsx:1`\n  - **greptile-apps[bot]** (thread 202)\n      Consider memoizing Bar.\n\n## Summary comments\n- **coderabbitai[bot]** (comment 303)\n    Walkthrough: Foo gains an `n` prop.\n"
+                }
+              ]
+            }
+          },
+          {
+            "op": "drive",
+            "session": "s5",
+            "timeoutMs": 360000
+          },
+          {
+            "op": "promptAsync",
+            "session": "s5",
+            "body": {
+              "model": {
+                "providerID": "github-copilot",
+                "modelID": "claude-opus-4.8"
+              },
+              "system": "You are the care-loop triager. In your previous turn you produced the triage items. Emit EXACTLY those items as the required JSON — one entry per item, preserving verdict/class/missed_by/reason and the `(thread NNN)` id(s) in threads[]. Do NOT read or verify anything further, and do NOT change any verdict. Return ONLY the items array as the required JSON.",
+              "parts": [
+                {
+                  "type": "text",
+                  "text": "Emit your triage items as the required JSON now."
                 }
               ],
               "format": {
@@ -3571,12 +3707,39 @@
       "skill": "care-triager",
       "round": 1,
       "terminalState": "done",
-      "verdict": "clean",
+      "verdict": "address",
       "reasonCode": "triaged",
       "payload": {
-        "addressCount": 0,
-        "declineCount": 0,
-        "items": []
+        "addressCount": 1,
+        "declineCount": 1,
+        "items": [
+          {
+            "source": "coderabbitai[bot]",
+            "class": "correctness",
+            "missedBy": "care-reviewer",
+            "severity": "high",
+            "verdict": "address",
+            "reason": "real bug",
+            "threads": [
+              101
+            ]
+          },
+          {
+            "source": "greptile-apps[bot]",
+            "class": "other",
+            "missedBy": "none",
+            "verdict": "decline",
+            "reason": "not worth it",
+            "threads": [
+              202
+            ]
+          }
+        ]
+      },
+      "cost": {
+        "usdEst": 0.02,
+        "inputTokens": 200,
+        "outputTokens": 20
       },
       "modelUsed": "claude-opus-4.8"
     }

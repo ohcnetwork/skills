@@ -693,9 +693,12 @@ export function opencodeTriager(
               "must be `decline`d with reason citing the specific plan criterion or decision — even if the bot " +
               "marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n" +
               r
-                .map(
-                  (x) =>
-                    `## ${x.id}${x.error ? ` (VERIFY FAILED: ${x.error})` : ""}\n${JSON.stringify(x.data)}`,
+                .map((x) =>
+                  x.error
+                    ? // The fork failed, so nothing was verified: hand over the raw findings, not `null`,
+                      // or this file's threads silently drop out of the triage.
+                      `## ${x.id} (VERIFY FAILED: ${x.error}) — unverified; verdict these raw findings yourself against the full diff:\n${clusters.find((c) => c.file === x.id)?.text ?? ""}`
+                    : `## ${x.id}\n${JSON.stringify(x.data)}`,
                 )
                 .join("\n\n") +
               (summary ? `\n\n=== BOT SUMMARY COMMENTS ===\n${summary}` : ""),
@@ -704,13 +707,21 @@ export function opencodeTriager(
           timeoutMs,
         });
         const reduced = res.reduce?.data;
+        const unverified = res.map.filter((m) => m.error).length;
         if (reduced && Array.isArray(reduced.items)) {
           rawItems = reduced.items;
           cost = res.reduce?.cost;
-        } else {
+        } else if (unverified === 0) {
           // reduce failed → degrade: flatten the per-file verified items (no global dedup/Scope Governor).
           rawItems = res.map.flatMap((m) =>
             m.data && Array.isArray(m.data.items) ? m.data.items : [],
+          );
+        } else {
+          // reduce failed AND some files were never verified: flattening would drop their threads, and
+          // with every fork failed it reads as a clean triage, which converges the run. Re-triage the
+          // proven way instead (the catch below).
+          throw new Error(
+            `reduce failed and ${unverified}/${res.map.length} per-file verifies failed`,
           );
         }
       } catch (e) {

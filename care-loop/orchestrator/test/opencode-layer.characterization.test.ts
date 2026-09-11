@@ -442,8 +442,8 @@ test("the opencode layer sends exactly what the golden records", async () => {
     await record("triager (fan-out): every fork fails", triage, ({ body }) =>
       isFork(body) ? { modelID: MODELS.plannerRecon } : reply(body),
     );
-    await record("triager (fan-out): every fork and the reduce fail", triage, ({ body }) =>
-      isEmit(body) ? { modelID: body.model.modelID } : reply(body),
+    await record("triager (fan-out): every fork and the reduce fail", triage, ({ body, forkedFrom }) =>
+      forkedFrom ? { modelID: body.model.modelID } : reply(body),
     );
   } finally {
     delete process.env.OC_INACTIVITY_TIMEOUT_MS;

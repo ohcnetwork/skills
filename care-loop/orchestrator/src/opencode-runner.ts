@@ -851,24 +851,11 @@ export async function forkedFanOut(
     ? `${spec.base.system}\n\n=== SHARED CONTEXT (read-only) ===\n${spec.base.context}\n=== END SHARED CONTEXT ===`
     : spec.base.system;
 
-  // Start the shared server with a bounded timeout — `createOpencode` spawns an opencode subprocess
-  // and waits for it to be ready; if the subprocess hangs at startup (observed: 15-min stall when
-  // called right after a large parallel fan-out exhausted Copilot connections), this blocks forever.
-  // 30s is generous — normal startup is 1-2s.
-  const startServer = () =>
-    Promise.race([
-      startOpencodeOnFreePort({
-        permission: JUDGMENT_PERMISSION,
-        tools: { task: false },
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("opencode server startup timed out")),
-          30_000,
-        ),
-      ),
-    ]);
-  const oc = await startServer();
+  // Startup is already bounded: the SDK's createOpencodeServer gives up, and stops the subprocess, after 5s.
+  const oc = await startOpencodeOnFreePort({
+    permission: JUDGMENT_PERMISSION,
+    tools: { task: false },
+  });
   let timedOut = false;
   const deadline = setTimeout(() => {
     timedOut = true;

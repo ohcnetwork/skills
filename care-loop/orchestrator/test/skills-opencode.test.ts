@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   testSurfaceOwed,
   opencodeTestGrader,
+  opencodeImplementer,
+  setCliRunner,
 } from "../src/skills-opencode.ts";
 import type { TestGradePayload } from "../src/skill-result.ts";
 
@@ -88,4 +91,34 @@ test("no specs + no baseline at all ⇒ no_specs pass (--skip-plan run)", async 
   assert.equal(r.verdict, "pass");
   assert.equal(r.reasonCode, "no_specs");
   assert.equal((r.payload as TestGradePayload).specsOwed, false);
+});
+
+// ── implementer: git's stderr is not a changed file ───────────────────────────────────────────────
+
+test("implementer: a git warning on stderr is not read as a changed file", async () => {
+  // `git status` warns about an unreadable directory on stderr and still exits 0. With stderr merged
+  // into its output, a maker run that changed nothing was reported as implemented, the warning as a file.
+  const root = rd();
+  const wt = join(root, "wt");
+  const runDir = join(root, "run");
+  mkdirSync(runDir);
+  const git = (...a: string[]) =>
+    execFileSync("git", ["-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", ...a]);
+  execFileSync("git", ["init", "-q", wt]);
+  writeFileSync(join(wt, "a.txt"), "a\n");
+  git("add", "-A");
+  git("commit", "-qm", "base");
+  const locked = join(wt, "locked");
+  mkdirSync(locked);
+  chmodSync(locked, 0o000);
+  // The maker exits 0 without touching the tree.
+  setCliRunner((o) => ({ cmd: o.cmd, args: o.args ?? [], exit: 0, summary: "ok", logPath: o.logPath }));
+  try {
+    const r = await opencodeImplementer({})({ task: "t", worktree: wt, runDir, round: 1 });
+    assert.equal(r.reasonCode, "exit_0_no_change");
+    assert.deepEqual((r.payload as { filesChanged: string[] }).filesChanged, []);
+  } finally {
+    chmodSync(locked, 0o755);
+    setCliRunner();
+  }
 });

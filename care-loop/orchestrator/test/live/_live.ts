@@ -11,4 +11,4 @@ export const LIVE = process.env.CARE_LIVE === "1";
 export const SKIP = LIVE ? false : "set CARE_LIVE=1 (or use `npm run test:live`) — spends real requests";
 
 export const PROVIDER = process.env.PROBE_PROVIDER ?? "github-copilot";
-export const MODEL = process.env.PROBE_MODEL ?? "claude-sonnet-4.6";
+export const MODEL = process.env.PROBE_MODEL ?? "claude-sonnet-5";

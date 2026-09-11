@@ -1,5 +1,5 @@
-// stress-triage.ts — run the triager fan-out N times sequentially and report pass/fail.
-// Tests reliability of the base warm-up retry + 90s timeout fix against Copilot flakiness.
+// stress-triage.ts — run the triager N times in parallel and report pass/fail and wall time, to check
+// its reliability against Copilot flakiness.
 //
 // Run: npx tsx src/stress-triage.ts
 // Env: N (default 5), FEEDBACK_PATH, WORKTREE, BASE (same as ab-triager.ts)

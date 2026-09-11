@@ -10,7 +10,6 @@ import {
   runJudgmentSpawn,
   promptStructured,
   promptAgenticThenStructured,
-  forkedFanOut,
   NO_EXPLORE_TOOLS,
   type SpawnCost,
 } from "./opencode-runner.js";
@@ -48,6 +47,13 @@ import type {
 } from "./skill-result.js";
 import type { Tier } from "./state.js";
 
+// Test seam, in the `setActiveRunStore` idiom: the two `opencode run` roles go through `cli`, so a test
+// can fake the maker run without spawning opencode.
+let cli: typeof runHelper = runHelper;
+export function setCliRunner(fn?: typeof runHelper): void {
+  cli = fn ?? runHelper;
+}
+
 export interface SkillModels {
   provider?: string; // default "github-copilot"
   reviewer?: string; // judgment tier
@@ -62,10 +68,10 @@ export interface SkillModels {
 const defaults = {
   provider: "github-copilot",
   reviewer: "claude-opus-4.8",
-  implementer: "claude-sonnet-4.6",
+  implementer: "claude-sonnet-5",
   triager: "claude-opus-4.8",
   planner: "claude-opus-4.8",
-  plannerRecon: "claude-sonnet-4.6",
+  plannerRecon: "claude-sonnet-5",
   testGrader: "claude-opus-4.8",
   uxValidator: "claude-opus-4.8",
 };
@@ -80,23 +86,22 @@ const defaults = {
 // the inline diff, nothing to batch. HISTORY (SSE-measured 2026-07-15, care_fe eng-642, opus): the
 // triager did NOT batch in one agent — ~1 tool/round-trip, maxConcurrent=1, ~90 tools over ~80 turns;
 // prompt levers were INERT (per-item verify→verdict is intrinsically sequential in ONE context, unlike
-// the planner's recon). So the lever was ORCHESTRATOR-LEVEL FAN-OUT (parallelize ACROSS files, not
-// tool-calls within one agent) — now WIRED in opencodeTriager via `forkedFanOut` (map verify-per-file
-// on the maker tier → judgment-tier reduce) for ≥2 clusters, single-spawn below threshold. See
-// care-loop/PLAN-triager-fanout.md + PLAN-forked-fanout.md. Still needs the §8 triage eval to prove
-// parity before it's trusted.
+// the planner's recon). What fixed it was taking the reading away: opencodeTriager pre-reads every cited
+// file into one tools-off spawn (see its JSDoc).
 const BATCH_DIRECTIVE =
   "EXPLORE IN PARALLEL: when you need several independent searches or file reads, issue them as MULTIPLE " +
   "tool calls in a SINGLE step — never one at a time. Batch grep/glob/read aggressively (fire all the " +
   "symbol greps at once, then read all candidate files at once). Do NOT spawn subagents (the `task` tool); " +
   "explore directly. Minimize the number of sequential steps — that round-trip latency is the dominant cost.";
 
+/** Run git in `dir`. `out` is stdout only: every caller parses it (a sha, porcelain lines, a diff), and
+ *  git writes warnings to stderr even when it succeeds — merged in, a warning reads as a changed file. */
 function git(dir: string, ...args: string[]): { code: number; out: string } {
   const r = spawnSync("git", ["-C", dir, ...args], {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   });
-  return { code: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  return { code: r.status ?? 1, out: r.stdout ?? "" };
 }
 
 /** Error thrown when a judgment spawn ran on the wrong engine. Halts the run loudly rather than
@@ -274,6 +279,9 @@ const IMPLEMENTER_PERMISSION = JSON.stringify({
     "git merge*": "deny",
     "git tag*": "deny",
   },
+  // opencode's default "ask" is auto-rejected by `opencode run`, which then exits 1: the step fails even
+  // with good edits on disk (probed 2026-09-11). The maker's timeout already bounds a runaway loop.
+  doom_loop: "allow",
 });
 const IMPLEMENTER_PREAMBLE =
   "You are the implementer. ONLY edit source files in this worktree to accomplish the task. Do NOT " +
@@ -323,7 +331,7 @@ export function opencodeImplementer(models: SkillModels = {}): Implementer {
       ? `${task}\n\nAddress these review/gate findings; change only what's needed:\n${findings}`
       : task;
     const prompt = IMPLEMENTER_PREAMBLE + body + planContext(runDir);
-    const r = runHelper({
+    const r = cli({
       cmd: "opencode",
       args: [
         "run",
@@ -422,70 +430,15 @@ const TRIAGE_SCHEMA = {
   },
 } as const;
 
-// Per-cluster verify schema for the fan-out MAP (PLAN-triager-fanout §2/§3): the TRIAGE_SCHEMA item
-// shape plus `needs_cross_file` — a fork sets it when a verdict genuinely depends on a file it wasn't
-// given, and the reduce re-resolves those against the full diff (§3.3) before the final verdict list.
-const CLUSTER_VERIFY_SCHEMA = {
-  $schema: "http://json-schema.org/draft-07/schema#",
-  type: "object",
-  additionalProperties: false,
-  required: ["items"],
-  properties: {
-    items: {
-      type: "array",
-      description: "one entry per distinct finding on THIS file",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "class",
-          "verdict",
-          "missed_by",
-          "reason",
-          "needs_cross_file",
-        ],
-        properties: {
-          source: {
-            type: "string",
-            description: "bot / reviewer name or comment ref",
-          },
-          class: {
-            type: "string",
-            description:
-              "correctness | legibility | overengineering | ux | test | other",
-          },
-          verdict: { enum: ["address", "decline"] },
-          missed_by: {
-            type: "string",
-            description:
-              "care-reviewer | care-technical-review | care-ux-review | care-test-grade | novel | none",
-          },
-          severity: {
-            type: "string",
-            enum: ["high", "medium", "low", "none"],
-            description:
-              "bot-declared severity: CodeRabbit 🔴Critical/🟠Major→high, 🟡Minor→medium, 🧹Nitpick→low; Copilot/Greptile→none",
-          },
-          reason: { type: "string" },
-          threads: {
-            type: "array",
-            items: { type: "number" },
-            description:
-              "the GitHub thread id(s) from this file's `(thread NNN)` refs that this finding covers; union all when one finding spans several bot comments",
-          },
-          needs_cross_file: {
-            type: "boolean",
-            description:
-              "true if the verdict depends on a file NOT provided to you; the reduce resolves it against the full diff",
-          },
-        },
-      },
-    },
-  },
-} as const;
+// Turn B of a two-turn triage: re-state the prose triage from Turn A as TRIAGE_SCHEMA JSON.
+const TRIAGE_EMIT_SYSTEM =
+  "You are the care-loop triager. In your previous turn you produced the triage items. Emit EXACTLY " +
+  "those items as the required JSON — one entry per item, preserving verdict/class/missed_by/reason " +
+  "and the `(thread NNN)` id(s) in threads[]. Do NOT read or verify anything further, and do NOT " +
+  "change any verdict. Return ONLY the items array as the required JSON.";
 
 /** The change under review = branch vs base (committed) + uncommitted edits (mirrors orchestrate's
- *  defaultDiffOf). The big shared, cache-warmed context for the fan-out base. Guarded so a bad base
+ *  defaultDiffOf), inlined into the triage prompt. Guarded so a bad base
  *  ref yields "" (no diff) rather than git's stderr leaking into the prompt. */
 function computeDiff(worktree: string, base: string): string {
   const c = git(worktree, "diff", `${base}...HEAD`);
@@ -493,29 +446,32 @@ function computeDiff(worktree: string, base: string): string {
   return (c.code === 0 ? c.out : "") + (u.code === 0 ? u.out : "");
 }
 
-/** Default triager (Step 6a). Two paths behind a threshold (PLAN-triager-fanout §4):
- *  - **fan-out** when there's a `worktree` to verify against AND ≥2 file-clusters — `forkedFanOut`
- *    warms the methodology+diff once, forks a per-file verify (maker tier), then a judgment-tier reduce
- *    dedups / Scope-Governors / resolves `needs_cross_file` into the final verdict list;
- *  - **single-spawn** (the proven original) for sub-threshold feedback or when no worktree is baked in.
+/** Default triager (Step 6a). With a `worktree` and feedback that cites files, it pre-reads every cited
+ *  file and triages in ONE judgment-tier session with tools off: Turn A verifies each finding against the
+ *  inlined code and writes the verdicts out in prose, Turn B emits them as TRIAGE_SCHEMA JSON. There is
+ *  no agentic read loop to go serial (the original triager took ~80 turns and 255s+), and the prose turn
+ *  keeps it from rubber-stamping plausible false positives, which a one-shot JSON answer did. A/B,
+ *  2026-09-11 (care-evals tr-01..tr-04 plus 5- and 10-file stacks, 3 reps, Copilot): verdicts tied with
+ *  the forkedFanOut design this replaced (43 vs 41 of 48 fixture checks) at ~10–20% more latency and
+ *  ~430 fewer lines; that design is in git history. Without a worktree, or if the pre-read spawn fails,
+ *  the agentic single-spawn triages instead.
  *  `worktree` is baked in here — like `apply`/`gate`/`push` close over `cfg.worktree` in default-wiring
- *  — so the feedback's repo-relative paths resolve (reads permitted by JUDGMENT_PERMISSION). `base` is
- *  the branch's base ref (default-wiring passes `cfg.base`), used only to compute the fan-out diff. */
+ *  — so the feedback's repo-relative paths resolve. `base` is the branch's base ref (default-wiring
+ *  passes `cfg.base`), used to compute the diff. */
 export function opencodeTriager(
   models: SkillModels = {},
   worktree?: string,
   base?: string,
 ): Triager {
   const provider = models.provider ?? defaults.provider;
-  const model = models.triager ?? defaults.triager; // judgment tier — reduce + single-spawn
-  const mapModel = models.plannerRecon ?? defaults.plannerRecon; // maker tier — per-cluster verify (recon-like)
+  const model = models.triager ?? defaults.triager; // judgment tier
   // The injected triage methodology + multi-item feedback push past the 240s default.
   // Same fix as the reviewer: give extra headroom, override via env for CI/slow models.
   const timeoutMs = Number(process.env.OC_TRIAGER_TIMEOUT_MS) || 360_000;
   return defineSkill("care-triager", async ({ round, feedbackPath, runDir }) => {
     const feedback = readFileSync(feedbackPath, "utf8");
     const methodology = triagerMethodology();
-    const { clusters, summary } = parseFeedbackClusters(feedback);
+    const { clusters } = parseFeedbackClusters(feedback);
     // Inject the approved plan (criteria.md + decisions.md) so the triager can citation-decline
     // bot feedback that contradicts the plan. Mirrors implementer's planContext; the triager's
     // methodology already says to decline findings that contradict decisions.md, but it was
@@ -542,21 +498,18 @@ export function opencodeTriager(
         ? `\n\n=== APPROVED PLAN (authoritative — citation-decline any finding that contradicts this) ===\n${parts.join("\n\n")}\n=== END APPROVED PLAN ===`
         : "";
     })();
-    // Use the fan-out path whenever we have a worktree AND at least one file-cluster. Even a single
-    // cluster benefits: the fan-out PRE-READS each cluster's file and inlines it, so the model never
-    // goes agentic reading the repo (the single-spawn+worktree path does, which hangs on a flaky
-    // Copilot with no bound). Single-spawn is now only for the no-worktree degraded case.
-    const useFanOut = !!worktree && clusters.length >= 1;
+    // Pre-read whenever there's a worktree and the feedback cites at least one file: the model then
+    // verdicts from the inlined code instead of reading the repo turn by turn.
+    const preread = !!worktree && clusters.length >= 1;
 
     let rawItems: any[] = [];
     let cost: SpawnCost | undefined;
     let modelReported: string | undefined;
     let modelPinSatisfied: boolean | undefined;
 
-    // Single-spawn path (the proven original): used directly for the no-worktree / sub-threshold case,
-    // and as the fan-out FALLBACK — if forkedFanOut throws (e.g. its load-bearing base warm-up fails) we
-    // still produce a triage instead of failing the step. Bounded by timeoutMs via the async transport,
-    // so the old "single-spawn+worktree hangs on a flaky Copilot with no bound" risk no longer applies.
+    // Agentic single-spawn: the model reads the repo itself. Used when there's nothing to pre-read, and
+    // as the pre-read spawn's fallback so the step still completes. Bounded by timeoutMs via the async
+    // transport.
     const runSingleSpawn = async () => {
       const repoLine = worktree
         ? `Repo under review (read-only, absolute paths): ${worktree}\n` +
@@ -584,14 +537,9 @@ export function opencodeTriager(
         "\n\nVerify each finding against the cited code first, then END your turn with your triage as a " +
         "plain-prose list (one line per item: verdict, class, missed_by, thread id(s), reason) — do NOT emit " +
         "JSON yet; a follow-up turn will ask you to format it.";
-      // TWO-TURN split: this fallback path reads worktree files to verify — agentic exploration, which
-      // under a `format` constraint collapses into the serial spin (see promptAgenticThenStructured).
-      // Turn A verifies with NO format, Turn B emits the items as JSON in the same warm session.
-      const emitSystem =
-        "You are the care-loop triager. In your previous turn you produced the triage items. Emit EXACTLY " +
-        "those items as the required JSON — one entry per item, preserving verdict/class/missed_by/reason " +
-        "and the `(thread NNN)` id(s) in threads[]. Do NOT read or verify anything further, and do NOT " +
-        "change any verdict. Return ONLY the items array as the required JSON.";
+      // TWO-TURN split: this path reads worktree files to verify — agentic exploration, which under a
+      // `format` constraint collapses into the serial spin (see promptAgenticThenStructured). Turn A
+      // verifies with NO format, Turn B emits the items as JSON in the same warm session.
       const out = await promptAgenticThenStructured(
         {
           role: "care-triager",
@@ -599,7 +547,7 @@ export function opencodeTriager(
           modelID: model,
           reconSystem: system,
           task: repoLine + feedback,
-          emitSystem,
+          emitSystem: TRIAGE_EMIT_SYSTEM,
           emitInstruction: "Emit your triage items as the required JSON now.",
           round,
           timeoutMs,
@@ -612,103 +560,77 @@ export function opencodeTriager(
       modelPinSatisfied = out.modelPinSatisfied;
     };
 
-    if (useFanOut) {
-      // Fall back to single-spawn if the fan-out throws. Map forks + reduce already degrade internally;
-      // this try/catch covers a base-warm-up / server-startup / deadline failure so the step still completes.
-      try {
-        // ── fan-out path (map per file-cluster → reduce) ──────────────────────────────────────────
-        const diff = base ? computeDiff(worktree!, base) : "";
-        // Pre-read each cluster's file so forks can verdict in a single shot (no tool calls).
-        // Eliminates the agentic multi-turn exploration that made the slowest fork take 193s.
-        const fileContents = new Map<string, string>();
-        for (const c of clusters) {
+    // Pre-read spawn: the full diff and every cited file inline, tools off, so the model reasons from the
+    // code in front of it. It does the global pass in the same session (dedup, Scope Governor, bug-class
+    // siblings, thread union), writing the verdicts in prose before the JSON turn.
+    const runPrereadSpawn = async () => {
+      const diff = base ? computeDiff(worktree!, base) : "";
+      const files = clusters
+        .map((c) => {
           try {
-            fileContents.set(
-              c.file,
-              readFileSync(join(worktree!, c.file), "utf8"),
-            );
+            const content = readFileSync(join(worktree!, c.file), "utf8");
+            return `=== CURRENT FILE: ${c.file} ===\n${content}\n=== END FILE ===`;
           } catch {
-            // File may not exist (deleted in the diff) — the fork handles this via the diff context.
+            return `(File ${c.file} not found on disk — use the diff to verify.)`;
           }
-        }
-        const res = await forkedFanOut({
-          provider,
-          base: {
-            system:
-              "You are the care-loop triager verifying ONE file's review findings. The shared context is " +
-              "the FULL change diff (for cross-file awareness). Each fork prompt includes the CURRENT file " +
-              "content so you can verify findings WITHOUT reading the repo. Set needs_cross_file=true only " +
-              "when a verdict genuinely depends on a file NOT provided to you. Return items[] for THIS file only. " +
-              "Copy the `(thread NNN)` id from each finding into that item's threads[] so it can be replied to.\n\n" +
-              "IMPORTANT — `[addressed round N]` tags in the findings mean the implementer already applied a fix " +
-              "for this thread in round N; the bot thread is still open only because GitHub resolution happens at " +
-              "the end of the loop. Verify the fix is present in the CURRENT FILE block: if the fix is there, " +
-              "verdict it `decline` with reason `fix already applied in round N`. Only verdict it `address` if " +
-              "you can show the fix is absent or was regressed (cite the specific line)." +
-              (planBlock ? planBlock : "") +
-              (methodology
-                ? `\n\n=== TRIAGE METHODOLOGY ===\n${methodology}\n=== END METHODOLOGY ===`
-                : ""),
-            context: diff,
-          },
-          map: {
-            model: mapModel,
-            schema: CLUSTER_VERIFY_SCHEMA,
-            forkTimeoutMs: 45_000,
-            tasks: clusters.map((c) => {
-              const content = fileContents.get(c.file);
-              const fileBlock = content
-                ? `\n\n=== CURRENT FILE: ${c.file} ===\n${content}\n=== END FILE ===`
-                : `\n\n(File ${c.file} not found on disk — use the diff context to verify.)`;
-              return {
-                id: c.file,
-                prompt: `Findings on \`${c.file}\`:\n\n${c.text}\n\nVerify each against the code below and return items[].${fileBlock}`,
-              };
-            }),
-          },
-          reduce: {
-            model,
-            schema: TRIAGE_SCHEMA,
-            // The reduce runs on the judgment tier and COLD vs the warm base prefix (reduce.model !=
-            // map.model), so a large diff + many file-clusters can push the synthesis past the fan-out
-            // default 90s cap — degrading to an un-deduped flatten. Give it dedicated headroom (still
-            // bounded by the run-scoped `timeoutMs`, which closes the server). Override via env.
-            timeoutMs:
-              Number(process.env.OC_TRIAGER_REDUCE_TIMEOUT_MS) || 180_000,
-            prompt: (r) =>
-              "Consolidate these per-file verified findings into the FINAL triage verdict list. Dedup " +
-              "overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings " +
-              "(the full diff is in your shared context); for any item flagged needs_cross_file, resolve it " +
-              "now using the full diff; fold in the bot summary comments below. Return ONE item per distinct " +
-              "finding with its missed_by attribution. UNION the threads[] ids of every bot comment you " +
-              "merge into a single item — none may be dropped (each thread gets a reply). " +
-              "CITATION DECLINES: any finding that contradicts the APPROVED PLAN (injected in the base system context) " +
-              "must be `decline`d with reason citing the specific plan criterion or decision — even if the bot " +
-              "marks it Critical.\n\n=== PER-FILE VERIFIED FINDINGS ===\n" +
-              r
-                .map(
-                  (x) =>
-                    `## ${x.id}${x.error ? ` (VERIFY FAILED: ${x.error})` : ""}\n${JSON.stringify(x.data)}`,
-                )
-                .join("\n\n") +
-              (summary ? `\n\n=== BOT SUMMARY COMMENTS ===\n${summary}` : ""),
-          },
-          concurrency: 5,
+        })
+        .join("\n\n");
+      const system =
+        "You are the care-loop triager (judgment tier). The FULL change diff and the CURRENT content of every " +
+        "file the feedback cites are supplied below, so verify each finding against them WITHOUT reading the " +
+        "repo. Return ONE item per distinct piece of feedback. For each: decide a verdict (address = auto-fix, " +
+        "or decline = won't, incl. out-of-scope, with a reason — the loop handles everything, nothing is " +
+        "deferred to a human), classify it, and attribute missed_by = which of OUR pipeline steps should have " +
+        "caught it first (care-reviewer | care-technical-review | care-ux-review | care-test-grade), or 'novel' " +
+        "if it was genuinely un-catchable before merge, or 'none' if it isn't an escape (praise, or our own " +
+        "already-known finding). Copy each item's `(thread NNN)` id(s) from the feedback into its threads[].\n\n" +
+        "IMPORTANT — `[addressed round N]` tags in the feedback mean the implementer already applied a fix " +
+        "for this thread in round N; the bot thread is still open only because GitHub resolution happens at " +
+        "the end of the loop. Verify the fix is present in the CURRENT FILE block: if the fix is there, " +
+        "verdict it `decline` with reason `fix already applied in round N`. Only verdict it `address` if " +
+        "you can show the fix is absent or was regressed (cite the specific line)." +
+        planBlock +
+        (methodology
+          ? `\n\n=== TRIAGE METHODOLOGY ===\n${methodology}\n=== END METHODOLOGY ===`
+          : "");
+      const prompt =
+        `=== CHANGE DIFF ===\n${diff}\n=== END DIFF ===\n\n${files}\n\n` +
+        `=== FEEDBACK ===\n${feedback}\n=== END FEEDBACK ===\n\n` +
+        "Verify each finding against the code above, then return the FINAL triage verdict list. Dedup " +
+        "overlapping bot findings; apply the Scope Governor and promote in-scope bug-class siblings; fold in " +
+        "the bot summary comments. UNION the threads[] ids of every bot comment you merge into a single item " +
+        "— none may be dropped (each thread gets a reply). CITATION DECLINES: any finding that contradicts " +
+        "the APPROVED PLAN must be `decline`d with reason citing the specific plan criterion or decision — " +
+        "even if the bot marks it Critical.\n\nEND your turn with that list in plain prose (one line per " +
+        "item: verdict, class, missed_by, thread id(s), reason) — do NOT emit JSON yet; a follow-up turn " +
+        "will ask you to format it.";
+      const out = await promptAgenticThenStructured(
+        {
+          role: "care-triager",
+          providerID: provider,
+          modelID: model,
+          reconSystem: system,
+          task: prompt,
+          emitSystem: TRIAGE_EMIT_SYSTEM,
+          emitInstruction: "Emit your triage items as the required JSON now.",
+          round,
           timeoutMs,
-        });
-        const reduced = res.reduce?.data;
-        if (reduced && Array.isArray(reduced.items)) {
-          rawItems = reduced.items;
-          cost = res.reduce?.cost;
-        } else {
-          // reduce failed → degrade: flatten the per-file verified items (no global dedup/Scope Governor).
-          rawItems = res.map.flatMap((m) =>
-            m.data && Array.isArray(m.data.items) ? m.data.items : [],
-          );
-        }
+          tools: NO_EXPLORE_TOOLS,
+        },
+        TRIAGE_SCHEMA,
+      );
+      rawItems = Array.isArray(out.data.items) ? out.data.items : [];
+      cost = out.cost;
+      modelReported = out.modelReported;
+      modelPinSatisfied = out.modelPinSatisfied;
+    };
+
+    if (preread) {
+      try {
+        await runPrereadSpawn();
       } catch (e) {
         console.log(
-          `[triager] fan-out failed, falling back to single-spawn: ${(e as Error).message?.slice(0, 100)}`,
+          `[triager] pre-read spawn failed, falling back to single-spawn: ${(e as Error).message?.slice(0, 100)}`,
         );
         await runSingleSpawn();
       }
@@ -746,9 +668,7 @@ export function opencodeTriager(
 // ── Test-grader (Step 4b) ─────────────────────────────────────────────────────────────────────────
 // Single-spawn promptStructured with pre-read inputs (criteria.md + spec files extracted from the
 // diff). Pre-reading eliminates agentic file exploration — the same lever that cut the triager from
-// 255s to 55s. Fan-out per spec file is architecturally identical to the triager fan-out (map=grade
-// per spec file, reduce=aggregate criterion coverage) but most PRs have 1-3 spec files so single-spawn
-// is sufficient; add fan-out if a large spec suite causes timeout or quality issues.
+// 255s to 55s. Most PRs have 1-3 spec files, so one spawn is enough.
 //
 // `worktree` is the main repo path used to pre-read spec files (read-only, like the triager).
 // If absent (e.g. --skip-plan or no worktree), the grader falls back to reasoning from the diff alone.
@@ -965,9 +885,8 @@ export function opencodeTestGrader(
 
 // ── UX-validator (Step 4c) ─────────────────────────────────────────────────────────────────────────
 // Diff-bounded like the 4a reviewer — the static care-ux-review lens applied as a full dedicated pass.
-// Fan-out per .tsx file is a natural fit (pre-read each file, map=per-file UX check,
-// reduce=consolidate by severity) and mirrors the triager architecture exactly. Deferred pending
-// quality data from single-spawn runs; add if large .tsx-heavy PRs hit timeout or need parallelism.
+// If large .tsx-heavy PRs ever hit the timeout, pre-read the files into this one spawn before reaching
+// for a per-file fan-out: the triager's A/B (2026-09-11) found one pre-read spawn matched a fan-out.
 
 const UX_VALIDATE_SCHEMA = {
   $schema: "http://json-schema.org/draft-07/schema#",
@@ -1203,7 +1122,7 @@ export function opencodeCiFixer(
       methodologyBlock +
       playwrightBlock;
 
-    const r = runHelper({
+    const r = cli({
       cmd: "opencode",
       args: [
         "run",

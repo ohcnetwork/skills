@@ -98,12 +98,14 @@ const BATCH_DIRECTIVE =
   "symbol greps at once, then read all candidate files at once). Do NOT spawn subagents (the `task` tool); " +
   "explore directly. Minimize the number of sequential steps — that round-trip latency is the dominant cost.";
 
+/** Run git in `dir`. `out` is stdout only: every caller parses it (a sha, porcelain lines, a diff), and
+ *  git writes warnings to stderr even when it succeeds — merged in, a warning reads as a changed file. */
 function git(dir: string, ...args: string[]): { code: number; out: string } {
   const r = spawnSync("git", ["-C", dir, ...args], {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   });
-  return { code: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  return { code: r.status ?? 1, out: r.stdout ?? "" };
 }
 
 /** Error thrown when a judgment spawn ran on the wrong engine. Halts the run loudly rather than

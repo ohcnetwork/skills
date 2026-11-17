@@ -18,6 +18,7 @@ See **[INSTALL.md](INSTALL.md)** for step-by-step instructions — written so an
 | [care-sql-code-review](care-sql-code-review/SKILL.md) | Reviews raw analytics SQL (`care_analytics_sql`) for correctness, performance, and maintainability against the CARE Postgres schema. |
 | [care-report-templates](care-report-templates/SKILL.md) | Reference for authoring Jinja2 report templates in the CARE EMR — context variables, filters, globals, and patterns. |
 | [playwright](playwright/SKILL.md) | Write, debug, and run Playwright E2E tests for CARE, with a bundled guide and example specs. |
+| [sync-locales](sync-locales/SKILL.md) | Replays an `en.json` change (removed/renamed keys, optional stale purge) onto the other locale files, with a bundled script and a pending-work checklist. |
 
 Each skill's `SKILL.md` describes exactly when the agent should invoke it and how it behaves.
 

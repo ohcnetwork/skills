@@ -184,4 +184,8 @@ Fail → check report → `--headed` → `--debug` → if data looks stale, `npm
 
 **Flaky triage:** race (element before data) → wait for response/text, not `networkidle` ·
 animation → `waitFor({ state: "visible" })` first · parallel collision → `Date.now()` suffix ·
-stale DB → `db-restore` · polling/WebSocket → wait for a specific DOM change.
+stale DB → `db-restore` · polling/WebSocket → wait for a specific DOM change ·
+overlapping Radix overlays (a dialog/sheet/popover lingers in the DOM during its close
+animation → strict-mode "resolved to 2 elements") → assert a control unique to the closing
+overlay is `toBeHidden()` **before** opening the next; `getByRole("dialog")` is only
+unambiguous once a single dialog is mounted.

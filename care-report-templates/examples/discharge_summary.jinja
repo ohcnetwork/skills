@@ -2,19 +2,67 @@
    DISCHARGE SUMMARY — Encounter Context (encounter_base)
 
    Demonstrates:
+   - Binding nested contexts once (patient, facility) — each access rebuilds them
    - Patient header with official identifiers
-   - Allergies, symptoms, diagnoses with exclude filters
+   - grid() macro + {% call %}: one table definition reused by every section
+   - Allergies (type/category), diagnoses (severity) with exclude filters
    - Medication prescriptions → medications → dosage_instructions (3-level nesting)
-   - Diagnostic reports → observations → components with reference range matching
-   - Questionnaire clinical summary + discharge advice with groupby
-   - Care team signature block
-   - Date/time formatting with | datetime filter
+   - Diagnostic reports → observations → components via one shared row macro
+   - Questionnaire clinical summary + discharge advice grouped by author
+   - Encounter audit fields (created_by) and care team signature block
+   - Date/time formatting with | date and | datetime (IST)
    ============================================================ #}
 
 {% set report_title = "Discharge Summary" %}
-{% set logo_img = "https://example.com/logo.webp" %}
+{# Logo must be a data: URI or an https URL on REPORT_ALLOWED_RESOURCE_ORIGINS; anything else is stripped #}
+{% set logo_img = "" %}
 {% set clinical_summary_slug = "enter_your_questionnaire_slug" %}
 {% set discharge_advice_slug = "enter_your_discharge_advice_slug" %}
+
+{% set patient = encounter.patient %}
+{% set facility = encounter.facility %}
+
+{% macro grid(title, headers) %}
+<div class="section-header">{{ title }}</div>
+<table class="grid">
+    <thead><tr>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+    <tbody>{{ caller() }}</tbody>
+</table>
+{% endmacro %}
+
+{% macro ref_range(item) -%}
+    {%- set r = item.reference_range | selectattr("interpretation", "equalto", item.interpretation) | first | default(none) -%}
+    {%- if not r -%}-
+    {%- elif r.min and r.max %}{{ r.min }} - {{ r.max }}
+    {%- elif r.max %}&lt; {{ r.max }}
+    {%- elif r.min %}&gt; {{ r.min }}
+    {%- endif %}{% if r and item.value.unit %} ({{ item.value.unit }}){% endif -%}
+{%- endmacro %}
+
+{# Observations and their components share title/value/interpretation.
+   Component ranges are skipped: a component without a reference_range crashes the render (BE returns None). #}
+{% macro obs_row(item, date="", component=false) %}
+<tr>
+    <td>{{ date }}</td>
+    <td{% if component %} class="component"{% endif %}>{{ item.title }}</td>
+    <td class="num">{{ item.value.value or "-" }}</td>
+    <td class="num">{{ "-" if component else ref_range(item) }}</td>
+    {# default(…, true): a component whose interpretation is stored as a plain string makes this datapoint undefined #}
+    <td>{{ item.interpretation | default("-", true) }}</td>
+</tr>
+{% endmacro %}
+
+{# value is always a string; boolean questions store "true"/"false" (or "1"/"0") #}
+{% macro answer_text(resp) -%}
+    {%- set is_bool = resp.question.get('type') == 'boolean' -%}
+    {%- for v in resp.answer.get('values', []) -%}
+        {%- set c = v.get('coding') or {} -%}
+        {%- if is_bool -%}{{ "Yes" if (v.get('value') | string | lower) in ["true", "1"] else "No" }}
+        {%- else -%}{{ v.get('value') or c.get('display') or c.get('code', '') }}
+        {%- endif -%}
+        {%- if not loop.last %}<br>{% endif -%}
+    {%- endfor -%}
+{%- endmacro %}
 
 <!DOCTYPE html>
 <html>
@@ -22,309 +70,188 @@
     <meta charset="UTF-8" />
     <style>
         @page { size: A4; margin: 150px 40px 80px 40px; }
-        body { font-family: "Times New Roman", Times, serif; margin: 0; padding: 0; font-size: 14px; line-height: 1.6; }
-        h1, h2, h3 { color: #2E8B57; }
-        h2 { border-bottom: 1px solid #333; }
-        table { width: 100%; margin: 10px 0 20px 0; border: none; line-height: 1.2; }
+        body { font-family: "Times New Roman", Times, serif; margin: 0; font-size: 14px; line-height: 1.6; }
+        h1, h2 { color: #2E8B57; }
+        h2 { border-bottom: 1px solid #333; text-align: center; }
+        table { width: 100%; margin: 10px 0 20px 0; border-collapse: collapse; line-height: 1.2; }
         th, td { border: 1px solid #ddd; padding: 4px 8px; text-align: left; font-size: 10px; }
-        .no-border, .no-border th, .no-border td { border: none !important; padding: 3px; }
-        .no-border th { background-color: transparent !important; }
-        .note-text { font-style: italic; font-size: 8px; margin-top: 12px; }
-        .footer { margin-top: 8px; border-top: 1px solid #333; font-size: 8px; color: #666; text-align: center; }
-        .separator { border-top: 1px solid #333; margin: 20px 0; }
+        th { background: transparent; }
+        .info, .info th, .info td { border: none; padding: 3px; }
+        .grid tr { page-break-inside: avoid; }
+        .num { text-align: right; }
+        .component { padding-left: 20px; }
+        .group-row td { font-weight: bold; background: #f7f7f7; }
 
-        .header { position: fixed; top: -150px; left: 0; right: 0; height: 120px; padding: 10px; display: flex; justify-content: space-between; align-items: center; background: white; z-index: 2; }
-        .header-title { flex-grow: 1; text-align: center; }
-        .header-title h1 { margin: 0; border: none; padding: 0; font-size: 24px; color: #2E8B57; }
-        .content { position: relative; z-index: 5; margin-top: -40px; }
+        .header { position: fixed; top: -150px; left: 0; right: 0; height: 120px; padding: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .header-address { font-size: 10px; }
+        .logo { height: 100px; width: auto; }
 
         .section-header { font-weight: bold; font-size: 12px; margin: 10px 0 5px 0; }
+        .boxed { border: 1px solid #ddd; padding: 10px; }
         .clinical-section { margin-bottom: 12px; page-break-inside: avoid; }
         .clinical-label { font-size: 10px; font-weight: bold; margin-bottom: 4px; }
         .clinical-value { border-bottom: 1px solid #ddd; padding: 6px 8px; font-size: 11px; white-space: pre-line; }
-
-        .report-box { margin: 7px 0; font-size: 10px; border-right: 1px solid #ddd; border-left: 1px solid #ddd; }
-        .report-row { width: 100%; display: flex; }
-        .report-header { font-weight: bold; border-bottom: 1px solid #ddd; border-top: 1px solid #ddd; }
-        .report-cell { padding: 4px; box-sizing: border-box; }
-        .report-title-row { font-weight: bold; padding: 6px; margin: 2px 0 0 0; }
-        .report-note, .report-conclusion { margin-bottom: 8px; padding: 5px; }
-        .col-date { width: 15%; }
-        .col-title { width: 30%; }
-        .col-result { width: 20%; display: flex; justify-content: right; }
-        .col-range { width: 20%; display: flex; justify-content: right; }
-        .col-int { width: 25%; display: flex; margin-right: 10px; justify-content: right; }
-        .col-note { width: 25%; display: flex; margin-right: 10px; justify-content: center; }
+        .separator { border-top: 1px solid #333; margin: 20px 0; }
+        .signature { margin-top: 50px; text-align: right; font-size: 12px; }
+        .note-text { font-style: italic; font-size: 8px; margin-top: 12px; }
+        .footer { margin-top: 8px; border-top: 1px solid #333; font-size: 8px; color: #666; text-align: center; }
     </style>
 </head>
 <body>
     <div class="header">
-        <div class="header-title">
-            <h1 style="text-align: left;">{{ encounter.facility.name }}</h1>
-            <div style="text-align: left; font-size:10px;">
-                {{ encounter.facility.address }}
-                <p>{{ encounter.facility.phone_number }}</p>
+        <div>
+            <h1>{{ facility.name }}</h1>
+            <div class="header-address">
+                {{ facility.address }}
+                <p>{{ facility.phone_number }}</p>
             </div>
         </div>
-        <img alt="Logo" src="{{ logo_img }}" style="height: 100px; width: auto;">
+        {% if logo_img %}<img class="logo" alt="Logo" src="{{ logo_img }}">{% endif %}
     </div>
 
-    <div class="content">
-        <h2 style="text-align: center;">{{ report_title }}</h2>
+    <h2>{{ report_title }}</h2>
 
-        {# ---- Patient Info Header ---- #}
-        <table class="no-border">
-            <tr>
-                <th>Name</th>
-                <td>{{ encounter.patient.name }}</td>
-                <th>Date</th>
-                <td>{{ current_date() }}</td>
-            </tr>
+    {# ---- Patient Info Header ---- #}
+    {% set official = patient.instance_identifiers | selectattr('config.use', 'equalto', 'Official') | first | default(none) %}
+    <table class="info">
+        <tr>
+            <th>Name</th><td>{{ patient.name }}</td>
+            <th>Date</th><td>{{ current_date() }}</td>
+        </tr>
+        <tr>
+            <th>Age</th><td>{{ patient.age }}</td>
+            {% if official %}{% set cfg = official.config %}<th>{{ cfg.display }}</th><td>{{ official.value }}</td>{% endif %}
+        </tr>
+        <tr>
+            <th>Gender</th><td>{{ patient.gender }}</td>
+            <th>Admission Date/Time</th><td>{{ encounter.start_time | datetime }}</td>
+        </tr>
+        <tr>
+            <th>Address</th><td>{{ patient.address }}</td>
+            <th>Discharge Date/Time</th><td>{{ encounter.end_time | datetime }}</td>
+        </tr>
+        <tr>
+            <th>Bed</th><td>{{ encounter.current_location.name or "-" }}</td>
+        </tr>
+    </table>
 
-            {% set official_identifiers = encounter.patient.instance_identifiers | selectattr('config.use', 'equalto', 'Official') | list %}
+    <div class="separator"></div>
 
-            <tr>
-                <th>Age</th>
-                <td>{{ encounter.patient.age }}</td>
-                {% if official_identifiers | length > 0 %}
-                <th>{{ official_identifiers[0].config.display }}</th>
-                <td>{{ official_identifiers[0].value }}</td>
-                {% endif %}
-            </tr>
-            <tr>
-                <th>Gender</th>
-                <td>{{ encounter.patient.gender }}</td>
-                <th>Admission Date/Time</th>
-                <td>{{ encounter.start_time | datetime }}</td>
-            </tr>
-            <tr>
-                <th>Address</th>
-                <td>{{ encounter.patient.address }}</td>
-                <th>Discharge Date/Time</th>
-                <td>{{ encounter.end_time | datetime }}</td>
-            </tr>
-            <tr>
-                <th>Bed</th>
-                <td>{{ encounter.current_location.name }}</td>
-            </tr>
-        </table>
-
-        <div class="separator"></div>
-
-        {# ---- Clinical Summary (Questionnaire) ---- #}
-        {% set qr = encounter.questionnaire_responses.filter(slug=clinical_summary_slug) | list %}
-        {% if qr %}
-        {% set qr = qr | first %}
-        <div style="margin-top: 16px;">
-            <div class="section-header">Clinical Summary</div>
-            <div style="border: 1px solid #ddd; padding: 10px;">
-                {% for resp in qr.responses %}
-                {% set label = resp.question.get('text', resp.question) if resp.question is mapping else resp.question %}
-                {% set values = resp.answer.get('values', [resp.answer]) %}
-                <div class="clinical-section">
-                    <div class="clinical-label">{{ label }}</div>
-                    <div class="clinical-value">
-                        {%- for v in values -%}
-                        {{ v.value }}{% if not loop.last %}<br>{% endif %}
-                        {%- endfor -%}
-                    </div>
-                </div>
-                {% endfor %}
-                <div class="note-text">Updated by: {{ qr.updated_by.full_name }}</div>
-            </div>
+    {# ---- Clinical Summary (latest completed questionnaire response) ---- #}
+    {% set qr = encounter.questionnaire_responses.filter(slug=clinical_summary_slug, limit=1) | first | default(none) %}
+    {% if qr %}
+    <div class="section-header">Clinical Summary</div>
+    <div class="boxed">
+        {% for resp in qr.responses %}
+        <div class="clinical-section">
+            <div class="clinical-label">{{ resp.question.get('text') }}</div>
+            <div class="clinical-value">{{ answer_text(resp) or "-" }}</div>
         </div>
-        {% endif %}
-
-        {# ---- Allergies ---- #}
-        {% set allergies = encounter.allergy_intolerances.filter(exclude_clinical_status="inactive", exclude_verification_status="entered_in_error") | list %}
-        {% if allergies %}
-        <div class="section-header">Allergies</div>
-        <div style="border-bottom: 1px solid #ddd;" class="report-box">
-            <div class="report-row report-header">
-                <div class="report-cell col-title">Allergy</div>
-                <div class="report-cell col-range">Status</div>
-                <div class="report-cell col-result">Criticality</div>
-                <div class="report-cell col-result">Verification</div>
-                <div class="report-cell col-note">Note</div>
-            </div>
-            {% for allergy in allergies %}
-            <div class="report-row">
-                <div class="report-cell col-title">{{ allergy.name }}</div>
-                <div class="report-cell col-range">{{ allergy.clinical_status | capitalize }}</div>
-                <div class="report-cell col-result">{{ allergy.criticality | capitalize }}</div>
-                <div class="report-cell col-result">{{ allergy.verification_status | capitalize }}</div>
-                <div class="report-cell col-note">{{ allergy.note or "-" }}</div>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# ---- Diagnoses ---- #}
-        {% set diagnoses = encounter.diagnoses.filter(exclude_clinical_status="inactive", exclude_verification_status="entered_in_error") | list %}
-        {% if diagnoses %}
-        <div class="section-header">Diagnoses</div>
-        <div style="border-bottom: 1px solid #ddd;" class="report-box">
-            <div class="report-row report-header">
-                <div class="report-cell col-title">Diagnosis</div>
-                <div class="report-cell col-result">Status</div>
-                <div class="report-cell col-result">Verification</div>
-                <div class="report-cell col-range">Onset</div>
-                <div class="report-cell col-note">Note</div>
-            </div>
-            {% for dx in diagnoses %}
-            <div class="report-row">
-                <div class="report-cell col-title">{{ dx.name }}</div>
-                <div class="report-cell col-result">{{ dx.clinical_status | capitalize }}</div>
-                <div class="report-cell col-result">{{ dx.verification_status | capitalize }}</div>
-                <div class="report-cell col-range">{{ dx.onset | date if dx.onset else "-" }}</div>
-                <div class="report-cell col-note">{{ dx.note or "-" }}</div>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# ---- Medications (3-level nesting) ---- #}
-        {% set prescriptions = encounter.medication_prescriptions | list %}
-        {% if prescriptions %}
-        <div class="section-header">Medications</div>
-        <div style="border-bottom: 1px solid #ddd;" class="report-box">
-            <div class="report-row report-header">
-                <div class="report-cell col-title">Medicine</div>
-                <div class="report-cell col-result">Dosage</div>
-                <div class="report-cell col-range">Frequency</div>
-                <div class="report-cell col-int">Duration</div>
-            </div>
-            {% for mp in prescriptions %}
-            {% for medication in mp.medications.filter(status="active") %}
-            {% if medication.dosage_instructions %}
-            {% for di in medication.dosage_instructions %}
-            <div class="report-row">
-                <div class="report-cell col-title">{{ medication.name }}</div>
-                <div class="report-cell col-result">{{ di.dosage }}</div>
-                <div class="report-cell col-range">{{ di.frequency }}</div>
-                <div class="report-cell col-int">{{ di.duration }}</div>
-            </div>
-            {% endfor %}
-            {% endif %}
-            {% endfor %}
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# ---- Diagnostic Reports with Observations & Components ---- #}
-        {% set reports = encounter.diagnostic_reports.filter(status="final") | list %}
-        {% if reports %}
-        <div class="section-header">Diagnostic Reports</div>
-        <div class="report-box">
-            <div class="report-row report-header">
-                <div class="report-cell col-date">Date</div>
-                <div class="report-cell col-title">Title</div>
-                <div class="report-cell col-result">Result</div>
-                <div class="report-cell col-range">Range</div>
-                <div class="report-cell col-int">Interpretation</div>
-            </div>
-            {% for dr in reports %}
-            <div class="report-title-row">
-                {% if dr.service_request.title %}{{ dr.service_request.title }}{% endif %}
-            </div>
-            {% for obs in dr.observations %}
-            <div class="report-row">
-                <div class="report-cell col-date">{{ obs.effective_datetime | date }}</div>
-                <div class="report-cell col-title">{{ obs.title }}</div>
-                <div class="report-cell col-result">
-                    {% if obs.value and obs.value.value %}{{ obs.value.value }}{% endif %}
-                </div>
-                <div class="report-cell col-range">
-                    {% if obs.reference_range is iterable %}
-                    {% set matched = obs.reference_range | selectattr("interpretation", "equalto", obs.interpretation) | list %}
-                    {% if matched %}
-                    {% set range = matched[0] %}
-                    {% set min_val = range.min | default(0) | float %}
-                    {% set max_val = range.max | default(0) | float %}
-                    {% if min_val > 0 and max_val > 0 %}{{ min_val }} - {{ max_val }}
-                    {% elif max_val > 0 %}&lt; {{ max_val }}
-                    {% elif min_val > 0 %}&gt; {{ min_val }}
-                    {% endif %}
-                    {% if obs.value.unit %}({{ obs.value.unit }}){% endif %}
-                    {% else %}-{% endif %}
-                    {% else %}-{% endif %}
-                </div>
-                <div class="report-cell col-int">{{ obs.interpretation | capitalize | default('-') }}</div>
-            </div>
-            {# Components #}
-            {% for comp in obs.component %}
-            <div class="report-row">
-                <div class="report-cell col-date"></div>
-                <div class="report-cell col-title" style="padding-left:15px;">- {{ comp.title }}</div>
-                <div class="report-cell col-result">
-                    {% if comp.value and comp.value.value %}{{ comp.value.value }}{% endif %}
-                </div>
-                <div class="report-cell col-range">
-                    {% if comp.reference_range is iterable %}
-                    {% set matched = comp.reference_range | selectattr("interpretation", "equalto", comp.interpretation) | list %}
-                    {% if matched %}
-                    {% set range = matched[0] %}
-                    {% set min_val = range.min | default(0) | float %}
-                    {% set max_val = range.max | default(0) | float %}
-                    {% if min_val > 0 and max_val > 0 %}{{ min_val }} - {{ max_val }}
-                    {% elif max_val > 0 %}&lt; {{ max_val }}
-                    {% elif min_val > 0 %}&gt; {{ min_val }}
-                    {% endif %}
-                    {% if comp.value.unit %}({{ comp.value.unit }}){% endif %}
-                    {% else %}-{% endif %}
-                    {% else %}-{% endif %}
-                </div>
-                <div class="report-cell col-int">{{ comp.interpretation | capitalize | default('-') }}</div>
-            </div>
-            {% endfor %}
-            {% endfor %}
-            {% if dr.note %}
-            <div class="report-note"><strong>Note:</strong> {{ dr.note }}</div>
-            {% endif %}
-            {% if dr.conclusion %}
-            <div class="report-conclusion"><strong>Conclusion:</strong> {{ dr.conclusion }}</div>
-            {% endif %}
-            <div style="border-top: 1px dotted #333; margin: 2px 0;"></div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# ---- Discharge Advice (Questionnaire with groupby) ---- #}
-        {% set advice_responses = encounter.questionnaire_responses.filter(slug=discharge_advice_slug) | list %}
-        {% if advice_responses %}
-        <div class="section-header">Doctor's Advice</div>
-        <div style="border: 1px dotted #999; padding: 10px;">
-            {% for doctor, responses in advice_responses | groupby('updated_by.full_name') %}
-            <div style="margin-bottom: 10px; font-size: 10px;">
-                <strong>{{ doctor }}</strong>
-                <ul style="margin-top: 5px;">
-                    {% for qr in responses %}
-                    {% for resp in qr.responses %}
-                    {% if resp.question.get('text', resp.question) == "Discharge Advice" %}
-                    {% for v in resp.answer.get('values', [resp.answer]) %}
-                    <li style="font-size: 12px;">{{ v.value }}</li>
-                    {% endfor %}
-                    {% endif %}
-                    {% endfor %}
-                    {% endfor %}
-                </ul>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# ---- Signature Block ---- #}
-        <div style="margin-top: 50px; text-align: right; font-size: 12px;">
-            {% set users = encounter.care_team | list %}
-            {% if users %}
-            {% set user = users | first %}
-            <div style="font-weight: bold;">{{ user.user.full_name }}</div>
-            <div>{{ user.role }}</div>
-            {% endif %}
-        </div>
-
-        <div class="note-text">Note: Content of the {{ report_title }} will not be changed for any reason once the patient is discharged from the hospital. Please bring this report when you come for checkup. This {{ report_title }} is not a legal document or certificate.</div>
-        <div class="footer">This is a computer-generated {{ report_title }}.</div>
+        {% endfor %}
+        <div class="note-text">Updated by: {{ qr.updated_by.full_name }}</div>
     </div>
+    {% endif %}
+
+    {# ---- Allergies ---- #}
+    {% set allergies = encounter.allergy_intolerances.filter(exclude_clinical_status="inactive", exclude_verification_status="entered_in_error") | list %}
+    {% if allergies %}
+    {% call grid("Allergies", ["Allergy", "Type", "Category", "Criticality", "Status", "Verification", "Note"]) %}
+        {% for a in allergies %}
+        <tr>
+            <td>{{ a.name }}</td>
+            <td>{{ a.allergy_intolerance_type or "-" }}</td>
+            <td>{{ a.category or "-" }}</td>
+            <td>{{ a.criticality or "-" }}</td>
+            <td>{{ a.clinical_status }}</td>
+            <td>{{ a.verification_status }}</td>
+            <td>{{ a.note or "-" }}</td>
+        </tr>
+        {% endfor %}
+    {% endcall %}
+    {% endif %}
+
+    {# ---- Diagnoses ---- #}
+    {% set diagnoses = encounter.diagnoses.filter(exclude_clinical_status="inactive", exclude_verification_status="entered_in_error") | list %}
+    {% if diagnoses %}
+    {% call grid("Diagnoses", ["Diagnosis", "Severity", "Status", "Verification", "Onset", "Note"]) %}
+        {% for dx in diagnoses %}
+        <tr>
+            <td>{{ dx.name }}</td>
+            <td>{{ dx.severity or "-" }}</td>
+            <td>{{ dx.clinical_status }}</td>
+            <td>{{ dx.verification_status }}</td>
+            <td>{{ dx.onset | date or "-" }}</td>
+            <td>{{ dx.note or "-" }}</td>
+        </tr>
+        {% endfor %}
+    {% endcall %}
+    {% endif %}
+
+    {# ---- Medications (3-level nesting) ---- #}
+    {% set prescriptions = encounter.medication_prescriptions | list %}
+    {% if prescriptions %}
+    {% call grid("Medications", ["Medicine", "Dosage", "Frequency", "Duration", "Route"]) %}
+        {% for mp in prescriptions %}
+        {% for medication in mp.medications.filter(status="active") %}
+        {% for di in medication.dosage_instructions %}
+        <tr>
+            <td>{{ medication.name }}</td>
+            <td>{{ di.dosage }}</td>
+            <td>{{ di.frequency }}</td>
+            <td>{{ di.duration }}</td>
+            <td>{{ di.route or "-" }}</td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+        {% endfor %}
+    {% endcall %}
+    {% endif %}
+
+    {# ---- Diagnostic Reports with Observations & Components ---- #}
+    {% set reports = encounter.diagnostic_reports.filter(status="final") | list %}
+    {% if reports %}
+    {% call grid("Diagnostic Reports", ["Date", "Title", "Result", "Range", "Interpretation"]) %}
+        {% for dr in reports %}
+        <tr class="group-row"><td colspan="5">{{ dr.service_request.title or dr.title }}</td></tr>
+        {% for obs in dr.observations %}
+        {{ obs_row(obs, obs.effective_datetime | date) }}
+        {% for comp in obs.component %}{{ obs_row(comp, component=true) }}{% endfor %}
+        {% endfor %}
+        {% if dr.note %}<tr><td colspan="5"><strong>Note:</strong> {{ dr.note }}</td></tr>{% endif %}
+        {% if dr.conclusion %}<tr><td colspan="5"><strong>Conclusion:</strong> {{ dr.conclusion }}</td></tr>{% endif %}
+        {% endfor %}
+    {% endcall %}
+    {% endif %}
+
+    {# ---- Discharge Advice (questionnaire responses grouped by author) ---- #}
+    {% set advice_responses = encounter.questionnaire_responses.filter(slug=discharge_advice_slug) | list %}
+    {% if advice_responses %}
+    <div class="section-header">Doctor's Advice</div>
+    <div class="boxed">
+        {% for doctor, responses in advice_responses | groupby('updated_by.full_name') %}
+        <strong>{{ doctor }}</strong>
+        <ul>
+            {% for qr in responses %}
+            {% for resp in qr.responses if resp.question.get('text') == "Discharge Advice" %}
+            {% for v in resp.answer.get('values', []) %}<li>{{ v.get('value') }}</li>{% endfor %}
+            {% endfor %}
+            {% endfor %}
+        </ul>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {# ---- Signature Block (first care-team member) ---- #}
+    {% set lead = encounter.care_team | first | default(none) %}
+    {% if lead %}
+    <div class="signature">
+        <div><strong>{{ lead.user.full_name }}</strong></div>
+        <div>{{ lead.role }}</div>
+    </div>
+    {% endif %}
+
+    <div class="note-text">Note: Content of the {{ report_title }} will not be changed for any reason once the patient is discharged from the hospital. Please bring this report when you come for checkup. This {{ report_title }} is not a legal document or certificate.</div>
+    <div class="footer">This is a computer-generated {{ report_title }}. Encounter recorded by {{ encounter.created_by.full_name or "-" }}.</div>
 </body>
 </html>
